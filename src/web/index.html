@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#0f172a">
+  <title>Polpo — Claude Code Controller</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐙</text></svg>">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header id="app-header">
+    <div class="header-left">
+      <span class="logo">🐙</span>
+      <h1>Polpo</h1>
+    </div>
+    <div class="header-right">
+      <span id="connection-status" class="status-dot disconnected" title="Disconnected"></span>
+      <span id="instance-count">0 instances</span>
+    </div>
+  </header>
+
+  <!-- Instance List View -->
+  <main id="view-list">
+    <div id="empty-state" class="empty-state">
+      <div class="empty-icon">🐙</div>
+      <h2>No instances connected</h2>
+      <p>Start a Claude Code instance with a Polpo agent to see it here.</p>
+      <pre class="code-hint">polpo agent --name "My Task"</pre>
+    </div>
+    <div id="instance-list" class="instance-list"></div>
+  </main>
+
+  <!-- Instance Detail View -->
+  <main id="view-detail" class="hidden">
+    <div class="detail-header">
+      <button id="btn-back" class="btn-icon" aria-label="Back">&#8592;</button>
+      <div class="detail-title">
+        <h2 id="detail-name">Instance</h2>
+        <span id="detail-status" class="badge">idle</span>
+      </div>
+      <div class="detail-actions">
+        <button id="btn-abort" class="btn-icon btn-danger" title="Abort">&#10005;</button>
+      </div>
+    </div>
+    <div class="detail-meta">
+      <span id="detail-project"></span>
+      <span id="detail-type"></span>
+    </div>
+
+    <!-- Approval Banner -->
+    <div id="approval-banner" class="approval-banner hidden">
+      <div class="approval-info">
+        <strong>Approval Required</strong>
+        <p id="approval-description"></p>
+        <code id="approval-command"></code>
+      </div>
+      <div class="approval-buttons">
+        <button id="btn-approve" class="btn btn-approve">Approve</button>
+        <button id="btn-reject" class="btn btn-reject">Reject</button>
+      </div>
+    </div>
+
+    <!-- Conversation -->
+    <div id="conversation" class="conversation"></div>
+
+    <!-- Input Area -->
+    <div class="input-area">
+      <textarea id="prompt-input" placeholder="Send a prompt..." rows="1"></textarea>
+      <button id="btn-send" class="btn btn-send" disabled>&#9654;</button>
+    </div>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

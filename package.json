@@ -1,0 +1,25 @@
+{
+  "name": "polpo",
+  "version": "1.0.0",
+  "description": "Control multiple Claude Code instances from your mobile device. Like an octopus managing its tentacles.",
+  "main": "src/server/index.js",
+  "bin": {
+    "polpo": "./bin/polpo.js"
+  },
+  "scripts": {
+    "start": "node bin/polpo.js server",
+    "dev": "node bin/polpo.js server --verbose"
+  },
+  "keywords": [
+    "claude-code",
+    "remote-control",
+    "mobile",
+    "developer-tools"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "ws": "^8.16.0",
+    "uuid": "^9.0.0"
+  }
+}
