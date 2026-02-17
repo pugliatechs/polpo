@@ -62,6 +62,9 @@ function createServer(options = {}) {
     },
     stop() {
       return new Promise((resolve) => {
+        for (const client of wss.clients) {
+          client.terminate();
+        }
         wss.close();
         server.close(resolve);
       });

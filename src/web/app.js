@@ -8,6 +8,7 @@
   // ---- State ----
   let ws = null;
   let instances = new Map();
+  let pastSessions = [];
   let activeInstanceId = null;
   let reconnectDelay = 1000;
 
@@ -32,6 +33,9 @@
   const $btnAbort = document.getElementById('btn-abort');
   const $btnApprove = document.getElementById('btn-approve');
   const $btnReject = document.getElementById('btn-reject');
+  const $sessionsSection = document.getElementById('sessions-section');
+  const $sessionsList = document.getElementById('sessions-list');
+  const $btnRefreshSessions = document.getElementById('btn-refresh-sessions');
 
   // ---- WebSocket ----
   function connect() {
@@ -138,8 +142,15 @@
 
     $instanceCount.textContent = arr.length + ' instance' + (arr.length !== 1 ? 's' : '');
 
+    // Re-render past sessions (to remove any that are now active)
+    renderSessions();
+
     if (arr.length === 0) {
-      $emptyState.classList.remove('hidden');
+      if (pastSessions.length === 0) {
+        $emptyState.classList.remove('hidden');
+      } else {
+        $emptyState.classList.add('hidden');
+      }
       $instanceList.innerHTML = '';
       return;
     }
@@ -262,13 +273,85 @@
   }
 
   function formatMessage(m) {
+    var contentType = m.contentType || 'text';
+    var time = m.timestamp ? formatTime(m.timestamp) : '';
+    var timeHtml = time ? '<div class="msg-time">' + time + '</div>' : '';
+
+    // Tool use: show as a compact card
+    if (contentType === 'tool_use') {
+      try {
+        var tool = JSON.parse(m.content);
+        var inputSummary = '';
+        if (tool.name === 'Bash' || tool.name === 'bash') {
+          inputSummary = tool.input && tool.input.command
+            ? escapeHtml(tool.input.command)
+            : '';
+        } else if (tool.name === 'Read') {
+          inputSummary = escapeHtml(tool.input && tool.input.file_path || '');
+        } else if (tool.name === 'Edit' || tool.name === 'Write') {
+          inputSummary = escapeHtml(tool.input && tool.input.file_path || '');
+        } else if (tool.name === 'Grep') {
+          inputSummary = escapeHtml(tool.input && tool.input.pattern || '');
+        } else if (tool.name === 'Glob') {
+          inputSummary = escapeHtml(tool.input && tool.input.pattern || '');
+        } else {
+          inputSummary = escapeHtml(JSON.stringify(tool.input || {}).slice(0, 120));
+        }
+        return (
+          '<div class="msg msg-tool-use">' +
+            '<div class="tool-name">' + escapeHtml(tool.name) + '</div>' +
+            (inputSummary ? '<div class="tool-input">' + inputSummary + '</div>' : '') +
+            timeHtml +
+          '</div>'
+        );
+      } catch (e) {}
+    }
+
+    // Tool result: show as compact output
+    if (contentType === 'tool_result') {
+      var cls = 'msg msg-tool-result' + (m.isError ? ' tool-error' : '');
+      var content = m.content || '';
+      if (content.length > 500) {
+        content = content.slice(0, 500) + '\n...';
+      }
+      return (
+        '<div class="' + cls + '">' +
+          '<pre>' + escapeHtml(content) + '</pre>' +
+          timeHtml +
+        '</div>'
+      );
+    }
+
+    // Turn complete: show cost/turns as system message
+    if (contentType === 'turn_complete') {
+      try {
+        var info = JSON.parse(m.content);
+        var costStr = info.cost_usd ? '$' + info.cost_usd.toFixed(4) : '';
+        return (
+          '<div class="msg msg-system msg-turn-complete">' +
+            (costStr ? costStr + ' · ' : '') +
+            (info.num_turns || '') + ' turns' +
+            timeHtml +
+          '</div>'
+        );
+      } catch (e) {}
+    }
+
+    // JSON system init: skip rendering
+    if (contentType === 'json' && m.role === 'system') {
+      return '';
+    }
+
+    // Default: text message
     var cls = 'msg msg-' + (m.role || 'system');
     if (m.source === 'mobile') cls += ' from-mobile';
-    var time = m.timestamp ? formatTime(m.timestamp) : '';
+    var rendered = m.role === 'assistant'
+      ? renderMarkdown(m.content || '')
+      : escapeHtml(m.content || '');
     return (
       '<div class="' + cls + '">' +
-        escapeHtml(m.content || '') +
-        (time ? '<div class="msg-time">' + time + '</div>' : '') +
+        rendered +
+        timeHtml +
       '</div>'
     );
   }
@@ -332,6 +415,29 @@
     return div.innerHTML;
   }
 
+  function renderMarkdown(str) {
+    var escaped = escapeHtml(str);
+
+    // Code blocks: ```lang\n...\n``` → <pre><code>...</code></pre>
+    escaped = escaped.replace(/```(\w*)\n([\s\S]*?)```/g, function (match, lang, code) {
+      return '<pre class="code-block"><code>' + code.replace(/\n$/, '') + '</code></pre>';
+    });
+
+    // Inline code: `...` → <code>...</code>
+    escaped = escaped.replace(/`([^`\n]+)`/g, '<code class="code-inline">$1</code>');
+
+    // Bold: **...** → <strong>...</strong>
+    escaped = escaped.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+
+    // Numbered lists: lines starting with "1. " etc
+    escaped = escaped.replace(/^(\d+)\.\s+(.*)$/gm, '<span class="list-item"><span class="list-num">$1.</span> $2</span>');
+
+    // Arrow → (just render nicely)
+    escaped = escaped.replace(/→/g, '<span class="arrow">→</span>');
+
+    return escaped;
+  }
+
   function formatTime(ts) {
     var d = new Date(ts);
     var h = d.getHours().toString().padStart(2, '0');
@@ -339,6 +445,148 @@
     return h + ':' + m;
   }
 
+  // ---- Past Sessions ----
+  function loadSessions() {
+    fetch('/api/sessions?days=7&limit=30')
+      .then(function (r) { return r.json(); })
+      .then(function (sessions) {
+        pastSessions = sessions;
+        renderSessions();
+        // Hide empty state if we have sessions to show
+        if (pastSessions.length > 0 && instances.size === 0) {
+          $emptyState.classList.add('hidden');
+        }
+      })
+      .catch(function () {});
+  }
+
+  function renderSessions() {
+    // Filter out sessions that are already active as instances
+    var activeSessionIds = new Set();
+    instances.forEach(function (inst) {
+      if (inst.sessionId) activeSessionIds.add(inst.sessionId);
+    });
+
+    var filtered = pastSessions.filter(function (s) {
+      return !activeSessionIds.has(s.sessionId);
+    });
+
+    if (filtered.length === 0) {
+      $sessionsSection.classList.add('hidden');
+      return;
+    }
+
+    $sessionsSection.classList.remove('hidden');
+
+    $sessionsList.innerHTML = filtered.map(function (s) {
+      var ago = timeAgo(s.lastActivity);
+      var title = s.firstPrompt
+        ? (s.firstPrompt.length > 60 ? s.firstPrompt.slice(0, 60) + '...' : s.firstPrompt)
+        : s.slug || s.project;
+      return (
+        '<div class="instance-card session-card" data-session-id="' + s.sessionId + '" data-cwd="' + escapeHtml(s.cwd) + '" data-project="' + escapeHtml(s.project) + '">' +
+          '<div class="card-top">' +
+            '<span class="card-name">' + escapeHtml(title) + '</span>' +
+            '<span class="badge badge-session">' + ago + '</span>' +
+          '</div>' +
+          '<div class="card-meta">' +
+            '<span>' + escapeHtml(s.project) + '</span>' +
+          '</div>' +
+        '</div>'
+      );
+    }).join('');
+
+    var cards = $sessionsList.querySelectorAll('.session-card');
+    for (var i = 0; i < cards.length; i++) {
+      cards[i].addEventListener('click', onSessionCardClick);
+    }
+  }
+
+  function onSessionCardClick(e) {
+    var card = e.currentTarget;
+    var sessionId = card.getAttribute('data-session-id');
+    var cwd = card.getAttribute('data-cwd');
+    var project = card.getAttribute('data-project');
+    resumeSession(sessionId, cwd, project);
+  }
+
+  function resumeSession(sessionId, cwd, project) {
+    // Show loading state on the card
+    var card = $sessionsList.querySelector('[data-session-id="' + sessionId + '"]');
+    if (card) {
+      card.classList.add('resuming');
+      card.innerHTML = '<div class="card-top"><span class="card-name">' + escapeHtml(project) + '</span><span class="badge badge-busy">loading...</span></div>';
+    }
+
+    // Fetch history and resume in parallel
+    var historyPromise = fetch('/api/sessions/' + sessionId + '/history')
+      .then(function (r) { return r.json(); })
+      .catch(function () { return []; });
+
+    var resumePromise = fetch('/api/sessions/' + sessionId + '/resume', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: project, cwd: cwd }),
+    })
+    .then(function (r) { return r.json(); })
+    .catch(function () { return {}; });
+
+    Promise.all([historyPromise, resumePromise])
+    .then(function (results) {
+      var history = results[0];
+      var resumeResult = results[1];
+
+      if (resumeResult.instanceId) {
+        // Wait for the instance to appear, then inject history and open
+        var tryOpen = function (attempts) {
+          if (instances.has(resumeResult.instanceId)) {
+            var inst = instances.get(resumeResult.instanceId);
+            // Prepend history before any new messages
+            if (history.length > 0) {
+              inst.conversation = history.concat(inst.conversation || []);
+            }
+            openDetail(resumeResult.instanceId);
+          } else if (attempts > 0) {
+            setTimeout(function () { tryOpen(attempts - 1); }, 500);
+          }
+        };
+        tryOpen(6);
+      } else if (resumeResult.error) {
+        if (card) {
+          card.classList.remove('resuming');
+          card.innerHTML = '<div class="card-top"><span class="card-name">' + escapeHtml(project) + '</span><span class="badge badge-disconnected">error</span></div>';
+        }
+      }
+    });
+  }
+
+  function timeAgo(ts) {
+    if (!ts) return '';
+    var diff = Date.now() - new Date(ts).getTime();
+    var mins = Math.floor(diff / 60000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return mins + 'm ago';
+    var hours = Math.floor(mins / 60);
+    if (hours < 24) return hours + 'h ago';
+    var days = Math.floor(hours / 24);
+    return days + 'd ago';
+  }
+
+  $btnRefreshSessions.addEventListener('click', loadSessions);
+
+  // ---- Virtual Keyboard / Viewport ----
+  // On mobile, the virtual keyboard resizes the visual viewport.
+  // Adjust the body height so flex layout stays correct.
+  if (window.visualViewport) {
+    var onViewportResize = function () {
+      document.body.style.height = window.visualViewport.height + 'px';
+      if (activeInstanceId) scrollToBottom();
+    };
+    window.visualViewport.addEventListener('resize', onViewportResize);
+    window.visualViewport.addEventListener('scroll', onViewportResize);
+  }
+
   // ---- Init ----
   connect();
+  loadSessions();
 })();

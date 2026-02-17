@@ -31,7 +31,10 @@ function printHelp() {
 
   COMMANDS
     server      Start the Polpo hub server
-    agent       Start an agent that connects a Claude Code instance to the hub
+    session     Start a Claude Code session controllable from your phone
+    agent       Start a lightweight stdin/stdout agent (legacy)
+    bridge      Start a hook bridge daemon for Claude Code integration
+    hooks       Print Claude Code hook configuration JSON
     help        Show this help message
 
   SERVER OPTIONS
@@ -45,6 +48,21 @@ function printHelp() {
     --project <name>    Project name (default: current directory name)
     --server <url>      Polpo server WebSocket URL (default: ws://127.0.0.1:7890)
 
+  SESSION OPTIONS
+    --name <name>       Display name for this session
+    --cwd <dir>         Project directory to work in (default: current)
+    --resume <id>       Resume an existing Claude Code session
+    --model <model>     Model to use (e.g. opus, sonnet)
+    --permissions <m>   Permission mode: default | bypass (default: default)
+    --server <url>      Polpo server WebSocket URL (default: ws://127.0.0.1:7890)
+
+  BRIDGE OPTIONS
+    --name <name>       Display name for this instance
+    --type <type>       Instance type: terminal | vscode (default: vscode)
+    --project <name>    Project name (default: current directory name)
+    --server <url>      Polpo server WebSocket URL (default: ws://127.0.0.1:7890)
+    --cwd <dir>         Working directory (default: current directory)
+
   EXAMPLES
     # Start the hub server
     polpo server
@@ -57,6 +75,18 @@ function printHelp() {
 
     # Register a VS Code instance
     polpo agent --name "Frontend UI" --type vscode
+
+    # Start a phone-controllable Claude Code session
+    polpo session --cwd /path/to/project --name "Backend work"
+
+    # Resume an existing session from your phone
+    polpo session --resume <session-id>
+
+    # Start a hook bridge (usually auto-started by hooks)
+    polpo bridge --name "My Project"
+
+    # Print Claude Code hook config to add to settings.json
+    polpo hooks
 
   MOBILE ACCESS
     Once the server is running, open http://<your-computer-ip>:7890
@@ -115,10 +145,75 @@ async function runAgent() {
   });
 }
 
+async function runSession() {
+  const { runWrapped } = require('../src/agent/wrapped');
+  await runWrapped({
+    name: flags.name,
+    cwd: flags.cwd || process.cwd(),
+    resumeSessionId: flags.resume || undefined,
+    model: flags.model || undefined,
+    permissionMode: flags.permissions || 'default',
+    serverUrl: flags.server || undefined,
+  });
+}
+
+function runBridge() {
+  const { spawn } = require('child_process');
+  const bridgePath = require('path').join(__dirname, '..', 'src', 'hooks', 'bridge.js');
+  const child = spawn('node', [bridgePath, ...args.slice(1)], {
+    stdio: 'inherit',
+    env: process.env,
+  });
+  child.on('exit', (code) => process.exit(code || 0));
+  process.on('SIGINT', () => child.kill('SIGINT'));
+  process.on('SIGTERM', () => child.kill('SIGTERM'));
+}
+
+function printHooks() {
+  const path = require('path');
+  const polpoDir = path.resolve(__dirname, '..');
+  const hooksDir = path.join(polpoDir, 'src', 'hooks');
+
+  const config = {
+    hooks: {
+      PreToolUse: [
+        {
+          matcher: '',
+          command: `node ${path.join(hooksDir, 'pre-tool-use.js')}`,
+        },
+      ],
+      PostToolUse: [
+        {
+          matcher: '',
+          command: `node ${path.join(hooksDir, 'post-tool-use.js')}`,
+        },
+      ],
+      Notification: [
+        {
+          matcher: '',
+          command: `node ${path.join(hooksDir, 'notification.js')}`,
+        },
+      ],
+    },
+  };
+
+  console.log('\n  Add this to your Claude Code settings.json (~/.claude/settings.json):\n');
+  console.log(JSON.stringify(config, null, 2));
+  console.log('\n  Or for phone-based approval mode, set POLPO_APPROVE=1 in the PreToolUse command:');
+  console.log(`  "command": "POLPO_APPROVE=1 node ${path.join(hooksDir, 'pre-tool-use.js')}"\n`);
+}
+
 switch (command) {
   case 'server':
     runServer().catch((err) => {
       console.error('Failed to start server:', err.message);
+      process.exit(1);
+    });
+    break;
+
+  case 'session':
+    runSession().catch((err) => {
+      console.error('Failed to start session:', err.message);
       process.exit(1);
     });
     break;
@@ -128,6 +223,14 @@ switch (command) {
       console.error('Failed to start agent:', err.message);
       process.exit(1);
     });
+    break;
+
+  case 'bridge':
+    runBridge();
+    break;
+
+  case 'hooks':
+    printHooks();
     break;
 
   case 'help':

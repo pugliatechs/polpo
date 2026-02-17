@@ -1,95 +1,149 @@
 # 🐙 Polpo
 
-**Control multiple Claude Code instances from your phone.**
+**Work on Claude Code from your phone.**
 
-Polpo is a lightweight hub that lets developers monitor and control their Claude Code instances — running in VS Code or terminal — from any mobile device on the same network.
+Polpo lets developers send prompts, see responses, and control Claude Code sessions from any mobile device over VPN, Wi-Fi, or LAN.
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────┐
-│                Your Computer                 │
-│                                              │
-│  ┌─────────────┐   ┌─────────────┐          │
-│  │ Claude Code  │   │ Claude Code  │   ...   │
-│  │ + polpo      │   │ + polpo      │         │
-│  │   agent      │   │   agent      │         │
-│  └──────┬───────┘   └──────┬───────┘         │
-│         │   WebSocket      │                 │
-│         └────────┬─────────┘                 │
-│                  │                           │
-│          ┌───────▼────────┐                  │
-│          │  Polpo Server  │ :7890            │
-│          │  (Hub)         │                  │
-│          └───────┬────────┘                  │
-│                  │                           │
-└──────────────────┼───────────────────────────┘
-                   │ Wi-Fi / LAN
-          ┌────────▼─────────┐
-          │   📱 Phone       │
-          │   Browser UI     │
-          └──────────────────┘
+                    📱 Phone (VPN / LAN)
+                       │
+              ┌────────▼─────────┐
+              │  Polpo Hub       │ :7890
+              │  (Express + WS)  │
+              └──┬───────────┬───┘
+                 │           │
+    ┌────────────▼──┐   ┌────▼───────────┐
+    │ Session Agent │   │ Hook Bridge    │
+    │ (wrapped)     │   │ (monitoring)   │
+    └────────┬──────┘   └───┬────────────┘
+             │              │
+    ┌────────▼──────┐   ┌───▼────────────┐
+    │ claude CLI    │   │ Claude Code    │
+    │ (stream-json) │   │ (VS Code)      │
+    └───────────────┘   └────────────────┘
+       full control        read-only
 ```
+
+Two integration modes:
+
+- **Session**: spawns `claude` CLI with JSON streaming for full bidirectional control from phone
+- **Hooks**: taps into existing VS Code sessions via Claude Code hooks for read-only monitoring
 
 ## Quick Start
 
 ### 1. Install
 
 ```bash
-npm install
+cd polpo && npm install
 ```
 
-### 2. Start the Hub Server
+### 2. Start the Hub
 
 ```bash
-# Start with defaults (port 7890, all interfaces)
 node bin/polpo.js server
-
-# Or with options
-node bin/polpo.js server --port 8080 --verbose
 ```
 
-The server will print the URL to open on your phone.
-
-### 3. Register Claude Code Instances
-
-In each terminal or VS Code session where Claude Code is running, start an agent:
+### 3. Start a Session
 
 ```bash
-# Terminal instance
-node bin/polpo.js agent --name "Backend API" --type terminal
+# New session in a project directory
+node bin/polpo.js session --cwd /path/to/project --name "Backend API"
 
-# VS Code instance
-node bin/polpo.js agent --name "Frontend UI" --type vscode
-
-# Connecting to a remote server
-node bin/polpo.js agent --name "My Task" --server ws://192.168.1.100:7890
+# Resume an existing Claude Code session
+node bin/polpo.js session --resume <session-id>
 ```
 
 ### 4. Open on Your Phone
 
-Navigate to `http://<your-computer-ip>:7890` on your phone's browser. You'll see all connected instances with real-time status.
+Navigate to `http://<your-computer-ip>:7890` on your phone's browser.
+
+Type a prompt, see the response stream in real-time, watch tool calls execute, and abort if needed.
+
+## Use Case: Work from Anywhere
+
+1. Start the hub + a session on your workstation
+2. Leave your desk (keep the PC running)
+3. On your phone over VPN, open the Polpo dashboard
+4. Continue working: send prompts, see tool calls, review output
+
+The session process stays alive between prompts. If it exits, resume with `--resume <session-id>`.
 
 ## Features
 
-- **Instance Dashboard** — See all running Claude Code instances at a glance
-- **Real-time Status** — Live updates via WebSocket (idle, busy, waiting, paused)
-- **Remote Prompting** — Send prompts to any instance from your phone
-- **Approval Control** — Approve or reject tool/action requests remotely
-- **Abort/Pause** — Stop or pause any instance with a tap
-- **Conversation History** — View the conversation stream for each instance
-- **Mobile-First UI** — Dark theme, touch-optimized, PWA-ready
-- **Multi-Instance** — Manage unlimited concurrent instances
+| Feature | Description |
+|---------|-------------|
+| Full Remote Control | Send prompts and see responses from your phone |
+| Real-time Streaming | Tool calls, results, and text stream as they happen |
+| Instance Dashboard | See all sessions at a glance with live status |
+| Tool Call Cards | Bash commands, file edits, and searches rendered as mobile-native cards |
+| Abort | Stop any running task with a tap |
+| Session Resume | Pick up where you left off with `--resume` |
+| Multi-Instance | Run and monitor unlimited parallel sessions |
+| Cost Tracking | Per-turn API costs displayed inline |
+| Mobile-First UI | Dark OLED theme, touch-optimized, safe-area support |
+| VS Code Monitoring | Passively watch existing VS Code sessions via hooks |
+
+## Remote Sessions (Full Control)
+
+The `session` command spawns a `claude` CLI process with JSON streaming and gives your phone full bidirectional control.
+
+```bash
+node bin/polpo.js session --cwd /path/to/project --name "My Task"
+```
+
+How it works:
+
+1. Agent registers with the hub and connects via WebSocket
+2. Waits for a prompt from your phone
+3. Spawns `claude --input-format stream-json --output-format stream-json`
+4. Relays everything: prompts in, responses + tool calls + results out
+5. Process stays alive for multi-turn conversations
+
+Options:
+
+| Flag | Description |
+|------|-------------|
+| `--name <name>` | Display name for this session |
+| `--cwd <dir>` | Project directory (default: current) |
+| `--resume <id>` | Resume an existing Claude Code session |
+| `--model <model>` | Model to use (e.g. opus, sonnet) |
+| `--permissions <mode>` | Permission mode: `default` or `bypass` |
+| `--server <url>` | Hub WebSocket URL (default: `ws://127.0.0.1:7890`) |
+
+## VS Code Monitoring (Hooks)
+
+For passively monitoring existing VS Code Claude Code sessions, use the hooks integration.
+
+### Setup
+
+```bash
+# Print the hook config JSON
+node bin/polpo.js hooks
+```
+
+Add the output to `~/.claude/settings.json`. Instances appear on your phone automatically when Claude Code uses a tool.
+
+### Approval Mode
+
+By default hooks are read-only. To enable phone-based tool approval, set `POLPO_APPROVE=1`:
+
+```json
+{
+  "matcher": "",
+  "command": "POLPO_APPROVE=1 node /path/to/polpo/src/hooks/pre-tool-use.js"
+}
+```
 
 ## Mobile UI
 
-The web interface is designed for smartphones:
-
 - Dark theme optimized for OLED screens
-- Touch-friendly card layout with swipe gestures
-- Real-time WebSocket updates (no polling)
+- Tool calls rendered as cards (Bash commands, file paths, search patterns)
+- Tool results shown as collapsible code blocks
+- Per-turn cost displayed inline
+- Touch-friendly with safe-area support for notched phones
 - Auto-reconnect on network changes
-- Safe-area support for notched phones
 
 ## API
 
@@ -111,50 +165,18 @@ The web interface is designed for smartphones:
 
 Connect to `ws://<host>:<port>?role=dashboard` for real-time updates.
 
-Connect to `ws://<host>:<port>?role=agent&instanceId=<id>` as a Claude Code agent.
-
-## Programmatic Usage
-
-### Using the Agent in Your Own Scripts
-
-```javascript
-const { PolpoAgent } = require('./src/agent');
-
-const agent = new PolpoAgent({
-  name: 'My Custom Agent',
-  type: 'terminal',
-  project: 'my-project',
-  onPrompt: (text) => {
-    console.log('Received prompt from mobile:', text);
-    // Feed this into Claude Code
-  },
-  onApprove: () => {
-    console.log('Action approved from mobile');
-  },
-  onReject: () => {
-    console.log('Action rejected from mobile');
-  },
-});
-
-await agent.start();
-
-// Report status changes
-agent.sendStatus('busy');
-
-// Send output back to mobile
-agent.sendOutput('Working on your request...');
-
-// Request approval from mobile user
-agent.requestApproval('bash', 'Run deployment script', 'npm run deploy');
-```
+Connect to `ws://<host>:<port>?role=agent&instanceId=<id>` as an agent.
 
 ## Configuration
 
-| Environment Variable | Default | Description |
-|---------------------|---------|-------------|
+| Variable | Default | Description |
+|----------|---------|-------------|
 | `POLPO_PORT` | `7890` | Server port |
 | `POLPO_HOST` | `0.0.0.0` | Server bind address |
-| `POLPO_SERVER` | `ws://127.0.0.1:7890` | Agent: hub server URL |
+| `POLPO_SERVER` | `ws://127.0.0.1:7890` | Hub URL (used by session, agent, bridge) |
+| `POLPO_NAME` | auto from directory | Display name for the instance |
+| `POLPO_APPROVE` | `0` | Set to `1` for phone approval (hooks only) |
+| `POLPO_TIMEOUT` | `300000` | Approval timeout in ms (default 5 min) |
 
 ## License
 

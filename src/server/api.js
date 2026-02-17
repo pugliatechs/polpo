@@ -1,7 +1,69 @@
 const express = require('express');
+const { scanSessions, loadHistory } = require('./sessions');
+const { WrappedAgent } = require('../agent/wrapped');
 
 function createApiRouter(instanceManager) {
   const router = express.Router();
+
+  // Track spawned wrapped agents so we can clean them up
+  const wrappedAgents = new Map();
+
+  // List discovered Claude Code sessions
+  router.get('/sessions', async (req, res) => {
+    try {
+      const maxDays = parseInt(req.query.days) || 7;
+      const limit = parseInt(req.query.limit) || 50;
+      const sessions = await scanSessions({
+        maxAge: maxDays * 24 * 60 * 60 * 1000,
+        limit,
+      });
+      res.json(sessions);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Get conversation history for a session from the JSONL file
+  router.get('/sessions/:sessionId/history', async (req, res) => {
+    try {
+      const history = await loadHistory(req.params.sessionId);
+      res.json(history);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Resume a discovered session by spawning a WrappedAgent
+  router.post('/sessions/:sessionId/resume', async (req, res) => {
+    const { sessionId } = req.params;
+    const { name, cwd } = req.body;
+
+    // Don't spawn duplicates
+    if (wrappedAgents.has(sessionId)) {
+      const existing = wrappedAgents.get(sessionId);
+      return res.json({ instanceId: existing.instanceId, alreadyRunning: true });
+    }
+
+    try {
+      const agent = new WrappedAgent({
+        name: name || `Resumed (${sessionId.slice(0, 8)})`,
+        cwd: cwd || process.cwd(),
+        resumeSessionId: sessionId,
+        serverUrl: `ws://127.0.0.1:${req.socket.localPort}`,
+      });
+
+      await agent.start();
+      wrappedAgents.set(sessionId, agent);
+
+      // Clean up when agent disconnects
+      const cleanup = () => wrappedAgents.delete(sessionId);
+      if (agent.ws) agent.ws.on('close', cleanup);
+
+      res.json({ instanceId: agent.instanceId });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
 
   // List all instances
   router.get('/instances', (req, res) => {
