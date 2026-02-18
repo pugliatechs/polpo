@@ -1,6 +1,10 @@
-# Polpo
+<p align="center">
+  <img src="assets/logo.svg" alt="Polpo" width="180" height="180">
+</p>
 
-**Work on Claude Code from your phone.**
+<h1 align="center">Polpo</h1>
+
+<p align="center"><strong>Work on Claude Code from your phone.</strong></p>
 
 Polpo lets developers send prompts, see responses, and control Claude Code sessions from any mobile device over VPN, Wi-Fi, LAN, or a public tunnel.
 
