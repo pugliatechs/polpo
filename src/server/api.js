@@ -188,14 +188,20 @@ function createApiRouter(instanceManager) {
     if (!instanceId) return res.status(400).json({ error: 'instanceId required' });
 
     // Auto-approve: return immediately without involving the phone
+    // Plans and questions are always shown for review, even with auto-approve on
+    const isPlan = toolName === 'ExitPlanMode' || toolName === 'EnterPlanMode';
+    const isQuestion = toolName === 'AskUserQuestion';
     const inst = instanceManager.get(instanceId);
-    if (inst && inst.autoApprove) {
+    if (inst && inst.autoApprove && !isPlan && !isQuestion) {
       return res.json({ behavior: 'allow', updatedInput: toolInput });
     }
 
-    // Build description for the phone UI
+    // Build description and metadata for the phone UI
     let description = toolName || 'unknown';
     let command = '';
+    let approvalType = 'tool'; // 'tool' | 'plan' | 'question'
+    let planFile = null;
+    let questions = null;
     if (toolName === 'Bash' || toolName === 'bash') {
       command = (toolInput && toolInput.command) || '';
       description = command
@@ -211,10 +217,32 @@ function createApiRouter(instanceManager) {
       description = `Spawn agent: ${(toolInput && toolInput.description) || ''}`;
     } else if (toolName === 'NotebookEdit') {
       description = `Edit notebook: ${(toolInput && toolInput.notebook_path) || ''}`;
+    } else if (isPlan) {
+      approvalType = 'plan';
+      description = toolName === 'ExitPlanMode' ? 'Plan ready for review' : 'Entering plan mode';
+      // Read plan file content if available
+      if (toolInput && toolInput.planFile) {
+        planFile = toolInput.planFile;
+        try {
+          const fs = require('fs');
+          const planContent = fs.readFileSync(toolInput.planFile, 'utf8');
+          command = planContent;
+        } catch (e) {
+          command = '';
+        }
+      }
+    } else if (isQuestion) {
+      approvalType = 'question';
+      questions = (toolInput && toolInput.questions) || [];
+      description = questions.length === 1
+        ? questions[0].question
+        : `${questions.length} questions to answer`;
     }
 
     // Show approval banner on phone
-    instanceManager.setPendingApproval(instanceId, { tool: toolName, description, command });
+    instanceManager.setPendingApproval(instanceId, {
+      tool: toolName, description, command, approvalType, questions, planFile,
+    });
 
     // Cancel any previous pending decision for this instance
     const existing = pendingDecisions.get(instanceId);
@@ -280,6 +308,22 @@ function createApiRouter(instanceManager) {
     }
   });
 
+  // Answer questions (AskUserQuestion)
+  router.post('/instances/:id/answer', (req, res) => {
+    const id = req.params.id;
+    const pending = pendingDecisions.get(id);
+    if (!pending) return res.status(502).json({ error: 'No pending question' });
+
+    clearTimeout(pending.timeout);
+    pendingDecisions.delete(id);
+    instanceManager.clearPendingApproval(id);
+
+    // Merge answers into the tool input
+    const updatedInput = { ...pending.toolInput, answers: req.body.answers || {} };
+    pending.resolve({ behavior: 'allow', updatedInput });
+    res.json({ ok: true });
+  });
+
   // Toggle auto-approve for an instance
   router.post('/instances/:id/auto-approve', (req, res) => {
     const id = req.params.id;
@@ -290,13 +334,18 @@ function createApiRouter(instanceManager) {
     instanceManager.setAutoApprove(id, value);
 
     // If enabling and there's a pending decision, approve it now
+    // (but not plans or questions - those always need explicit review)
     if (value) {
       const pending = pendingDecisions.get(id);
       if (pending) {
-        clearTimeout(pending.timeout);
-        pendingDecisions.delete(id);
-        instanceManager.clearPendingApproval(id);
-        pending.resolve({ behavior: 'allow', updatedInput: pending.toolInput });
+        const approval = inst.pendingApproval;
+        const isProtected = approval && (approval.approvalType === 'plan' || approval.approvalType === 'question');
+        if (!isProtected) {
+          clearTimeout(pending.timeout);
+          pendingDecisions.delete(id);
+          instanceManager.clearPendingApproval(id);
+          pending.resolve({ behavior: 'allow', updatedInput: pending.toolInput });
+        }
       }
     }
 

@@ -1,4 +1,4 @@
-<h1 align="center">🐙 Polpo</h1>
+<h1 align="center">Polpo</h1>
 
 <p align="center">
   <img src="assets/logo.png" alt="Polpo" width="240" height="240">
@@ -8,47 +8,19 @@
 
 Polpo lets developers send prompts, see responses, and control Claude Code sessions from any mobile device over VPN, Wi-Fi, LAN, or a public tunnel.
 
+## Why
+
+Claude Code sessions can run for minutes while reading files, writing code, and running tests. During that time, developers are tethered to their terminal waiting to approve tool calls, review output, or send the next prompt.
+
+Polpo frees you from the keyboard. Grab a coffee, kick off a refactor while waiting for a train, or review tool calls from an airport lounge - your phone becomes a full remote control for Claude Code. You see every tool call as it happens, approve or reject actions with a tap, send follow-up prompts, and abort tasks when something goes wrong. All in real time, from any network.
+
 ## Architecture
-
-```mermaid
-graph TD
-    Phone["Phone (any network)"]
-    Tunnel["Tunnel (optional)
-    cloudflared / localtunnel / ngrok / SSH"]
-    Hub["Polpo Hub :7890
-    Express + WebSocket"]
-    Session["Session Agent
-    (wrapped)"]
-    Hooks["Hook Bridge
-    (monitoring)"]
-    Browser["Session Browser"]
-    Claude["claude CLI
-    (stream-json)"]
-    VSCode["Claude Code
-    (VS Code / terminal)"]
-    MCP["MCP Permission
-    Server"]
-    JSONL["~/.claude/projects/
-    JSONL files"]
-
-    Phone -->|"cellular / internet"| Tunnel
-    Phone -->|"VPN / LAN"| Hub
-    Tunnel --> Hub
-    Hub --> Session
-    Hub --> Hooks
-    Hub --> Browser
-    Session --> Claude
-    Hooks -->|"read-only"| VSCode
-    Claude --> MCP
-    MCP -->|"phone approval"| Hub
-    Browser -->|"reads"| JSONL
-```
 
 Three integration modes:
 
-- **Session** — spawns `claude` CLI with JSON streaming for full bidirectional control from phone, including MCP-based tool approval
-- **Hooks** — taps into existing VS Code/terminal sessions via Claude Code hooks for read-only monitoring (with optional approval)
-- **Session Browser** — discovers and displays past Claude Code sessions from JSONL files, with the ability to resume them
+- **Session** - spawns `claude` CLI with JSON streaming for full bidirectional control from phone, including MCP-based tool approval
+- **Hooks** - taps into existing VS Code/terminal sessions via Claude Code hooks for read-only monitoring (with optional approval)
+- **Session Browser** - discovers and displays past Claude Code sessions from JSONL files, with the ability to resume them
 
 ## Requirements
 
@@ -58,7 +30,7 @@ Three integration modes:
 
 ### macOS Notes
 
-Polpo works natively on macOS — no extra setup needed. For tunnel providers:
+Polpo works natively on macOS - no extra setup needed. For tunnel providers:
 
 ```bash
 # cloudflared (recommended)
@@ -105,8 +77,10 @@ The dashboard shows active sessions, past session history, and lets you send pro
 | Full Remote Control | Send prompts and see responses from your phone |
 | Real-time Streaming | Tool calls, results, and text stream as they happen |
 | Phone-based Approval | Approve or reject tool use from your phone (MCP for sessions, hooks for VS Code) |
-| Auto-approve | Tap "Approve All" to auto-approve all tool use for the rest of the session |
-| File Attachments | Send any file from your phone — images, PDFs, code, documents, etc. |
+| Plan Review | Review proposed plans with full markdown rendering before approving |
+| Question Answers | Answer multi-choice questions from your phone when Claude asks |
+| Auto-approve | Tap "Approve All" to auto-approve tool calls (plans and questions always require review) |
+| File Attachments | Send any file from your phone - images, PDFs, code, documents, etc. |
 | Session Browser | Browse past Claude Code sessions with conversation history |
 | Session Resume | Resume any past session directly from the phone dashboard |
 | Instance Dashboard | See all active sessions at a glance with live status |
@@ -118,9 +92,56 @@ The dashboard shows active sessions, past session history, and lets you send pro
 | Tunnel Access | Expose the hub over the internet with `--tunnel` (cloudflared, localtunnel, ngrok, SSH) |
 | VS Code Monitoring | Passively watch existing VS Code sessions via hooks |
 
+## Security
+
+When exposing Polpo over a tunnel or untrusted network, authentication prevents unauthorized access. Auth is **auto-enabled** for tunnels and can be manually enabled for any deployment.
+
+### Auth Modes
+
+| Mode | Flag | Token | MFA | Use Case |
+|------|------|-------|-----|----------|
+| **token** | `--auth token` | Single-use URL token | No | Quick tunnel access (default for `--tunnel`) |
+| **pin** | `--auth pin` | URL token + 4-digit PIN | Yes | Shared networks, added protection |
+| **paranoid** | `--auth paranoid` | URL token + TOTP (6-digit) | Yes | Long-lived tunnels, highest security |
+
+### How It Works
+
+- **Token**: A `crypto.randomBytes(32)` base64url token is baked into the QR code URL. It is single-use - after the first scan, it is burned and cannot be reused.
+- **PIN**: A 4-digit PIN is displayed in the terminal. After scanning the QR code, the phone must enter the PIN. After 3 failed attempts, a new PIN is generated.
+- **TOTP**: Uses RFC 6238 TOTP with a persistent secret stored in `~/.config/polpo/totp.json`. On first run, the secret and `otpauth://` URI are displayed. Add it to any authenticator app.
+- **Sessions**: After authentication, a session cookie (`polpo_session`, HttpOnly, SameSite) is set. Subsequent requests use the cookie.
+- **Agents**: Agents and hooks use the raw token via `Authorization: Bearer <token>` header - the token is not burned for agent connections.
+
+### Usage
+
+```bash
+# Tunnel with default auth (token-only, auto-generated)
+polpo server --tunnel
+
+# Tunnel with PIN
+polpo server --tunnel --auth pin
+
+# Tunnel with TOTP
+polpo server --tunnel --auth paranoid
+
+# LAN with manual auth
+polpo server --auth token
+
+# Agents pass the token
+polpo session --server ws://host:7890 --token <token>
+```
+
+The token is printed in the terminal output for connecting agents and bridges.
+
+### Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `POLPO_TOKEN` | Auth token for agents/bridges (alternative to `--token` flag) |
+
 ## Tunnel Access (No VPN Required)
 
-Add `--tunnel` to expose the hub over the internet. A public URL and QR code are printed for your phone to scan — no VPN or same-network requirement.
+Add `--tunnel` to expose the hub over the internet. A public URL and QR code are printed for your phone to scan - no VPN or same-network requirement.
 
 ```bash
 # Auto-detect best available provider
@@ -134,26 +155,6 @@ node bin/polpo.js server --tunnel ngrok
 # SSH reverse tunnel to your own server
 node bin/polpo.js server --tunnel ssh --tunnel-host user@myserver.com
 node bin/polpo.js server --tunnel ssh --tunnel-host user@myserver.com --tunnel-port 8080
-```
-
-### Tunnel Flow
-
-```mermaid
-sequenceDiagram
-    participant Dev as Developer
-    participant Polpo as Polpo Server
-    participant Tunnel as Tunnel Provider
-    participant Phone as Phone Browser
-
-    Dev->>Polpo: polpo server --tunnel
-    Polpo->>Polpo: Start Express + WS on :7890
-    Polpo->>Tunnel: Start tunnel (auto-detect or explicit)
-    Tunnel-->>Polpo: Public URL
-    Polpo->>Dev: Print QR code + URL
-    Dev->>Phone: Scan QR code
-    Phone->>Tunnel: HTTPS request
-    Tunnel->>Polpo: Forward to localhost:7890
-    Polpo-->>Phone: Dashboard + WebSocket
 ```
 
 ### Provider Comparison
@@ -177,42 +178,17 @@ The `session` command spawns a `claude` CLI process with JSON streaming and give
 node bin/polpo.js session --cwd /path/to/project --name "My Task"
 ```
 
-### Session Flow
-
-```mermaid
-sequenceDiagram
-    participant Phone
-    participant Hub as Polpo Hub
-    participant Agent as Session Agent
-    participant CLI as claude CLI
-    participant MCP as MCP Permission Server
-
-    Agent->>Hub: Register + WebSocket connect
-    Phone->>Hub: Send prompt
-    Hub->>Agent: Forward prompt
-    Agent->>CLI: Spawn claude --stream-json
-    CLI->>Agent: Streaming response (text, tool calls)
-    Agent->>Hub: Relay messages
-    Hub->>Phone: Real-time updates
-
-    Note over CLI,MCP: Tool requires approval
-    CLI->>MCP: permission_prompt_tool call
-    MCP->>Hub: POST /api/permission-request (long-poll)
-    Hub->>Phone: Show approval banner
-    Phone->>Hub: Approve / Reject
-    Hub->>MCP: Return decision
-    MCP->>CLI: allow / deny
-```
-
 ### Tool Approval
 
 When a session runs in `default` permission mode, an MCP permission server handles tool approval. When Claude needs to run a tool that requires permission, the request appears on your phone as a banner with three options:
 
-- **Approve** — allow this single tool use
-- **Approve All** — allow this tool use and enable auto-approve for the rest of the session (all future tool calls are approved instantly without involving the phone)
-- **Reject** — deny this tool use
+- **Approve** - allow this single tool use
+- **Approve All** - enable auto-approve for the rest of the session (all future tool calls are approved instantly without involving the phone)
+- **Reject** - deny this tool use
 
 When auto-approve is active, a green "Auto-approve ON" indicator appears with a "Stop" button to disable it.
+
+**Plans and questions always require review**, even when auto-approve is on. When Claude proposes a plan (`ExitPlanMode`), the full plan content is rendered with markdown (headings, tables, code blocks, lists) in a collapsible panel. When Claude asks questions (`AskUserQuestion`), the options appear as tappable radio buttons or checkboxes with a free-text "Other" fallback.
 
 To skip approval entirely (use with caution):
 
@@ -230,6 +206,7 @@ node bin/polpo.js session --cwd /path/to/project --permissions bypass
 | `--model <model>` | Model to use (e.g. opus, sonnet) |
 | `--permissions <mode>` | `default` (phone approval via MCP) or `bypass` (skip all) |
 | `--server <url>` | Hub WebSocket URL (default: `ws://127.0.0.1:7890`) |
+| `--token <token>` | Auth token (or set `POLPO_TOKEN` env var) |
 
 ## Session Browser
 
@@ -240,32 +217,6 @@ Sessions are loaded from JSONL files and deduplicated to show clean conversation
 ## VS Code Monitoring (Hooks)
 
 For passively monitoring existing VS Code Claude Code sessions, use the hooks integration.
-
-### Hook Flow
-
-```mermaid
-sequenceDiagram
-    participant CC as Claude Code (VS Code)
-    participant Hook as Hook Script
-    participant Bridge as Bridge Daemon
-    participant Hub as Polpo Hub
-    participant Phone
-
-    CC->>Hook: PreToolUse / PostToolUse / Notification
-    Hook->>Bridge: Unix socket message
-    Bridge->>Hub: WebSocket relay
-    Hub->>Phone: Real-time update
-
-    Note over Hook,Bridge: With POLPO_APPROVE=1
-    CC->>Hook: PreToolUse (approval mode)
-    Hook->>Bridge: approval_request
-    Bridge->>Hub: Forward to dashboard
-    Hub->>Phone: Show approval banner
-    Phone->>Hub: Approve / Reject
-    Hub->>Bridge: Decision
-    Bridge->>Hook: approval_response
-    Hook->>CC: allow / block
-```
 
 ### Setup
 
@@ -291,10 +242,10 @@ By default hooks are read-only. To enable phone-based tool approval, set `POLPO_
 
 Tap the paperclip icon to attach files from your phone. Supported types:
 
-- **Images** — sent as base64 to Claude's vision (multimodal)
-- **PDFs** — sent as native document content blocks
-- **Text/code files** — small files (up to 100KB) are inlined directly in the prompt; larger files are saved to disk and Claude reads them with the Read tool
-- **Any other file** — saved to disk and referenced by path for Claude to read
+- **Images** - sent as base64 to Claude's vision (multimodal)
+- **PDFs** - sent as native document content blocks
+- **Text/code files** - small files (up to 100KB) are inlined directly in the prompt; larger files are saved to disk and Claude reads them with the Read tool
+- **Any other file** - saved to disk and referenced by path for Claude to read
 
 ## Mobile UI
 
@@ -325,6 +276,7 @@ Tap the paperclip icon to attach files from your phone. Supported types:
 | POST | `/api/instances/:id/approve` | Approve pending tool use |
 | POST | `/api/instances/:id/reject` | Reject pending tool use |
 | POST | `/api/instances/:id/auto-approve` | Toggle auto-approve for an instance |
+| POST | `/api/instances/:id/answer` | Submit answers to pending questions |
 | POST | `/api/instances/:id/abort` | Abort current task |
 | POST | `/api/upload` | Upload a file attachment (base64) |
 | POST | `/api/permission-request` | MCP permission server long-poll |
@@ -343,6 +295,7 @@ Connect to `ws://<host>:<port>?role=agent&instanceId=<id>` as an agent.
 | `POLPO_PORT` | `7890` | Server port |
 | `POLPO_HOST` | `0.0.0.0` | Server bind address |
 | `POLPO_SERVER` | `ws://127.0.0.1:7890` | Hub URL (used by session, agent, bridge) |
+| `POLPO_TOKEN` | (none) | Auth token for agents/bridges |
 | `POLPO_NAME` | auto from directory | Display name for the instance |
 | `POLPO_APPROVE` | `0` | Set to `1` for phone approval (hooks only) |
 | `POLPO_TIMEOUT` | `300000` | Approval timeout in ms (default 5 min) |
@@ -353,7 +306,141 @@ Connect to `ws://<host>:<port>?role=agent&instanceId=<id>` as an agent.
 npm test
 ```
 
-Runs unit tests with Node's built-in test runner. Tests cover the instance manager, tunnel provider logic, and session JSONL parsing.
+Runs unit tests with Node's built-in test runner. Tests cover authentication (token, PIN, TOTP, sessions, middleware), instance manager, tunnel provider logic, and session JSONL parsing.
+
+## Diagrams
+
+### System Overview
+
+```mermaid
+graph TD
+    Phone["Phone (any network)"]
+    Tunnel["Tunnel (optional)
+    cloudflared / localtunnel / ngrok / SSH"]
+    Hub["Polpo Hub :7890
+    Express + WebSocket"]
+    Session["Session Agent
+    (wrapped)"]
+    Hooks["Hook Bridge
+    (monitoring)"]
+    Browser["Session Browser"]
+    Claude["claude CLI
+    (stream-json)"]
+    VSCode["Claude Code
+    (VS Code / terminal)"]
+    MCP["MCP Permission
+    Server"]
+    JSONL["~/.claude/projects/
+    JSONL files"]
+
+    Phone -->|"cellular / internet"| Tunnel
+    Phone -->|"VPN / LAN"| Hub
+    Tunnel --> Hub
+    Hub --> Session
+    Hub --> Hooks
+    Hub --> Browser
+    Session --> Claude
+    Hooks -->|"read-only"| VSCode
+    Claude --> MCP
+    MCP -->|"phone approval"| Hub
+    Browser -->|"reads"| JSONL
+```
+
+### Auth Flow
+
+```mermaid
+sequenceDiagram
+    participant Term as Terminal
+    participant Hub as Polpo Hub
+    participant Phone as Phone
+
+    Term->>Hub: polpo server --tunnel --auth pin
+    Hub->>Hub: Generate token + PIN
+    Hub->>Term: Print QR code (URL with token baked in)
+    Term->>Term: Display PIN: 4821
+    Phone->>Hub: Scan QR → GET /?token=abc123
+    Hub->>Hub: Burn token (single-use)
+    Hub->>Phone: Redirect to /auth.html?mode=pin
+    Phone->>Hub: POST /api/auth/verify-pin {code: "4821"}
+    Hub->>Phone: Set session cookie → dashboard
+```
+
+### Tunnel Flow
+
+```mermaid
+sequenceDiagram
+    participant Dev as Developer
+    participant Polpo as Polpo Server
+    participant Tunnel as Tunnel Provider
+    participant Phone as Phone Browser
+
+    Dev->>Polpo: polpo server --tunnel
+    Polpo->>Polpo: Start Express + WS on :7890
+    Polpo->>Tunnel: Start tunnel (auto-detect or explicit)
+    Tunnel-->>Polpo: Public URL
+    Polpo->>Dev: Print QR code + URL
+    Dev->>Phone: Scan QR code
+    Phone->>Tunnel: HTTPS request
+    Tunnel->>Polpo: Forward to localhost:7890
+    Polpo-->>Phone: Dashboard + WebSocket
+```
+
+### Session Flow
+
+```mermaid
+sequenceDiagram
+    participant Phone
+    participant Hub as Polpo Hub
+    participant Agent as Session Agent
+    participant CLI as claude CLI
+    participant MCP as MCP Permission Server
+
+    Agent->>Hub: Register + WebSocket connect
+    Phone->>Hub: Send prompt
+    Hub->>Agent: Forward prompt
+    Agent->>CLI: Spawn claude --stream-json
+    CLI->>Agent: Streaming response (text, tool calls)
+    Agent->>Hub: Relay messages
+    Hub->>Phone: Real-time updates
+
+    Note over CLI,MCP: Tool requires approval
+    CLI->>MCP: permission_prompt_tool call
+    MCP->>Hub: POST /api/permission-request (long-poll)
+    Hub->>Phone: Show approval banner
+    Phone->>Hub: Approve / Reject
+    Hub->>MCP: Return decision
+    MCP->>CLI: allow / deny
+```
+
+### Hook Flow
+
+```mermaid
+sequenceDiagram
+    participant CC as Claude Code (VS Code)
+    participant Hook as Hook Script
+    participant Bridge as Bridge Daemon
+    participant Hub as Polpo Hub
+    participant Phone
+
+    CC->>Hook: PreToolUse / PostToolUse / Notification
+    Hook->>Bridge: Unix socket message
+    Bridge->>Hub: WebSocket relay
+    Hub->>Phone: Real-time update
+
+    Note over Hook,Bridge: With POLPO_APPROVE=1
+    CC->>Hook: PreToolUse (approval mode)
+    Hook->>Bridge: approval_request
+    Bridge->>Hub: Forward to dashboard
+    Hub->>Phone: Show approval banner
+    Phone->>Hub: Approve / Reject
+    Hub->>Bridge: Decision
+    Bridge->>Hook: approval_response
+    Hook->>CC: allow / block
+```
+
+## Author
+
+**Marco Pennelli** | [PugliaTechs APS](https://www.pugliatechs.com)
 
 ## License
 

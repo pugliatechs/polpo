@@ -45,6 +45,11 @@ function printHelp() {
                          Omit provider to auto-detect (tries cloudflared, then localtunnel)
     --tunnel-host <host> SSH tunnel host (required for ssh provider, e.g. user@server)
     --tunnel-port <n>    Remote port for SSH tunnel (default: 80)
+    --auth <mode>   Authentication mode (auto-enabled for tunnels):
+                      token    — Single-use URL token only (default for tunnels)
+                      pin      — Token + 4-digit PIN displayed in terminal
+                      paranoid — Token + TOTP via authenticator app
+    --token <tok>   Use a specific token instead of auto-generating one
     --verbose       Enable verbose logging
 
   AGENT OPTIONS
@@ -52,6 +57,7 @@ function printHelp() {
     --type <type>       Instance type: terminal | vscode (default: terminal)
     --project <name>    Project name (default: current directory name)
     --server <url>      Polpo server WebSocket URL (default: ws://127.0.0.1:7890)
+    --token <tok>       Auth token (or set POLPO_TOKEN env var)
 
   SESSION OPTIONS
     --name <name>       Display name for this session
@@ -60,12 +66,14 @@ function printHelp() {
     --model <model>     Model to use (e.g. opus, sonnet)
     --permissions <m>   Permission mode: default | bypass (default: default)
     --server <url>      Polpo server WebSocket URL (default: ws://127.0.0.1:7890)
+    --token <tok>       Auth token (or set POLPO_TOKEN env var)
 
   BRIDGE OPTIONS
     --name <name>       Display name for this instance
     --type <type>       Instance type: terminal | vscode (default: vscode)
     --project <name>    Project name (default: current directory name)
     --server <url>      Polpo server WebSocket URL (default: ws://127.0.0.1:7890)
+    --token <tok>       Auth token (or set POLPO_TOKEN env var)
     --cwd <dir>         Working directory (default: current directory)
 
   EXAMPLES
@@ -117,11 +125,60 @@ function printHelp() {
 
 async function runServer() {
   const { createServer } = require('../src/server/index');
+  const { generateToken, generatePin, generateTotpSecret, buildTotpUri, loadTotpSecret, saveTotpSecret } = require('../src/server/auth');
+
+  // Determine auth mode
+  const useTunnel = !!flags.tunnel;
+  let authMode = flags.auth || null;
+  let token = flags.token || null;
+
+  // Auto-enable token auth for tunnels (unless explicitly disabled with --auth none)
+  if (useTunnel && !authMode) {
+    authMode = 'token';
+  }
+
+  // Generate token if auth is enabled and none was provided
+  if (authMode && authMode !== 'none' && !token) {
+    token = generateToken();
+  }
+
+  const authOpts = {};
+  if (token) {
+    authOpts.token = token;
+    authOpts.mode = authMode === 'paranoid' ? 'paranoid' : authMode === 'pin' ? 'pin' : null;
+  }
+
   const server = createServer({
     port: parseInt(flags.port) || 7890,
     host: flags.host || '0.0.0.0',
     verbose: !!flags.verbose,
+    auth: Object.keys(authOpts).length > 0 ? authOpts : undefined,
   });
+
+  // Set up PIN callback for terminal display
+  if (authMode === 'pin') {
+    const pin = generatePin();
+    server.authState.pin = pin;
+    server.authState.onPinRegenerated = (newPin) => {
+      console.log(`\n  🔑 New PIN: ${newPin}\n`);
+    };
+  }
+
+  // Set up TOTP for paranoid mode
+  if (authMode === 'paranoid') {
+    const os = require('os');
+    const configPath = require('path').join(os.homedir(), '.config', 'polpo', 'totp.json');
+    let secret = loadTotpSecret(configPath);
+    if (!secret) {
+      secret = generateTotpSecret();
+      saveTotpSecret(configPath, secret);
+      console.log('\n  🔐 TOTP Setup (first time only):');
+      console.log(`     Secret: ${secret}`);
+      console.log(`     URI:    ${buildTotpUri(secret, 'Polpo')}`);
+      console.log('     Add this to your authenticator app (Google Authenticator, Authy, etc.)\n');
+    }
+    server.authState.totpSecret = secret;
+  }
 
   await server.start();
 
@@ -129,7 +186,7 @@ async function runServer() {
   let tunnel = null;
 
   // Start tunnel if requested
-  if (flags.tunnel) {
+  if (useTunnel) {
     try {
       const { startTunnel } = require('../src/tunnel/index');
       const { displayQR } = require('../src/tunnel/qr');
@@ -139,8 +196,21 @@ async function runServer() {
         tunnelHost: flags['tunnel-host'],
         tunnelPort: flags['tunnel-port'] ? parseInt(flags['tunnel-port']) : undefined,
       });
+
+      // Build URL with token baked in for QR code
+      let tunnelUrl = tunnel.url;
+      if (token) {
+        tunnelUrl += `?token=${token}`;
+      }
+
       console.log(`  🌐 Tunnel active: ${tunnel.url}`);
-      displayQR(tunnel.url);
+      if (token) {
+        console.log(`  🔒 Auth enabled (mode: ${authMode || 'token'})`);
+        if (authMode === 'pin') {
+          console.log(`  🔑 PIN: ${server.authState.pin}`);
+        }
+      }
+      displayQR(tunnelUrl);
     } catch (err) {
       console.error(`  ⚠️  Tunnel failed: ${err.message}`);
       console.log('  Server is still running on LAN.\n');
@@ -163,13 +233,25 @@ async function runServer() {
       if (addresses.length > 0) {
         console.log('  📱 Open on your phone (same network):');
         addresses.forEach((addr) => {
-          console.log(`     http://${addr}:${port}`);
+          const url = token
+            ? `http://${addr}:${port}?token=${token}`
+            : `http://${addr}:${port}`;
+          console.log(`     ${url}`);
         });
+        if (token && authMode === 'pin') {
+          console.log(`\n  🔑 PIN: ${server.authState.pin}`);
+        }
         console.log('');
       }
     } catch (e) {
       // not critical
     }
+  }
+
+  // Print token for agent/bridge connections
+  if (token) {
+    console.log(`  🔑 Agent token: ${token}`);
+    console.log('     Pass to agents: polpo session --server ws://host:port --token <token>\n');
   }
 
   process.on('SIGINT', async () => {
@@ -209,6 +291,7 @@ async function runSession() {
     model: flags.model || undefined,
     permissionMode: flags.permissions || 'default',
     serverUrl: flags.server || undefined,
+    token: flags.token || process.env.POLPO_TOKEN || undefined,
   });
 }
 

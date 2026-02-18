@@ -1,7 +1,8 @@
 const WebSocket = require('ws');
 const url = require('url');
+const { validateWsAuth } = require('./auth');
 
-function setupWebSocket(server, instanceManager) {
+function setupWebSocket(server, instanceManager, getAuthState) {
   const wss = new WebSocket.Server({ server });
 
   // Track mobile/browser clients
@@ -56,6 +57,12 @@ function setupWebSocket(server, instanceManager) {
   });
 
   wss.on('connection', (ws, req) => {
+    const authState = typeof getAuthState === 'function' ? getAuthState() : getAuthState;
+    if (!validateWsAuth(authState, req)) {
+      ws.close(4001, 'Unauthorized');
+      return;
+    }
+
     const params = url.parse(req.url, true).query;
     const role = params.role; // 'dashboard' or 'agent'
     const instanceId = params.instanceId;

@@ -65,7 +65,7 @@
       <button id="btn-stop-auto-approve" class="btn btn-small">Stop</button>
     </div>
 
-    <!-- Approval Banner -->
+    <!-- Approval Banner (standard tool approval) -->
     <div id="approval-banner" class="approval-banner hidden">
       <div class="approval-info">
         <strong>Approval Required</strong>
@@ -76,6 +76,33 @@
         <button id="btn-approve" class="btn btn-approve">Approve</button>
         <button id="btn-approve-all" class="btn btn-approve-all">Approve All</button>
         <button id="btn-reject" class="btn btn-reject">Reject</button>
+      </div>
+    </div>
+
+    <!-- Plan Review Banner -->
+    <div id="plan-banner" class="plan-banner hidden">
+      <div class="plan-header">
+        <strong>Plan Proposed</strong>
+        <button id="btn-plan-toggle" class="btn-icon btn-plan-toggle" title="Expand/collapse">&#9660;</button>
+      </div>
+      <div id="plan-content" class="plan-content collapsed">
+        <div id="plan-text" class="plan-text"></div>
+      </div>
+      <div class="approval-buttons">
+        <button id="btn-plan-approve" class="btn btn-approve">Approve Plan</button>
+        <button id="btn-plan-reject" class="btn btn-reject">Reject</button>
+      </div>
+    </div>
+
+    <!-- Question Banner (AskUserQuestion) -->
+    <div id="question-banner" class="question-banner hidden">
+      <div class="question-header">
+        <strong>Questions</strong>
+      </div>
+      <div id="question-list" class="question-list"></div>
+      <div class="approval-buttons">
+        <button id="btn-question-submit" class="btn btn-approve">Submit Answers</button>
+        <button id="btn-question-reject" class="btn btn-reject">Reject</button>
       </div>
     </div>
 

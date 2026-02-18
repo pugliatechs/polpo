@@ -21,6 +21,7 @@ const readline = require('readline');
 
 const INSTANCE_ID = process.env.POLPO_INSTANCE_ID;
 const HUB_URL = process.env.POLPO_HUB_URL || 'http://127.0.0.1:7890';
+const AUTH_TOKEN = process.env.POLPO_AUTH_TOKEN || null;
 
 function log(msg) {
   process.stderr.write(`[polpo-mcp] ${msg}\n`);
@@ -132,12 +133,16 @@ function requestApproval(toolUseId, toolName, toolInput) {
 
   return new Promise((resolve) => {
     const url = new URL('/api/permission-request', HUB_URL);
+    const headers = {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(payload),
+    };
+    if (AUTH_TOKEN) {
+      headers['Authorization'] = `Bearer ${AUTH_TOKEN}`;
+    }
     const req = http.request(url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(payload),
-      },
+      headers,
       // Long timeout: phone user might take a while
       timeout: 10 * 60 * 1000,
     }, (res) => {

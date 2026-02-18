@@ -4,11 +4,25 @@ const path = require('path');
 const InstanceManager = require('./instances');
 const { createApiRouter } = require('./api');
 const { setupWebSocket } = require('./websocket');
+const {
+  AuthState,
+  createAuthMiddleware,
+  createStaticAuthMiddleware,
+  validateSession,
+  createSession,
+  setSessionCookie,
+  verifyPin,
+  verifyTotp,
+} = require('./auth');
 
 function createServer(options = {}) {
   const port = options.port || process.env.POLPO_PORT || 7890;
   const host = options.host || process.env.POLPO_HOST || '0.0.0.0';
   const verbose = options.verbose || false;
+
+  // Auth state — can be updated after creation (e.g. after tunnel starts)
+  const authState = new AuthState(options.auth || {});
+  const getAuthState = () => authState;
 
   const app = express();
   const server = http.createServer(app);
@@ -16,16 +30,76 @@ function createServer(options = {}) {
 
   app.use(express.json({ limit: '15mb' }));
 
-  // Serve mobile web UI
-  app.use(express.static(path.join(__dirname, '..', 'web')));
-
-  // API routes
-  app.use('/api', createApiRouter(instanceManager));
+  // --- Public routes (before auth) ---
 
   // Health check
   app.get('/health', (req, res) => {
     res.json({ status: 'ok', instances: instanceManager.getAll().length });
   });
+
+  // Auth page (served to unauthenticated users)
+  app.get('/auth.html', (req, res) => {
+    res.sendFile(path.join(__dirname, '..', 'web', 'auth.html'));
+  });
+  app.get('/auth', (req, res) => {
+    res.sendFile(path.join(__dirname, '..', 'web', 'auth.html'));
+  });
+
+  // PIN verification
+  app.post('/api/auth/verify-pin', (req, res) => {
+    if (!authState.mfaEnabled || authState.mode !== 'pin') {
+      return res.status(400).json({ error: 'PIN auth not enabled' });
+    }
+    const { code } = req.body;
+    if (!code || typeof code !== 'string') {
+      return res.status(400).json({ error: 'Missing code' });
+    }
+    const result = verifyPin(authState, code);
+    if (result.valid) {
+      const sessionId = createSession(authState);
+      const secure = req.secure || req.headers['x-forwarded-proto'] === 'https';
+      setSessionCookie(res, sessionId, secure);
+      return res.json({ success: true });
+    }
+    const response = { success: false, error: 'Invalid PIN' };
+    if (result.regenerated) {
+      response.regenerated = true;
+      response.error = 'Too many attempts. Check terminal for new PIN.';
+    }
+    res.status(403).json(response);
+  });
+
+  // TOTP verification
+  app.post('/api/auth/verify-totp', (req, res) => {
+    if (!authState.mfaEnabled || authState.mode !== 'paranoid') {
+      return res.status(400).json({ error: 'TOTP auth not enabled' });
+    }
+    const { code } = req.body;
+    if (!code || typeof code !== 'string') {
+      return res.status(400).json({ error: 'Missing code' });
+    }
+    if (verifyTotp(authState.totpSecret, code)) {
+      const sessionId = createSession(authState);
+      const secure = req.secure || req.headers['x-forwarded-proto'] === 'https';
+      setSessionCookie(res, sessionId, secure);
+      return res.json({ success: true });
+    }
+    res.status(403).json({ success: false, error: 'Invalid code' });
+  });
+
+  // --- Auth middleware ---
+
+  // Static files — redirects to auth page if MFA needed
+  app.use(createStaticAuthMiddleware(getAuthState));
+
+  // Serve mobile web UI
+  app.use(express.static(path.join(__dirname, '..', 'web')));
+
+  // API auth
+  app.use('/api', createAuthMiddleware(getAuthState));
+
+  // API routes
+  app.use('/api', createApiRouter(instanceManager));
 
   // SPA fallback — serve index.html for non-API routes
   app.get('*', (req, res) => {
@@ -35,7 +109,7 @@ function createServer(options = {}) {
   });
 
   // WebSocket
-  const wss = setupWebSocket(server, instanceManager);
+  const wss = setupWebSocket(server, instanceManager, getAuthState);
 
   if (verbose) {
     instanceManager.on('instance:registered', (inst) => {
@@ -68,6 +142,14 @@ function createServer(options = {}) {
         wss.close();
         server.close(resolve);
       });
+    },
+    setAuth({ token, mode, totpSecret }) {
+      if (token !== undefined) authState.token = token;
+      if (mode !== undefined) authState.mode = mode;
+      if (totpSecret !== undefined) authState.totpSecret = totpSecret;
+    },
+    get authState() {
+      return authState;
     },
     instanceManager,
     server,

@@ -5,6 +5,19 @@
 (function () {
   'use strict';
 
+  // ---- Auth ----
+  // Clean token from URL after the server sets a session cookie
+  var urlParams = new URLSearchParams(location.search);
+  if (urlParams.has('token')) {
+    // The server's static middleware already set the session cookie
+    // on this page load. Remove the token from the URL bar for security.
+    urlParams.delete('token');
+    var cleanUrl = urlParams.toString()
+      ? location.pathname + '?' + urlParams.toString()
+      : location.pathname;
+    history.replaceState(null, '', cleanUrl);
+  }
+
   // ---- State ----
   let ws = null;
   let instances = new Map();
@@ -43,6 +56,27 @@
   const $btnAttach = document.getElementById('btn-attach');
   const $fileInput = document.getElementById('file-input');
   const $attachmentPreview = document.getElementById('attachment-preview');
+  const $planBanner = document.getElementById('plan-banner');
+  const $planContent = document.getElementById('plan-content');
+  const $planText = document.getElementById('plan-text');
+  const $btnPlanToggle = document.getElementById('btn-plan-toggle');
+  const $btnPlanApprove = document.getElementById('btn-plan-approve');
+  const $btnPlanReject = document.getElementById('btn-plan-reject');
+  const $questionBanner = document.getElementById('question-banner');
+  const $questionList = document.getElementById('question-list');
+  const $btnQuestionSubmit = document.getElementById('btn-question-submit');
+  const $btnQuestionReject = document.getElementById('btn-question-reject');
+
+  // ---- Auth-aware fetch wrapper ----
+  function authFetch(url, options) {
+    return fetch(url, options).then(function (res) {
+      if (res.status === 401) {
+        location.href = '/auth.html';
+        return Promise.reject(new Error('Unauthorized'));
+      }
+      return res;
+    });
+  }
 
   // ---- WebSocket ----
   function connect() {
@@ -56,9 +90,14 @@
       reconnectDelay = 1000;
     };
 
-    ws.onclose = function () {
+    ws.onclose = function (evt) {
       $connectionStatus.className = 'status-dot disconnected';
       $connectionStatus.title = 'Disconnected';
+      if (evt.code === 4001) {
+        // Auth required — redirect to auth page
+        location.href = '/auth.html';
+        return;
+      }
       setTimeout(connect, reconnectDelay);
       reconnectDelay = Math.min(reconnectDelay * 1.5, 10000);
     };
@@ -222,7 +261,7 @@
     // Fetch conversation if we don't have it yet
     var inst = instances.get(id);
     if (inst && (!inst.conversation || inst.conversation.length === 0)) {
-      fetch('/api/instances/' + id + '/conversation?limit=100')
+      authFetch('/api/instances/' + id + '/conversation?limit=100')
         .then(function (r) { return r.json(); })
         .then(function (msgs) {
           inst.conversation = msgs;
@@ -262,18 +301,32 @@
       $autoApproveBanner.classList.add('hidden');
     }
 
-    // Approval banner (hidden when auto-approve is on)
-    if (inst.pendingApproval && !inst.autoApprove) {
-      $approvalBanner.classList.remove('hidden');
-      $approvalDescription.textContent = inst.pendingApproval.description || '';
-      $approvalCommand.textContent = inst.pendingApproval.command || '';
-      if (!inst.pendingApproval.command) {
-        $approvalCommand.style.display = 'none';
+    // Approval banners - show the right one based on approval type
+    var approval = inst.pendingApproval;
+    var aType = approval && approval.approvalType || 'tool';
+
+    // Hide all banners first
+    $approvalBanner.classList.add('hidden');
+    $planBanner.classList.add('hidden');
+    $questionBanner.classList.add('hidden');
+
+    if (approval && (aType !== 'tool' || !inst.autoApprove)) {
+      if (aType === 'plan') {
+        $planBanner.classList.remove('hidden');
+        $planText.innerHTML = renderPlanMarkdown(approval.command || 'No plan content available.');
+      } else if (aType === 'question') {
+        $questionBanner.classList.remove('hidden');
+        renderQuestions(approval.questions || []);
       } else {
-        $approvalCommand.style.display = 'block';
+        $approvalBanner.classList.remove('hidden');
+        $approvalDescription.textContent = approval.description || '';
+        $approvalCommand.textContent = approval.command || '';
+        if (!approval.command) {
+          $approvalCommand.style.display = 'none';
+        } else {
+          $approvalCommand.style.display = 'block';
+        }
       }
-    } else {
-      $approvalBanner.classList.add('hidden');
     }
   }
 
@@ -449,7 +502,7 @@
         inst.status = 'busy';
       }
       renderDetail();
-      fetch('/api/instances/' + activeInstanceId + '/approve', { method: 'POST' })
+      authFetch('/api/instances/' + activeInstanceId + '/approve', { method: 'POST' })
         .catch(function () {});
     }
   });
@@ -464,7 +517,7 @@
         inst.status = 'busy';
       }
       renderDetail();
-      fetch('/api/instances/' + activeInstanceId + '/auto-approve', {
+      authFetch('/api/instances/' + activeInstanceId + '/auto-approve', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ value: true }),
@@ -480,7 +533,69 @@
         inst.status = 'busy';
       }
       renderDetail();
-      fetch('/api/instances/' + activeInstanceId + '/reject', { method: 'POST' })
+      authFetch('/api/instances/' + activeInstanceId + '/reject', { method: 'POST' })
+        .catch(function () {});
+    }
+  });
+
+  // Plan banner handlers
+  $btnPlanToggle.addEventListener('click', function () {
+    $planContent.classList.toggle('collapsed');
+    $btnPlanToggle.innerHTML = $planContent.classList.contains('collapsed') ? '&#9660;' : '&#9650;';
+  });
+
+  $btnPlanApprove.addEventListener('click', function () {
+    if (activeInstanceId) {
+      var inst = instances.get(activeInstanceId);
+      if (inst) {
+        inst.pendingApproval = null;
+        inst.status = 'busy';
+      }
+      renderDetail();
+      authFetch('/api/instances/' + activeInstanceId + '/approve', { method: 'POST' })
+        .catch(function () {});
+    }
+  });
+
+  $btnPlanReject.addEventListener('click', function () {
+    if (activeInstanceId) {
+      var inst = instances.get(activeInstanceId);
+      if (inst) {
+        inst.pendingApproval = null;
+        inst.status = 'busy';
+      }
+      renderDetail();
+      authFetch('/api/instances/' + activeInstanceId + '/reject', { method: 'POST' })
+        .catch(function () {});
+    }
+  });
+
+  // Question banner handlers
+  $btnQuestionSubmit.addEventListener('click', function () {
+    if (!activeInstanceId) return;
+    var answers = collectAnswers();
+    var inst = instances.get(activeInstanceId);
+    if (inst) {
+      inst.pendingApproval = null;
+      inst.status = 'busy';
+    }
+    renderDetail();
+    authFetch('/api/instances/' + activeInstanceId + '/answer', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ answers: answers }),
+    }).catch(function () {});
+  });
+
+  $btnQuestionReject.addEventListener('click', function () {
+    if (activeInstanceId) {
+      var inst = instances.get(activeInstanceId);
+      if (inst) {
+        inst.pendingApproval = null;
+        inst.status = 'busy';
+      }
+      renderDetail();
+      authFetch('/api/instances/' + activeInstanceId + '/reject', { method: 'POST' })
         .catch(function () {});
     }
   });
@@ -490,7 +605,7 @@
       var inst = instances.get(activeInstanceId);
       if (inst) inst.autoApprove = false;
       renderDetail();
-      fetch('/api/instances/' + activeInstanceId + '/auto-approve', {
+      authFetch('/api/instances/' + activeInstanceId + '/auto-approve', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ value: false }),
@@ -534,7 +649,7 @@
     var reader = new FileReader();
     reader.onload = function () {
       var base64 = reader.result.split(',')[1]; // strip data:...;base64, prefix
-      fetch('/api/upload', {
+      authFetch('/api/upload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -621,6 +736,138 @@
     renderAttachmentPreview();
   }
 
+  // ---- Questions ----
+  function renderQuestions(questions) {
+    $questionList.innerHTML = questions.map(function (q, qi) {
+      var inputType = q.multiSelect ? 'checkbox' : 'radio';
+      var optionsHtml = (q.options || []).map(function (opt, oi) {
+        var inputName = 'q' + qi;
+        var inputId = 'q' + qi + '_o' + oi;
+        return (
+          '<label class="question-option" for="' + inputId + '">' +
+            '<input type="' + inputType + '" name="' + inputName + '" id="' + inputId + '" value="' + escapeHtml(opt.label) + '">' +
+            '<div class="option-content">' +
+              '<span class="option-label">' + escapeHtml(opt.label) + '</span>' +
+              (opt.description ? '<span class="option-desc">' + escapeHtml(opt.description) + '</span>' : '') +
+            '</div>' +
+          '</label>'
+        );
+      }).join('');
+      // "Other" free-text option
+      var otherId = 'q' + qi + '_other';
+      optionsHtml += (
+        '<label class="question-option" for="' + otherId + '">' +
+          '<input type="' + inputType + '" name="q' + qi + '" id="' + otherId + '" value="__other__">' +
+          '<div class="option-content">' +
+            '<span class="option-label">Other</span>' +
+            '<input type="text" class="other-text" id="' + otherId + '_text" placeholder="Type your answer..." disabled>' +
+          '</div>' +
+        '</label>'
+      );
+      return (
+        '<div class="question-item" data-qi="' + qi + '" data-multi="' + (q.multiSelect ? '1' : '0') + '">' +
+          (q.header ? '<div class="question-tag">' + escapeHtml(q.header) + '</div>' : '') +
+          '<div class="question-text">' + escapeHtml(q.question) + '</div>' +
+          '<div class="question-options">' + optionsHtml + '</div>' +
+        '</div>'
+      );
+    }).join('');
+
+    // Enable/disable "Other" text input based on selection
+    var otherInputs = $questionList.querySelectorAll('input[value="__other__"]');
+    for (var i = 0; i < otherInputs.length; i++) {
+      (function (radio) {
+        var textInput = document.getElementById(radio.id + '_text');
+        // Listen to all radios in the same group
+        var name = radio.name;
+        var allInGroup = $questionList.querySelectorAll('input[name="' + name + '"]');
+        for (var j = 0; j < allInGroup.length; j++) {
+          allInGroup[j].addEventListener('change', function () {
+            textInput.disabled = !radio.checked;
+            if (radio.checked) textInput.focus();
+          });
+        }
+      })(otherInputs[i]);
+    }
+  }
+
+  function collectAnswers() {
+    var answers = {};
+    var items = $questionList.querySelectorAll('.question-item');
+    for (var i = 0; i < items.length; i++) {
+      var qi = items[i].getAttribute('data-qi');
+      var isMulti = items[i].getAttribute('data-multi') === '1';
+      var checked = items[i].querySelectorAll('input:checked');
+      var values = [];
+      for (var j = 0; j < checked.length; j++) {
+        var val = checked[j].value;
+        if (val === '__other__') {
+          var textInput = document.getElementById(checked[j].id + '_text');
+          val = textInput ? textInput.value.trim() : '';
+        }
+        if (val) values.push(val);
+      }
+      answers[qi] = isMulti ? values : (values[0] || '');
+    }
+    return answers;
+  }
+
+  // ---- Plan Markdown ----
+  function renderPlanMarkdown(str) {
+    var escaped = escapeHtml(str);
+
+    // Code blocks: ```lang\n...\n``` -> <pre><code>...</code></pre>
+    escaped = escaped.replace(/```(\w*)\n([\s\S]*?)```/g, function (match, lang, code) {
+      return '<pre class="plan-code-block"><code>' + code.replace(/\n$/, '') + '</code></pre>';
+    });
+
+    // Tables: detect lines with | separators
+    escaped = escaped.replace(/((?:^|\n)\|.+\|(?:\n\|.+\|)+)/g, function (block) {
+      var rows = block.trim().split('\n');
+      var html = '<table class="plan-table">';
+      var isHeader = true;
+      for (var r = 0; r < rows.length; r++) {
+        var row = rows[r].trim();
+        if (!row.startsWith('|')) continue;
+        // Skip separator row (|---|---|)
+        if (/^\|[\s\-:|]+\|$/.test(row)) {
+          isHeader = false;
+          continue;
+        }
+        var cells = row.split('|').filter(function (c, i, arr) {
+          return i > 0 && i < arr.length - 1;
+        });
+        var tag = isHeader ? 'th' : 'td';
+        html += '<tr>' + cells.map(function (c) {
+          return '<' + tag + '>' + c.trim() + '</' + tag + '>';
+        }).join('') + '</tr>';
+        if (isHeader && r === 0) isHeader = true; // keep header until separator
+      }
+      html += '</table>';
+      return html;
+    });
+
+    // Headers: ## ... -> <h3>, ### ... -> <h4>, etc
+    escaped = escaped.replace(/^#{4,}\s+(.+)$/gm, '<h5 class="plan-h">$1</h5>');
+    escaped = escaped.replace(/^###\s+(.+)$/gm, '<h4 class="plan-h">$1</h4>');
+    escaped = escaped.replace(/^##\s+(.+)$/gm, '<h3 class="plan-h">$1</h3>');
+    escaped = escaped.replace(/^#\s+(.+)$/gm, '<h3 class="plan-h plan-h1">$1</h3>');
+
+    // Bold: **...** -> <strong>
+    escaped = escaped.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+
+    // Inline code: `...` -> <code>
+    escaped = escaped.replace(/`([^`\n]+)`/g, '<code class="plan-inline-code">$1</code>');
+
+    // Bullet lists: lines starting with - or *
+    escaped = escaped.replace(/^[\-\*]\s+(.+)$/gm, '<div class="plan-bullet">$1</div>');
+
+    // Numbered lists
+    escaped = escaped.replace(/^(\d+)\.\s+(.+)$/gm, '<div class="plan-numbered"><span class="plan-num">$1.</span> $2</div>');
+
+    return escaped;
+  }
+
   // ---- Helpers ----
   function escapeHtml(str) {
     var div = document.createElement('div');
@@ -660,7 +907,7 @@
 
   // ---- Past Sessions ----
   function loadSessions() {
-    fetch('/api/sessions?days=7&limit=30')
+    authFetch('/api/sessions?days=7&limit=30')
       .then(function (r) { return r.json(); })
       .then(function (sessions) {
         pastSessions = sessions;
@@ -732,11 +979,11 @@
     }
 
     // Fetch history and resume in parallel
-    var historyPromise = fetch('/api/sessions/' + sessionId + '/history')
+    var historyPromise = authFetch('/api/sessions/' + sessionId + '/history')
       .then(function (r) { return r.json(); })
       .catch(function () { return []; });
 
-    var resumePromise = fetch('/api/sessions/' + sessionId + '/resume', {
+    var resumePromise = authFetch('/api/sessions/' + sessionId + '/resume', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: project, cwd: cwd }),

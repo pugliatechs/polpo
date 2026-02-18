@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node bin/polpo.js server",
     "dev": "node bin/polpo.js server --verbose",
-    "test": "node --test 'test/*.test.js'"
+    "test": "node --test test/auth.test.js test/instances.test.js test/tunnel.test.js test/sessions.test.js"
   },
   "keywords": [
     "claude-code",

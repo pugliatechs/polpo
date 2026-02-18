@@ -65,14 +65,20 @@ function startBridge(options = {}) {
   if (options.cwd) args.push('--cwd', options.cwd);
   if (options.serverUrl) args.push('--server', options.serverUrl);
   if (options.socketPath) args.push('--socket', options.socketPath);
+  if (options.token) args.push('--token', options.token);
 
   const logFile = (options.socketPath || '/tmp/polpo-bridge').replace('.sock', '.log');
   const out = fs.openSync(logFile, 'a');
 
+  const env = { ...process.env };
+  if (options.token) {
+    env.POLPO_TOKEN = options.token;
+  }
+
   const child = spawn('node', args, {
     detached: true,
     stdio: ['ignore', out, out],
-    env: { ...process.env },
+    env,
   });
   child.unref();
   return child.pid;

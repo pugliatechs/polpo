@@ -29,6 +29,7 @@ function getArg(name) {
 
 const config = {
   serverUrl: getArg('server') || process.env.POLPO_SERVER || 'ws://127.0.0.1:7890',
+  token: getArg('token') || process.env.POLPO_TOKEN || null,
   name: getArg('name') || process.env.POLPO_NAME || null,
   type: getArg('type') || 'vscode',
   project: getArg('project') || null,
@@ -86,14 +87,18 @@ async function register() {
 
   return new Promise((resolve, reject) => {
     const reqUrl = new URL('/api/instances', apiBase);
+    const headers = {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(body),
+    };
+    if (config.token) {
+      headers['Authorization'] = `Bearer ${config.token}`;
+    }
     const req = http.request(
       reqUrl,
       {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(body),
-        },
+        headers,
       },
       (res) => {
         let data = '';
@@ -120,7 +125,10 @@ async function register() {
 function connectWebSocket() {
   if (!instanceId) return;
 
-  const wsUrl = `${config.serverUrl}?role=agent&instanceId=${instanceId}`;
+  let wsUrl = `${config.serverUrl}?role=agent&instanceId=${instanceId}`;
+  if (config.token) {
+    wsUrl += `&token=${encodeURIComponent(config.token)}`;
+  }
   ws = new WebSocket(wsUrl);
 
   ws.on('open', () => {

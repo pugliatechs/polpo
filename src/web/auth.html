@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+  <meta name="theme-color" content="#0f172a">
+  <title>Polpo — Authenticate</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐙</text></svg>">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .auth-container {
+      text-align: center;
+      padding: 2rem;
+      max-width: 360px;
+      width: 100%;
+    }
+    .logo { font-size: 3rem; margin-bottom: 0.5rem; }
+    h1 { font-size: 1.5rem; font-weight: 600; margin-bottom: 0.25rem; }
+    .subtitle {
+      color: #94a3b8;
+      font-size: 0.9rem;
+      margin-bottom: 2rem;
+      line-height: 1.4;
+    }
+    .code-input {
+      display: flex;
+      gap: 0.5rem;
+      justify-content: center;
+      margin-bottom: 1.5rem;
+    }
+    .code-input input {
+      width: 3rem;
+      height: 3.5rem;
+      text-align: center;
+      font-size: 1.5rem;
+      font-weight: 700;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      background: #1e293b;
+      border: 2px solid #334155;
+      border-radius: 0.75rem;
+      color: #e2e8f0;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    .code-input input:focus {
+      border-color: #6366f1;
+    }
+    .code-input input.error {
+      border-color: #ef4444;
+      animation: shake 0.3s;
+    }
+    @keyframes shake {
+      0%, 100% { transform: translateX(0); }
+      25% { transform: translateX(-4px); }
+      75% { transform: translateX(4px); }
+    }
+    .btn-verify {
+      width: 100%;
+      padding: 0.875rem;
+      font-size: 1rem;
+      font-weight: 600;
+      background: #6366f1;
+      color: white;
+      border: none;
+      border-radius: 0.75rem;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .btn-verify:hover { background: #4f46e5; }
+    .btn-verify:disabled { background: #334155; cursor: not-allowed; }
+    .error-msg {
+      color: #ef4444;
+      font-size: 0.85rem;
+      margin-top: 1rem;
+      min-height: 1.2rem;
+    }
+    .attempts {
+      color: #94a3b8;
+      font-size: 0.8rem;
+      margin-top: 0.5rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="auth-container">
+    <div class="logo">🐙</div>
+    <h1>Polpo</h1>
+    <p class="subtitle" id="subtitle"></p>
+    <div class="code-input" id="code-input"></div>
+    <button class="btn-verify" id="btn-verify" disabled>Verify</button>
+    <div class="error-msg" id="error-msg"></div>
+    <div class="attempts" id="attempts"></div>
+  </div>
+
+  <script>
+  (function() {
+    var params = new URLSearchParams(location.search);
+    var mode = params.get('mode') || 'pin';
+    var digits = mode === 'paranoid' ? 6 : 4;
+    var endpoint = mode === 'paranoid' ? '/api/auth/verify-totp' : '/api/auth/verify-pin';
+    var maxAttempts = mode === 'paranoid' ? null : 3;
+    var attempts = 0;
+
+    var $subtitle = document.getElementById('subtitle');
+    var $codeInput = document.getElementById('code-input');
+    var $btnVerify = document.getElementById('btn-verify');
+    var $errorMsg = document.getElementById('error-msg');
+    var $attempts = document.getElementById('attempts');
+
+    $subtitle.textContent = mode === 'paranoid'
+      ? 'Enter the 6-digit code from your authenticator app'
+      : 'Enter the 4-digit PIN shown in your terminal';
+
+    // Create input fields
+    var inputs = [];
+    for (var i = 0; i < digits; i++) {
+      var inp = document.createElement('input');
+      inp.type = 'tel';
+      inp.maxLength = 1;
+      inp.inputMode = 'numeric';
+      inp.pattern = '[0-9]';
+      inp.autocomplete = 'one-time-code';
+      $codeInput.appendChild(inp);
+      inputs.push(inp);
+    }
+
+    // Auto-focus and auto-advance
+    inputs.forEach(function(inp, idx) {
+      inp.addEventListener('input', function() {
+        inp.value = inp.value.replace(/[^0-9]/g, '');
+        if (inp.value && idx < digits - 1) {
+          inputs[idx + 1].focus();
+        }
+        updateButton();
+      });
+      inp.addEventListener('keydown', function(e) {
+        if (e.key === 'Backspace' && !inp.value && idx > 0) {
+          inputs[idx - 1].focus();
+        }
+        if (e.key === 'Enter') {
+          submit();
+        }
+      });
+      // Handle paste
+      inp.addEventListener('paste', function(e) {
+        e.preventDefault();
+        var data = (e.clipboardData || window.clipboardData).getData('text').replace(/[^0-9]/g, '');
+        for (var j = 0; j < digits && j < data.length; j++) {
+          inputs[j].value = data[j];
+        }
+        if (data.length >= digits) {
+          inputs[digits - 1].focus();
+        } else {
+          inputs[Math.min(data.length, digits - 1)].focus();
+        }
+        updateButton();
+      });
+    });
+
+    inputs[0].focus();
+
+    function getCode() {
+      return inputs.map(function(i) { return i.value; }).join('');
+    }
+
+    function updateButton() {
+      $btnVerify.disabled = getCode().length !== digits;
+    }
+
+    function clearInputs() {
+      inputs.forEach(function(i) { i.value = ''; });
+      inputs[0].focus();
+      updateButton();
+    }
+
+    function showError(msg) {
+      inputs.forEach(function(i) { i.classList.add('error'); });
+      $errorMsg.textContent = msg;
+      setTimeout(function() {
+        inputs.forEach(function(i) { i.classList.remove('error'); });
+      }, 300);
+    }
+
+    $btnVerify.addEventListener('click', submit);
+
+    function submit() {
+      var code = getCode();
+      if (code.length !== digits) return;
+
+      $btnVerify.disabled = true;
+      $errorMsg.textContent = '';
+
+      fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: code }),
+      })
+      .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
+      .then(function(result) {
+        if (result.ok && result.data.success) {
+          // Session cookie is set by the server — redirect to dashboard
+          location.href = '/';
+        } else {
+          attempts++;
+          var msg = result.data.error || 'Invalid code';
+          if (result.data.regenerated) {
+            msg = 'Too many attempts. Check terminal for new PIN.';
+          }
+          showError(msg);
+          clearInputs();
+          if (maxAttempts) {
+            $attempts.textContent = (maxAttempts - attempts) + ' attempt' + (maxAttempts - attempts !== 1 ? 's' : '') + ' remaining';
+          }
+        }
+      })
+      .catch(function() {
+        showError('Connection error. Try again.');
+        $btnVerify.disabled = false;
+      });
+    }
+  })();
+  </script>
+</body>
+</html>

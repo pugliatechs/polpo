@@ -29,6 +29,7 @@ const DEFAULT_SERVER = 'ws://127.0.0.1:7890';
 class WrappedAgent {
   constructor(options = {}) {
     this.serverUrl = options.serverUrl || process.env.POLPO_SERVER || DEFAULT_SERVER;
+    this.token = options.token || process.env.POLPO_TOKEN || null;
     this.name = options.name || `Session (${path.basename(options.cwd || process.cwd())})`;
     this.type = options.type || 'terminal';
     this.project = options.project || path.basename(options.cwd || process.cwd());
@@ -68,14 +69,18 @@ class WrappedAgent {
 
     return new Promise((resolve, reject) => {
       const reqUrl = new URL('/api/instances', apiBase);
+      const headers = {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+      };
+      if (this.token) {
+        headers['Authorization'] = `Bearer ${this.token}`;
+      }
       const req = http.request(
         reqUrl,
         {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Content-Length': Buffer.byteLength(body),
-          },
+          headers,
         },
         (res) => {
           let data = '';
@@ -102,7 +107,10 @@ class WrappedAgent {
   connectToHub() {
     if (!this.instanceId) throw new Error('Must register before connecting');
 
-    const wsUrl = `${this.serverUrl}?role=agent&instanceId=${this.instanceId}`;
+    let wsUrl = `${this.serverUrl}?role=agent&instanceId=${this.instanceId}`;
+    if (this.token) {
+      wsUrl += `&token=${encodeURIComponent(this.token)}`;
+    }
     this.ws = new WebSocket(wsUrl);
 
     this.ws.on('open', () => {
@@ -184,6 +192,7 @@ class WrappedAgent {
               POLPO_HUB_URL: this.serverUrl
                 .replace('ws://', 'http://')
                 .replace('wss://', 'https://'),
+              ...(this.token ? { POLPO_AUTH_TOKEN: this.token } : {}),
             },
           },
         },
