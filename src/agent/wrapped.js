@@ -25,6 +25,7 @@ const path = require('path');
 const readline = require('readline');
 
 const DEFAULT_SERVER = 'ws://127.0.0.1:7890';
+const UPLOAD_DIR = path.join(os.tmpdir(), 'polpo-uploads');
 
 class WrappedAgent {
   constructor(options = {}) {
@@ -419,6 +420,14 @@ class WrappedAgent {
     const TEXT_INLINE_LIMIT = 100 * 1024; // inline text files up to 100KB
 
     for (const att of attachments) {
+      // Validate attachment path is within the upload directory
+      const resolvedPath = path.resolve(att.path || '');
+      if (!resolvedPath.startsWith(UPLOAD_DIR + path.sep)) {
+        this._log(`Rejected attachment with path outside upload dir: ${att.path}`);
+        blocks.push({ type: 'text', text: `[Rejected attachment: invalid path]` });
+        continue;
+      }
+
       const isImage = att.mediaType && att.mediaType.startsWith('image/');
       const isPdf = att.mediaType === 'application/pdf'
         || (att.filename || '').toLowerCase().endsWith('.pdf');

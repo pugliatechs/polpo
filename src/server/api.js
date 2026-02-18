@@ -9,6 +9,11 @@ const { WrappedAgent } = require('../agent/wrapped');
 const UPLOAD_DIR = path.join(os.tmpdir(), 'polpo-uploads');
 const MAX_UPLOAD_SIZE = 10 * 1024 * 1024; // 10MB decoded
 
+// Session IDs are UUIDs — reject anything else to prevent path traversal / arg injection
+function isValidSessionId(id) {
+  return typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+}
+
 function createApiRouter(instanceManager) {
   const router = express.Router();
 
@@ -54,7 +59,10 @@ function createApiRouter(instanceManager) {
 
   // Serve uploaded files for thumbnail previews
   router.get('/uploads/:filename', (req, res) => {
-    const filePath = path.join(UPLOAD_DIR, req.params.filename);
+    const filePath = path.resolve(UPLOAD_DIR, req.params.filename);
+    if (!filePath.startsWith(UPLOAD_DIR + path.sep)) {
+      return res.status(400).json({ error: 'Invalid filename' });
+    }
     if (!fs.existsSync(filePath)) {
       return res.status(404).json({ error: 'File not found' });
     }
@@ -64,8 +72,8 @@ function createApiRouter(instanceManager) {
   // List discovered Claude Code sessions
   router.get('/sessions', async (req, res) => {
     try {
-      const maxDays = parseInt(req.query.days) || 7;
-      const limit = parseInt(req.query.limit) || 50;
+      const maxDays = Math.min(parseInt(req.query.days) || 7, 365);
+      const limit = Math.min(parseInt(req.query.limit) || 50, 500);
       const sessions = await scanSessions({
         maxAge: maxDays * 24 * 60 * 60 * 1000,
         limit,
@@ -78,6 +86,9 @@ function createApiRouter(instanceManager) {
 
   // Get conversation history for a session from the JSONL file
   router.get('/sessions/:sessionId/history', async (req, res) => {
+    if (!isValidSessionId(req.params.sessionId)) {
+      return res.status(400).json({ error: 'Invalid sessionId' });
+    }
     try {
       const history = await loadHistory(req.params.sessionId);
       res.json(history);
@@ -89,7 +100,10 @@ function createApiRouter(instanceManager) {
   // Resume a discovered session by spawning a WrappedAgent
   router.post('/sessions/:sessionId/resume', async (req, res) => {
     const { sessionId } = req.params;
-    const { name, cwd } = req.body;
+    if (!isValidSessionId(sessionId)) {
+      return res.status(400).json({ error: 'Invalid sessionId' });
+    }
+    const { name } = req.body;
 
     // Don't spawn duplicates
     if (wrappedAgents.has(sessionId)) {
@@ -100,7 +114,7 @@ function createApiRouter(instanceManager) {
     try {
       const agent = new WrappedAgent({
         name: name || `Resumed (${sessionId.slice(0, 8)})`,
-        cwd: cwd || process.cwd(),
+        cwd: process.cwd(),
         resumeSessionId: sessionId,
         serverUrl: `ws://127.0.0.1:${req.socket.localPort}`,
       });
@@ -220,15 +234,18 @@ function createApiRouter(instanceManager) {
     } else if (isPlan) {
       approvalType = 'plan';
       description = toolName === 'ExitPlanMode' ? 'Plan ready for review' : 'Entering plan mode';
-      // Read plan file content if available
+      // Read plan file content if available (restrict to ~/.claude/plans/)
       if (toolInput && toolInput.planFile) {
-        planFile = toolInput.planFile;
-        try {
-          const fs = require('fs');
-          const planContent = fs.readFileSync(toolInput.planFile, 'utf8');
-          command = planContent;
-        } catch (e) {
-          command = '';
+        const claudePlansDir = path.join(os.homedir(), '.claude', 'plans');
+        const resolvedPlan = path.resolve(toolInput.planFile);
+        if (resolvedPlan.startsWith(claudePlansDir + path.sep)) {
+          planFile = resolvedPlan;
+          try {
+            const planContent = fs.readFileSync(resolvedPlan, 'utf8');
+            command = planContent;
+          } catch (e) {
+            command = '';
+          }
         }
       }
     } else if (isQuestion) {
