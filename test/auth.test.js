@@ -176,6 +176,15 @@ describe('burnToken', () => {
     assert.ok(/^\d{4}$/.test(pin));
     assert.equal(state.pin, pin);
   });
+
+  it('preserves existing PIN when mode is pin', () => {
+    const state = new AuthState({ token: 'tok', mode: 'pin' });
+    state.pin = '4829';
+    const pin = burnToken(state);
+    assert.equal(pin, '4829');
+    assert.equal(state.pin, '4829');
+    assert.equal(state.tokenBurned, true);
+  });
 });
 
 // --- PIN ---

@@ -84,7 +84,10 @@ function setSessionCookie(res, sessionId, secure) {
 function burnToken(authState) {
   authState.tokenBurned = true;
   if (authState.mode === 'pin') {
-    authState.pin = generatePin();
+    // Only generate a PIN if one wasn't already set (e.g. by CLI startup)
+    if (!authState.pin) {
+      authState.pin = generatePin();
+    }
     authState.pinAttempts = 0;
   }
   return authState.pin;
@@ -187,7 +190,8 @@ function computeTotp(secret, timeStep) {
 
 function verifyTotp(secret, code) {
   const now = Math.floor(Date.now() / 30000);
-  for (let i = -1; i <= 1; i++) {
+  // ±2 window (150s effective) to account for clock skew and app-switching delay
+  for (let i = -2; i <= 2; i++) {
     if (timingSafeEqual(code, computeTotp(secret, now + i))) {
       return true;
     }

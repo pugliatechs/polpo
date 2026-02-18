@@ -169,14 +169,31 @@ async function runServer() {
     const os = require('os');
     const configPath = require('path').join(os.homedir(), '.config', 'polpo', 'totp.json');
     let secret = loadTotpSecret(configPath);
+    const isNewSecret = !secret;
     if (!secret) {
       secret = generateTotpSecret();
       saveTotpSecret(configPath, secret);
-      console.log('\n  🔐 TOTP Setup (first time only):');
-      console.log(`     Secret: ${secret}`);
-      console.log(`     URI:    ${buildTotpUri(secret, 'Polpo')}`);
-      console.log('     Add this to your authenticator app (Google Authenticator, Authy, etc.)\n');
     }
+    const totpUri = buildTotpUri(secret, 'Polpo');
+    const qrcode = require('qrcode-terminal');
+    if (isNewSecret) {
+      console.log('\n  ┌─────────────────────────────────────────────┐');
+      console.log('  │  🔐 TOTP Setup — scan with AUTHENTICATOR APP │');
+      console.log('  └─────────────────────────────────────────────┘\n');
+    } else {
+      console.log('\n  ┌─────────────────────────────────────────────┐');
+      console.log('  │  🔐 TOTP — scan with AUTHENTICATOR APP       │');
+      console.log('  └─────────────────────────────────────────────┘\n');
+    }
+    qrcode.generate(totpUri, { small: true }, (qr) => {
+      const indented = qr.split('\n').map((line) => '    ' + line).join('\n');
+      console.log(indented);
+      console.log(`\n     Secret: ${secret}`);
+      if (isNewSecret) {
+        console.log('     Add to Google Authenticator, Authy, etc.');
+      }
+      console.log('');
+    });
     server.authState.totpSecret = secret;
   }
 

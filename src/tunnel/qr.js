@@ -2,7 +2,9 @@ const qrcode = require('qrcode-terminal');
 
 function displayQR(url) {
   console.log('');
-  console.log('  Scan this QR code on your phone:');
+  console.log('  ┌─────────────────────────────────────────────┐');
+  console.log('  │  📱 Tunnel URL — scan with PHONE CAMERA      │');
+  console.log('  └─────────────────────────────────────────────┘');
   console.log('');
   qrcode.generate(url, { small: true }, (qr) => {
     const indented = qr.split('\n').map((line) => '    ' + line).join('\n');
