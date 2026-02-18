@@ -1,88 +1,132 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="400" height="400">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
   <defs>
-    <linearGradient id="bodyGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#6366f1"/>
-      <stop offset="100%" stop-color="#8b5cf6"/>
+    <linearGradient id="body" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f87171"/>
+      <stop offset="100%" stop-color="#ef4444"/>
     </linearGradient>
-    <linearGradient id="tentGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#818cf8"/>
-      <stop offset="100%" stop-color="#a78bfa"/>
+    <linearGradient id="bodyLight" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fca5a5"/>
+      <stop offset="100%" stop-color="#f87171"/>
     </linearGradient>
-    <linearGradient id="glowGrad" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" stop-color="#c4b5fd" stop-opacity="0.3"/>
-      <stop offset="100%" stop-color="#6366f1" stop-opacity="0"/>
+    <linearGradient id="spot" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fecaca"/>
+      <stop offset="100%" stop-color="#fca5a5"/>
     </linearGradient>
+    <radialGradient id="headShine" cx="40%" cy="35%" r="50%">
+      <stop offset="0%" stop-color="#fecaca" stop-opacity="0.5"/>
+      <stop offset="100%" stop-color="#f87171" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="cheek" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#dc2626" stop-opacity="0.25"/>
+      <stop offset="100%" stop-color="#dc2626" stop-opacity="0"/>
+    </radialGradient>
   </defs>
 
-  <!-- Subtle glow behind -->
-  <ellipse cx="200" cy="210" rx="140" ry="120" fill="url(#glowGrad)"/>
+  <!-- === TENTACLES (8 arms, drawn behind head) === -->
+  <g fill="none" stroke-linecap="round">
 
-  <!-- Tentacles (8 arms curling outward) -->
-  <g fill="none" stroke-width="18" stroke-linecap="round">
-    <!-- Back tentacles (drawn first, behind body) -->
-    <!-- Left back -->
-    <path d="M145,220 C115,270 90,310 65,330 Q50,342 55,355" stroke="url(#tentGrad)" opacity="0.7"/>
-    <!-- Right back -->
-    <path d="M255,220 C285,270 310,310 335,330 Q350,342 345,355" stroke="url(#tentGrad)" opacity="0.7"/>
+    <!-- Arm 1: far left, curling left -->
+    <path d="M195,280 C150,310 100,330 70,360 Q50,380 60,400 Q70,415 85,405"
+          stroke="url(#bodyLight)" stroke-width="28"/>
+    <path d="M195,280 C150,310 100,330 70,360 Q50,380 60,400 Q70,415 85,405"
+          stroke="url(#body)" stroke-width="22"/>
+    <!-- suckers -->
+    <circle cx="150" cy="315" r="5" fill="url(#spot)" opacity="0.7"/>
+    <circle cx="110" cy="340" r="5" fill="url(#spot)" opacity="0.7"/>
+    <circle cx="80" cy="368" r="4.5" fill="url(#spot)" opacity="0.7"/>
+    <circle cx="66" cy="393" r="4" fill="url(#spot)" opacity="0.7"/>
 
-    <!-- Left far -->
-    <path d="M130,215 C95,240 60,265 40,290 Q28,308 38,318" stroke="url(#tentGrad)" opacity="0.8"/>
-    <!-- Right far -->
-    <path d="M270,215 C305,240 340,265 360,290 Q372,308 362,318" stroke="url(#tentGrad)" opacity="0.8"/>
+    <!-- Arm 2: left, curling down-left -->
+    <path d="M215,300 C185,350 160,400 145,440 Q138,460 150,468 Q162,472 168,458"
+          stroke="url(#bodyLight)" stroke-width="28"/>
+    <path d="M215,300 C185,350 160,400 145,440 Q138,460 150,468 Q162,472 168,458"
+          stroke="url(#body)" stroke-width="22"/>
+    <circle cx="195" cy="345" r="5" fill="url(#spot)" opacity="0.7"/>
+    <circle cx="173" cy="388" r="5" fill="url(#spot)" opacity="0.7"/>
+    <circle cx="155" cy="428" r="4.5" fill="url(#spot)" opacity="0.7"/>
 
-    <!-- Left mid -->
-    <path d="M150,230 C125,275 105,320 90,350 Q82,368 92,372" stroke="url(#tentGrad)" opacity="0.85"/>
-    <!-- Right mid -->
-    <path d="M250,230 C275,275 295,320 310,350 Q318,368 308,372" stroke="url(#tentGrad)" opacity="0.85"/>
+    <!-- Arm 3: center-left, curling down -->
+    <path d="M240,310 C230,365 225,420 228,460 Q230,480 245,478 Q258,474 254,456"
+          stroke="url(#bodyLight)" stroke-width="26"/>
+    <path d="M240,310 C230,365 225,420 228,460 Q230,480 245,478 Q258,474 254,456"
+          stroke="url(#body)" stroke-width="20"/>
+    <circle cx="234" cy="365" r="5" fill="url(#spot)" opacity="0.7"/>
+    <circle cx="228" cy="415" r="4.5" fill="url(#spot)" opacity="0.7"/>
+    <circle cx="230" cy="452" r="4" fill="url(#spot)" opacity="0.7"/>
 
-    <!-- Left front -->
-    <path d="M165,235 C150,285 140,335 130,365 Q125,380 135,382" stroke="url(#tentGrad)"/>
-    <!-- Right front -->
-    <path d="M235,235 C250,285 260,335 270,365 Q275,380 265,382" stroke="url(#tentGrad)"/>
+    <!-- Arm 4: center-right, curling down -->
+    <path d="M280,310 C290,365 295,420 292,460 Q290,480 275,478 Q262,474 266,456"
+          stroke="url(#bodyLight)" stroke-width="26"/>
+    <path d="M280,310 C290,365 295,420 292,460 Q290,480 275,478 Q262,474 266,456"
+          stroke="url(#body)" stroke-width="20"/>
+    <circle cx="286" cy="365" r="5" fill="url(#spot)" opacity="0.7"/>
+    <circle cx="292" cy="415" r="4.5" fill="url(#spot)" opacity="0.7"/>
+    <circle cx="290" cy="452" r="4" fill="url(#spot)" opacity="0.7"/>
 
-    <!-- Suction cups (small dots along front tentacles) -->
-    <g fill="#c4b5fd" opacity="0.5">
-      <circle cx="157" cy="265" r="3"/>
-      <circle cx="150" cy="295" r="3"/>
-      <circle cx="145" cy="325" r="3"/>
-      <circle cx="137" cy="355" r="3"/>
-      <circle cx="243" cy="265" r="3"/>
-      <circle cx="250" cy="295" r="3"/>
-      <circle cx="255" cy="325" r="3"/>
-      <circle cx="263" cy="355" r="3"/>
-    </g>
+    <!-- Arm 5: right, curling down-right -->
+    <path d="M305,300 C335,350 360,400 375,440 Q382,460 370,468 Q358,472 352,458"
+          stroke="url(#bodyLight)" stroke-width="28"/>
+    <path d="M305,300 C335,350 360,400 375,440 Q382,460 370,468 Q358,472 352,458"
+          stroke="url(#body)" stroke-width="22"/>
+    <circle cx="325" cy="345" r="5" fill="url(#spot)" opacity="0.7"/>
+    <circle cx="348" cy="388" r="5" fill="url(#spot)" opacity="0.7"/>
+    <circle cx="365" cy="428" r="4.5" fill="url(#spot)" opacity="0.7"/>
+
+    <!-- Arm 6: far right, curling right -->
+    <path d="M325,280 C370,310 420,330 450,360 Q470,380 460,400 Q450,415 435,405"
+          stroke="url(#bodyLight)" stroke-width="28"/>
+    <path d="M325,280 C370,310 420,330 450,360 Q470,380 460,400 Q450,415 435,405"
+          stroke="url(#body)" stroke-width="22"/>
+    <circle cx="370" cy="315" r="5" fill="url(#spot)" opacity="0.7"/>
+    <circle cx="410" cy="340" r="5" fill="url(#spot)" opacity="0.7"/>
+    <circle cx="440" cy="368" r="4.5" fill="url(#spot)" opacity="0.7"/>
+    <circle cx="454" cy="393" r="4" fill="url(#spot)" opacity="0.7"/>
+
+    <!-- Arm 7: upper-left, curling up-left (behind head) -->
+    <path d="M185,240 C140,245 100,265 75,295 Q60,315 72,328 Q84,335 92,320"
+          stroke="url(#bodyLight)" stroke-width="26"/>
+    <path d="M185,240 C140,245 100,265 75,295 Q60,315 72,328 Q84,335 92,320"
+          stroke="url(#body)" stroke-width="20"/>
+    <circle cx="138" cy="250" r="4.5" fill="url(#spot)" opacity="0.7"/>
+    <circle cx="100" cy="272" r="4.5" fill="url(#spot)" opacity="0.7"/>
+    <circle cx="78" cy="300" r="4" fill="url(#spot)" opacity="0.7"/>
+
+    <!-- Arm 8: upper-right, curling up-right (behind head) -->
+    <path d="M335,240 C380,245 420,265 445,295 Q460,315 448,328 Q436,335 428,320"
+          stroke="url(#bodyLight)" stroke-width="26"/>
+    <path d="M335,240 C380,245 420,265 445,295 Q460,315 448,328 Q436,335 428,320"
+          stroke="url(#body)" stroke-width="20"/>
+    <circle cx="382" cy="250" r="4.5" fill="url(#spot)" opacity="0.7"/>
+    <circle cx="420" cy="272" r="4.5" fill="url(#spot)" opacity="0.7"/>
+    <circle cx="442" cy="300" r="4" fill="url(#spot)" opacity="0.7"/>
   </g>
 
-  <!-- Head / body -->
-  <ellipse cx="200" cy="175" rx="85" ry="95" fill="url(#bodyGrad)"/>
+  <!-- === HEAD === -->
+  <ellipse cx="260" cy="195" rx="110" ry="130" fill="url(#body)"/>
+  <!-- Shine highlight -->
+  <ellipse cx="260" cy="195" rx="110" ry="130" fill="url(#headShine)"/>
 
-  <!-- Head highlight -->
-  <ellipse cx="185" cy="140" rx="40" ry="30" fill="white" opacity="0.08"/>
+  <!-- Darker patch on top-right of head -->
+  <ellipse cx="305" cy="155" rx="45" ry="55" fill="#dc2626" opacity="0.25" transform="rotate(-15,305,155)"/>
 
-  <!-- Eyes -->
-  <g>
-    <!-- Left eye white -->
-    <ellipse cx="172" cy="175" rx="22" ry="25" fill="#f0f0ff"/>
-    <!-- Right eye white -->
-    <ellipse cx="228" cy="175" rx="22" ry="25" fill="#f0f0ff"/>
+  <!-- === FACE === -->
 
-    <!-- Left pupil -->
-    <ellipse cx="175" cy="178" rx="11" ry="14" fill="#1e1b4b"/>
-    <!-- Right pupil -->
-    <ellipse cx="231" cy="178" rx="11" ry="14" fill="#1e1b4b"/>
+  <!-- Left eye -->
+  <ellipse cx="225" cy="200" rx="24" ry="28" fill="white"/>
+  <ellipse cx="228" cy="205" rx="13" ry="16" fill="#1a1a2e"/>
+  <circle cx="233" cy="196" r="6" fill="white" opacity="0.9"/>
+  <circle cx="225" cy="210" r="3" fill="white" opacity="0.4"/>
 
-    <!-- Eye shine -->
-    <circle cx="180" cy="170" r="5" fill="white" opacity="0.9"/>
-    <circle cx="236" cy="170" r="5" fill="white" opacity="0.9"/>
-    <circle cx="173" cy="182" r="2.5" fill="white" opacity="0.5"/>
-    <circle cx="229" cy="182" r="2.5" fill="white" opacity="0.5"/>
-  </g>
+  <!-- Right eye -->
+  <ellipse cx="295" cy="200" rx="24" ry="28" fill="white"/>
+  <ellipse cx="298" cy="205" rx="13" ry="16" fill="#1a1a2e"/>
+  <circle cx="303" cy="196" r="6" fill="white" opacity="0.9"/>
+  <circle cx="295" cy="210" r="3" fill="white" opacity="0.4"/>
 
-  <!-- Subtle smile -->
-  <path d="M185,205 Q200,218 215,205" fill="none" stroke="#4338ca" stroke-width="2.5" stroke-linecap="round" opacity="0.6"/>
+  <!-- Smile -->
+  <path d="M240,245 Q260,268 280,245" fill="none" stroke="#b91c1c" stroke-width="3.5" stroke-linecap="round"/>
 
-  <!-- Terminal/code symbol on forehead -->
-  <g transform="translate(200,130)" opacity="0.35">
-    <text text-anchor="middle" font-family="monospace" font-size="22" fill="white" font-weight="bold">&gt;_</text>
-  </g>
+  <!-- Cheeks -->
+  <ellipse cx="210" cy="240" rx="18" ry="12" fill="url(#cheek)"/>
+  <ellipse cx="310" cy="240" rx="18" ry="12" fill="url(#cheek)"/>
 </svg>

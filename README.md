@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="Polpo" width="180" height="180">
+  <img src="assets/logo.svg" alt="Polpo" width="240" height="240">
 </p>
 
 <h1 align="center">Polpo</h1>
