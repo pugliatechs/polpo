@@ -74,6 +74,8 @@ The dashboard shows active sessions, past session history, and lets you send pro
 | Full Remote Control | Send prompts and see responses from your phone |
 | Real-time Streaming | Tool calls, results, and text stream as they happen |
 | Phone-based Approval | Approve or reject tool use from your phone (MCP for sessions, hooks for VS Code) |
+| Auto-approve | Tap "Approve All" to auto-approve all tool use for the rest of the session |
+| File Attachments | Send any file from your phone — images, PDFs, code, documents, etc. |
 | Session Browser | Browse past Claude Code sessions with conversation history |
 | Session Resume | Resume any past session directly from the phone dashboard |
 | Instance Dashboard | See all active sessions at a glance with live status |
@@ -102,7 +104,13 @@ How it works:
 
 ### Tool Approval
 
-When a session runs in `default` permission mode, an MCP permission server handles tool approval. When Claude needs to run a tool that requires permission, the request appears on your phone as a banner with approve/reject buttons. The CLI blocks until you respond.
+When a session runs in `default` permission mode, an MCP permission server handles tool approval. When Claude needs to run a tool that requires permission, the request appears on your phone as a banner with three options:
+
+- **Approve** — allow this single tool use
+- **Approve All** — allow this tool use and enable auto-approve for the rest of the session (all future tool calls are approved instantly without involving the phone)
+- **Reject** — deny this tool use
+
+When auto-approve is active, a green "Auto-approve ON" indicator appears with a "Stop" button to disable it.
 
 To skip approval entirely (use with caution):
 
@@ -151,6 +159,15 @@ By default hooks are read-only. To enable phone-based tool approval, set `POLPO_
 }
 ```
 
+## File Attachments
+
+Tap the paperclip icon to attach files from your phone. Supported types:
+
+- **Images** — sent as base64 to Claude's vision (multimodal)
+- **PDFs** — sent as native document content blocks
+- **Text/code files** — small files (up to 100KB) are inlined directly in the prompt; larger files are saved to disk and Claude reads them with the Read tool
+- **Any other file** — saved to disk and referenced by path for Claude to read
+
 ## Mobile UI
 
 - Dark theme optimized for OLED screens
@@ -179,7 +196,9 @@ By default hooks are read-only. To enable phone-based tool approval, set `POLPO_
 | POST | `/api/instances/:id/prompt` | Send a prompt |
 | POST | `/api/instances/:id/approve` | Approve pending tool use |
 | POST | `/api/instances/:id/reject` | Reject pending tool use |
+| POST | `/api/instances/:id/auto-approve` | Toggle auto-approve for an instance |
 | POST | `/api/instances/:id/abort` | Abort current task |
+| POST | `/api/upload` | Upload a file attachment (base64) |
 | POST | `/api/permission-request` | MCP permission server long-poll |
 | GET | `/health` | Health check |
 
