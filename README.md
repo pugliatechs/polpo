@@ -2,40 +2,49 @@
 
 **Work on Claude Code from your phone.**
 
-Polpo lets developers send prompts, see responses, and control Claude Code sessions from any mobile device over VPN, Wi-Fi, or LAN.
+Polpo lets developers send prompts, see responses, and control Claude Code sessions from any mobile device over VPN, Wi-Fi, LAN, or a public tunnel.
 
 ## Architecture
 
-```
-                    Phone (VPN / LAN)
-                       |
-              +--------v---------+
-              |  Polpo Hub       | :7890
-              |  (Express + WS)  |
-              +--+-------+---+---+
-                 |       |   |
-    +------------v--+ +--v---+----------+  +--v-----------+
-    | Session Agent | | Hook Bridge     |  | Session      |
-    | (wrapped)     | | (monitoring)    |  | Browser      |
-    +--------+------+ +---+------------+   +--------------+
-             |             |                reads JSONL
-    +--------v------+ +---v------------+    session files
-    | claude CLI    | | Claude Code    |
-    | (stream-json) | | (VS Code/term) |
-    +-------+-------+ +----------------+
-            |            read-only
-    +-------v-------+
-    | MCP Permission|
-    | Server        |
-    +---------------+
-      phone approval
+```mermaid
+graph TD
+    Phone["Phone (any network)"]
+    Tunnel["Tunnel (optional)
+    cloudflared / localtunnel / ngrok / SSH"]
+    Hub["Polpo Hub :7890
+    Express + WebSocket"]
+    Session["Session Agent
+    (wrapped)"]
+    Hooks["Hook Bridge
+    (monitoring)"]
+    Browser["Session Browser"]
+    Claude["claude CLI
+    (stream-json)"]
+    VSCode["Claude Code
+    (VS Code / terminal)"]
+    MCP["MCP Permission
+    Server"]
+    JSONL["~/.claude/projects/
+    JSONL files"]
+
+    Phone -->|"cellular / internet"| Tunnel
+    Phone -->|"VPN / LAN"| Hub
+    Tunnel --> Hub
+    Hub --> Session
+    Hub --> Hooks
+    Hub --> Browser
+    Session --> Claude
+    Hooks -->|"read-only"| VSCode
+    Claude --> MCP
+    MCP -->|"phone approval"| Hub
+    Browser -->|"reads"| JSONL
 ```
 
 Three integration modes:
 
-- **Session**: spawns `claude` CLI with JSON streaming for full bidirectional control from phone, including MCP-based tool approval
-- **Hooks**: taps into existing VS Code/terminal sessions via Claude Code hooks for read-only monitoring (with optional approval)
-- **Session Browser**: discovers and displays past Claude Code sessions from JSONL files, with the ability to resume them
+- **Session** — spawns `claude` CLI with JSON streaming for full bidirectional control from phone, including MCP-based tool approval
+- **Hooks** — taps into existing VS Code/terminal sessions via Claude Code hooks for read-only monitoring (with optional approval)
+- **Session Browser** — discovers and displays past Claude Code sessions from JSONL files, with the ability to resume them
 
 ## Quick Start
 
@@ -84,7 +93,59 @@ The dashboard shows active sessions, past session history, and lets you send pro
 | Multi-Instance | Run and monitor unlimited parallel sessions |
 | Cost Tracking | Per-turn API costs displayed inline |
 | Mobile-First UI | Dark OLED theme, touch-optimized, safe-area support, responsive layout |
+| Tunnel Access | Expose the hub over the internet with `--tunnel` (cloudflared, localtunnel, ngrok, SSH) |
 | VS Code Monitoring | Passively watch existing VS Code sessions via hooks |
+
+## Tunnel Access (No VPN Required)
+
+Add `--tunnel` to expose the hub over the internet. A public URL and QR code are printed for your phone to scan — no VPN or same-network requirement.
+
+```bash
+# Auto-detect best available provider
+node bin/polpo.js server --tunnel
+
+# Use a specific provider
+node bin/polpo.js server --tunnel cloudflared
+node bin/polpo.js server --tunnel localtunnel
+node bin/polpo.js server --tunnel ngrok
+
+# SSH reverse tunnel to your own server
+node bin/polpo.js server --tunnel ssh --tunnel-host user@myserver.com
+node bin/polpo.js server --tunnel ssh --tunnel-host user@myserver.com --tunnel-port 8080
+```
+
+### Tunnel Flow
+
+```mermaid
+sequenceDiagram
+    participant Dev as Developer
+    participant Polpo as Polpo Server
+    participant Tunnel as Tunnel Provider
+    participant Phone as Phone Browser
+
+    Dev->>Polpo: polpo server --tunnel
+    Polpo->>Polpo: Start Express + WS on :7890
+    Polpo->>Tunnel: Start tunnel (auto-detect or explicit)
+    Tunnel-->>Polpo: Public URL
+    Polpo->>Dev: Print QR code + URL
+    Dev->>Phone: Scan QR code
+    Phone->>Tunnel: HTTPS request
+    Tunnel->>Polpo: Forward to localhost:7890
+    Polpo-->>Phone: Dashboard + WebSocket
+```
+
+### Provider Comparison
+
+| Provider | Install | Signup | Auto-detect | Notes |
+|----------|---------|--------|-------------|-------|
+| **cloudflared** | [Download](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) | No | Yes (1st) | Best reliability, free quick tunnels |
+| **localtunnel** | Bundled | No | Yes (2nd) | Always available fallback (npm dep) |
+| **ngrok** | [Download](https://ngrok.com/download) | Yes | No | Requires auth token, stable URLs available |
+| **ssh** | Built-in | No | No | Requires `--tunnel-host`, uses your own server |
+
+Auto-detect tries cloudflared first, then falls back to localtunnel. ngrok and SSH require explicit `--tunnel <provider>` since they need configuration.
+
+If the tunnel fails, the server still runs normally on LAN.
 
 ## Remote Sessions (Full Control)
 
@@ -94,13 +155,32 @@ The `session` command spawns a `claude` CLI process with JSON streaming and give
 node bin/polpo.js session --cwd /path/to/project --name "My Task"
 ```
 
-How it works:
+### Session Flow
 
-1. Agent registers with the hub and connects via WebSocket
-2. Waits for a prompt from your phone
-3. Spawns `claude --input-format stream-json --output-format stream-json`
-4. Relays everything: prompts in, responses + tool calls + results out
-5. Process stays alive for multi-turn conversations
+```mermaid
+sequenceDiagram
+    participant Phone
+    participant Hub as Polpo Hub
+    participant Agent as Session Agent
+    participant CLI as claude CLI
+    participant MCP as MCP Permission Server
+
+    Agent->>Hub: Register + WebSocket connect
+    Phone->>Hub: Send prompt
+    Hub->>Agent: Forward prompt
+    Agent->>CLI: Spawn claude --stream-json
+    CLI->>Agent: Streaming response (text, tool calls)
+    Agent->>Hub: Relay messages
+    Hub->>Phone: Real-time updates
+
+    Note over CLI,MCP: Tool requires approval
+    CLI->>MCP: permission_prompt_tool call
+    MCP->>Hub: POST /api/permission-request (long-poll)
+    Hub->>Phone: Show approval banner
+    Phone->>Hub: Approve / Reject
+    Hub->>MCP: Return decision
+    MCP->>CLI: allow / deny
+```
 
 ### Tool Approval
 
@@ -138,6 +218,32 @@ Sessions are loaded from JSONL files and deduplicated to show clean conversation
 ## VS Code Monitoring (Hooks)
 
 For passively monitoring existing VS Code Claude Code sessions, use the hooks integration.
+
+### Hook Flow
+
+```mermaid
+sequenceDiagram
+    participant CC as Claude Code (VS Code)
+    participant Hook as Hook Script
+    participant Bridge as Bridge Daemon
+    participant Hub as Polpo Hub
+    participant Phone
+
+    CC->>Hook: PreToolUse / PostToolUse / Notification
+    Hook->>Bridge: Unix socket message
+    Bridge->>Hub: WebSocket relay
+    Hub->>Phone: Real-time update
+
+    Note over Hook,Bridge: With POLPO_APPROVE=1
+    CC->>Hook: PreToolUse (approval mode)
+    Hook->>Bridge: approval_request
+    Bridge->>Hub: Forward to dashboard
+    Hub->>Phone: Show approval banner
+    Phone->>Hub: Approve / Reject
+    Hub->>Bridge: Decision
+    Bridge->>Hook: approval_response
+    Hook->>CC: allow / block
+```
 
 ### Setup
 
@@ -218,6 +324,14 @@ Connect to `ws://<host>:<port>?role=agent&instanceId=<id>` as an agent.
 | `POLPO_NAME` | auto from directory | Display name for the instance |
 | `POLPO_APPROVE` | `0` | Set to `1` for phone approval (hooks only) |
 | `POLPO_TIMEOUT` | `300000` | Approval timeout in ms (default 5 min) |
+
+## Testing
+
+```bash
+npm test
+```
+
+Runs unit tests with Node's built-in test runner. Tests cover the instance manager, tunnel provider logic, and session JSONL parsing.
 
 ## License
 

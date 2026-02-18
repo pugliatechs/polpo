@@ -40,6 +40,11 @@ function printHelp() {
   SERVER OPTIONS
     --port <n>      Port to listen on (default: 7890)
     --host <addr>   Host to bind to (default: 0.0.0.0)
+    --tunnel [provider]  Start a tunnel for remote phone access
+                         Providers: cloudflared, localtunnel, ngrok, ssh
+                         Omit provider to auto-detect (tries cloudflared, then localtunnel)
+    --tunnel-host <host> SSH tunnel host (required for ssh provider, e.g. user@server)
+    --tunnel-port <n>    Remote port for SSH tunnel (default: 80)
     --verbose       Enable verbose logging
 
   AGENT OPTIONS
@@ -88,9 +93,25 @@ function printHelp() {
     # Print Claude Code hook config to add to settings.json
     polpo hooks
 
+  TUNNEL EXAMPLES
+    # Auto-detect best available tunnel provider
+    polpo server --tunnel
+
+    # Use a specific provider
+    polpo server --tunnel cloudflared
+    polpo server --tunnel localtunnel
+    polpo server --tunnel ngrok
+
+    # SSH reverse tunnel
+    polpo server --tunnel ssh --tunnel-host user@myserver.com
+    polpo server --tunnel ssh --tunnel-host user@myserver.com --tunnel-port 8080
+
   MOBILE ACCESS
     Once the server is running, open http://<your-computer-ip>:7890
     on your phone's browser (must be on the same network).
+
+    With --tunnel, a public URL and QR code are displayed for scanning
+    from any network (no VPN/LAN required).
 `);
 }
 
@@ -104,32 +125,66 @@ async function runServer() {
 
   await server.start();
 
+  const port = parseInt(flags.port) || 7890;
+  let tunnel = null;
+
+  // Start tunnel if requested
+  if (flags.tunnel) {
+    try {
+      const { startTunnel } = require('../src/tunnel/index');
+      const { displayQR } = require('../src/tunnel/qr');
+      tunnel = await startTunnel({
+        provider: flags.tunnel,
+        port,
+        tunnelHost: flags['tunnel-host'],
+        tunnelPort: flags['tunnel-port'] ? parseInt(flags['tunnel-port']) : undefined,
+      });
+      console.log(`  🌐 Tunnel active: ${tunnel.url}`);
+      displayQR(tunnel.url);
+    } catch (err) {
+      console.error(`  ⚠️  Tunnel failed: ${err.message}`);
+      console.log('  Server is still running on LAN.\n');
+    }
+  }
+
   // Print local network addresses for convenience
-  try {
-    const os = require('os');
-    const nets = os.networkInterfaces();
-    const addresses = [];
-    for (const name of Object.keys(nets)) {
-      for (const net of nets[name]) {
-        if (net.family === 'IPv4' && !net.internal) {
-          addresses.push(net.address);
+  if (!tunnel) {
+    try {
+      const os = require('os');
+      const nets = os.networkInterfaces();
+      const addresses = [];
+      for (const name of Object.keys(nets)) {
+        for (const net of nets[name]) {
+          if (net.family === 'IPv4' && !net.internal) {
+            addresses.push(net.address);
+          }
         }
       }
+      if (addresses.length > 0) {
+        console.log('  📱 Open on your phone (same network):');
+        addresses.forEach((addr) => {
+          console.log(`     http://${addr}:${port}`);
+        });
+        console.log('');
+      }
+    } catch (e) {
+      // not critical
     }
-    if (addresses.length > 0) {
-      console.log('  📱 Open on your phone:');
-      const port = parseInt(flags.port) || 7890;
-      addresses.forEach((addr) => {
-        console.log(`     http://${addr}:${port}`);
-      });
-      console.log('');
-    }
-  } catch (e) {
-    // not critical
   }
 
   process.on('SIGINT', async () => {
     console.log('\n  Shutting down...');
+    if (tunnel) {
+      try { tunnel.close(); } catch (e) { /* ignore */ }
+    }
+    await server.stop();
+    process.exit(0);
+  });
+
+  process.on('SIGTERM', async () => {
+    if (tunnel) {
+      try { tunnel.close(); } catch (e) { /* ignore */ }
+    }
     await server.stop();
     process.exit(0);
   });
