@@ -17,6 +17,7 @@
     "mobile",
     "developer-tools"
   ],
+  "author": "Marco Pennelli <marco.pennelli@technosec.net>",
   "license": "MIT",
   "dependencies": {
     "express": "^4.18.2",
