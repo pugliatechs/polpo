@@ -1,8 +1,8 @@
+<h1 align="center">🐙 Polpo</h1>
+
 <p align="center">
   <img src="assets/logo.svg" alt="Polpo" width="240" height="240">
 </p>
-
-<h1 align="center">Polpo</h1>
 
 <p align="center"><strong>Work on Claude Code from your phone.</strong></p>
 
