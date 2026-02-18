@@ -14,7 +14,7 @@ function createServer(options = {}) {
   const server = http.createServer(app);
   const instanceManager = new InstanceManager();
 
-  app.use(express.json());
+  app.use(express.json({ limit: '15mb' }));
 
   // Serve mobile web UI
   app.use(express.static(path.join(__dirname, '..', 'web')));

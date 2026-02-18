@@ -1,6 +1,13 @@
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const os = require('os');
 const { scanSessions, loadHistory } = require('./sessions');
 const { WrappedAgent } = require('../agent/wrapped');
+
+const UPLOAD_DIR = path.join(os.tmpdir(), 'polpo-uploads');
+const MAX_UPLOAD_SIZE = 10 * 1024 * 1024; // 10MB decoded
 
 function createApiRouter(instanceManager) {
   const router = express.Router();
@@ -11,6 +18,48 @@ function createApiRouter(instanceManager) {
   // Pending permission decisions: instanceId -> { resolve, timeout }
   // Used by the MCP permission server long-poll endpoint.
   const pendingDecisions = new Map();
+
+  // Upload a file attachment from the phone
+  router.post('/upload', (req, res) => {
+    const { filename, mediaType, data } = req.body;
+    if (!filename || !data) {
+      return res.status(400).json({ error: 'filename and data are required' });
+    }
+
+    // Decode base64
+    const buffer = Buffer.from(data, 'base64');
+    if (buffer.length > MAX_UPLOAD_SIZE) {
+      return res.status(413).json({ error: 'File too large (max 10MB)' });
+    }
+
+    // Sanitize filename: keep only alphanumeric, dots, hyphens, underscores
+    const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 100);
+    const id = crypto.randomUUID();
+    const savedName = `${id}-${safeName}`;
+
+    // Ensure upload dir exists
+    fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+    const filePath = path.join(UPLOAD_DIR, savedName);
+    fs.writeFileSync(filePath, buffer);
+
+    res.json({
+      id,
+      path: filePath,
+      filename: safeName,
+      mediaType: mediaType || 'application/octet-stream',
+      size: buffer.length,
+    });
+  });
+
+  // Serve uploaded files for thumbnail previews
+  router.get('/uploads/:filename', (req, res) => {
+    const filePath = path.join(UPLOAD_DIR, req.params.filename);
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'File not found' });
+    }
+    res.sendFile(filePath);
+  });
 
   // List discovered Claude Code sessions
   router.get('/sessions', async (req, res) => {
@@ -138,6 +187,12 @@ function createApiRouter(instanceManager) {
     const { instanceId, toolUseId, toolName, toolInput } = req.body;
     if (!instanceId) return res.status(400).json({ error: 'instanceId required' });
 
+    // Auto-approve: return immediately without involving the phone
+    const inst = instanceManager.get(instanceId);
+    if (inst && inst.autoApprove) {
+      return res.json({ behavior: 'allow', updatedInput: toolInput });
+    }
+
     // Build description for the phone UI
     let description = toolName || 'unknown';
     let command = '';
@@ -223,6 +278,29 @@ function createApiRouter(instanceManager) {
         res.status(502).json({ error: 'No pending approval' });
       }
     }
+  });
+
+  // Toggle auto-approve for an instance
+  router.post('/instances/:id/auto-approve', (req, res) => {
+    const id = req.params.id;
+    const inst = instanceManager.get(id);
+    if (!inst) return res.status(404).json({ error: 'Instance not found' });
+
+    const value = req.body.value !== undefined ? req.body.value : !inst.autoApprove;
+    instanceManager.setAutoApprove(id, value);
+
+    // If enabling and there's a pending decision, approve it now
+    if (value) {
+      const pending = pendingDecisions.get(id);
+      if (pending) {
+        clearTimeout(pending.timeout);
+        pendingDecisions.delete(id);
+        instanceManager.clearPendingApproval(id);
+        pending.resolve({ behavior: 'allow', updatedInput: pending.toolInput });
+      }
+    }
+
+    res.json({ ok: true, autoApprove: !!value });
   });
 
   // Abort current task

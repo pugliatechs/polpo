@@ -137,7 +137,7 @@ class WrappedAgent {
   _handleHubMessage(msg) {
     switch (msg.type) {
       case 'prompt':
-        this.sendPrompt(msg.text);
+        this.sendPrompt(msg.text, msg.attachments);
         break;
       case 'abort':
         this.abort();
@@ -377,7 +377,7 @@ class WrappedAgent {
    * Send a prompt to the claude process.
    * If no process is running, spawns one (resuming if a session ID is available).
    */
-  sendPrompt(text) {
+  sendPrompt(text, attachments) {
     if (!this.claude) {
       // Auto-resume if we have a session ID from a previous turn
       if (this.claudeSessionId && !this.resumeSessionId) {
@@ -389,18 +389,56 @@ class WrappedAgent {
     this.busy = true;
     this._sendToHub({ type: 'status', status: 'busy' });
 
-    // Note: user message is already recorded by the hub's send_prompt handler.
-    // Don't echo it back here to avoid duplicates.
+    // Build content: plain string or multimodal content array
+    const content = this._buildContent(text, attachments);
 
     // Write to claude's stdin
     const input = JSON.stringify({
       type: 'user',
-      message: { role: 'user', content: text },
+      message: { role: 'user', content },
     }) + '\n';
 
     if (this.claude && this.claude.stdin.writable) {
       this.claude.stdin.write(input);
     }
+  }
+
+  _buildContent(text, attachments) {
+    if (!attachments || attachments.length === 0) return text;
+
+    const blocks = [];
+
+    for (const att of attachments) {
+      const isImage = att.mediaType && att.mediaType.startsWith('image/');
+      if (isImage) {
+        try {
+          const data = fs.readFileSync(att.path).toString('base64');
+          blocks.push({
+            type: 'image',
+            source: {
+              type: 'base64',
+              media_type: att.mediaType,
+              data,
+            },
+          });
+        } catch (err) {
+          this._log(`Failed to read attachment ${att.path}: ${err.message}`);
+          blocks.push({ type: 'text', text: `[Failed to attach image: ${att.filename}]` });
+        }
+      } else {
+        blocks.push({
+          type: 'text',
+          text: `[Attached file: ${att.path}] — use the Read tool to view its contents`,
+        });
+      }
+    }
+
+    // Add the user's text prompt
+    if (text) {
+      blocks.push({ type: 'text', text });
+    }
+
+    return blocks;
   }
 
   /**

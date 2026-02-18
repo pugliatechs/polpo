@@ -11,6 +11,7 @@
   let pastSessions = [];
   let activeInstanceId = null;
   let reconnectDelay = 1000;
+  let pendingAttachments = [];
 
   // ---- DOM refs ----
   const $connectionStatus = document.getElementById('connection-status');
@@ -32,10 +33,16 @@
   const $btnBack = document.getElementById('btn-back');
   const $btnAbort = document.getElementById('btn-abort');
   const $btnApprove = document.getElementById('btn-approve');
+  const $btnApproveAll = document.getElementById('btn-approve-all');
   const $btnReject = document.getElementById('btn-reject');
+  const $autoApproveBanner = document.getElementById('auto-approve-banner');
+  const $btnStopAutoApprove = document.getElementById('btn-stop-auto-approve');
   const $sessionsSection = document.getElementById('sessions-section');
   const $sessionsList = document.getElementById('sessions-list');
   const $btnRefreshSessions = document.getElementById('btn-refresh-sessions');
+  const $btnAttach = document.getElementById('btn-attach');
+  const $fileInput = document.getElementById('file-input');
+  const $attachmentPreview = document.getElementById('attachment-preview');
 
   // ---- WebSocket ----
   function connect() {
@@ -127,6 +134,13 @@
           }
         }
         renderList();
+        if (activeInstanceId === msg.id) renderDetail();
+        break;
+
+      case 'instance:autoApprove':
+        if (instances.has(msg.id)) {
+          instances.get(msg.id).autoApprove = msg.autoApprove;
+        }
         if (activeInstanceId === msg.id) renderDetail();
         break;
     }
@@ -241,8 +255,15 @@
     $detailProject.textContent = '📁 ' + (inst.project || '');
     $detailType.textContent = inst.type === 'vscode' ? '💻 VS Code' : '⬛ Terminal';
 
-    // Approval banner
-    if (inst.pendingApproval) {
+    // Auto-approve indicator
+    if (inst.autoApprove) {
+      $autoApproveBanner.classList.remove('hidden');
+    } else {
+      $autoApproveBanner.classList.add('hidden');
+    }
+
+    // Approval banner (hidden when auto-approve is on)
+    if (inst.pendingApproval && !inst.autoApprove) {
       $approvalBanner.classList.remove('hidden');
       $approvalDescription.textContent = inst.pendingApproval.description || '';
       $approvalCommand.textContent = inst.pendingApproval.command || '';
@@ -354,8 +375,24 @@
     var rendered = m.role === 'assistant'
       ? renderMarkdown(m.content || '')
       : escapeHtml(m.content || '');
+
+    // Attachment indicators for user messages
+    var attachHtml = '';
+    if (m.attachments && m.attachments.length > 0) {
+      attachHtml = '<div class="msg-attachments">' +
+        m.attachments.map(function (att) {
+          if (att.mediaType && att.mediaType.startsWith('image/')) {
+            var thumbUrl = '/api/uploads/' + att.path.split('/').pop();
+            return '<img class="msg-attachment-thumb" src="' + thumbUrl + '" alt="' + escapeHtml(att.filename) + '">';
+          }
+          return '<span class="msg-attachment-file">&#128196; ' + escapeHtml(att.filename) + '</span>';
+        }).join('') +
+      '</div>';
+    }
+
     return (
       '<div class="' + cls + '">' +
+        attachHtml +
         rendered +
         timeHtml +
       '</div>'
@@ -369,12 +406,27 @@
   // ---- Actions ----
   function sendPrompt() {
     var text = $promptInput.value.trim();
-    if (!text || !activeInstanceId) return;
+    if ((!text && pendingAttachments.length === 0) || !activeInstanceId) return;
 
-    send({ type: 'send_prompt', instanceId: activeInstanceId, text: text });
+    var attachments = pendingAttachments.map(function (a) {
+      return { id: a.id, path: a.path, filename: a.filename, mediaType: a.mediaType };
+    });
+
+    send({
+      type: 'send_prompt',
+      instanceId: activeInstanceId,
+      text: text || (attachments.length > 0 ? 'See attached file(s).' : ''),
+      attachments: attachments,
+    });
+
+    clearAttachments();
     $promptInput.value = '';
     $promptInput.style.height = 'auto';
-    $btnSend.disabled = true;
+    updateSendButton();
+  }
+
+  function updateSendButton() {
+    $btnSend.disabled = !$promptInput.value.trim() && pendingAttachments.length === 0;
   }
 
   // ---- Event Listeners ----
@@ -402,6 +454,24 @@
     }
   });
 
+  $btnApproveAll.addEventListener('click', function () {
+    if (activeInstanceId) {
+      // Optimistic UI: set auto-approve and hide banner
+      var inst = instances.get(activeInstanceId);
+      if (inst) {
+        inst.autoApprove = true;
+        inst.pendingApproval = null;
+        inst.status = 'busy';
+      }
+      renderDetail();
+      fetch('/api/instances/' + activeInstanceId + '/auto-approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: true }),
+      }).catch(function () {});
+    }
+  });
+
   $btnReject.addEventListener('click', function () {
     if (activeInstanceId) {
       var inst = instances.get(activeInstanceId);
@@ -415,8 +485,21 @@
     }
   });
 
+  $btnStopAutoApprove.addEventListener('click', function () {
+    if (activeInstanceId) {
+      var inst = instances.get(activeInstanceId);
+      if (inst) inst.autoApprove = false;
+      renderDetail();
+      fetch('/api/instances/' + activeInstanceId + '/auto-approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: false }),
+      }).catch(function () {});
+    }
+  });
+
   $promptInput.addEventListener('input', function () {
-    $btnSend.disabled = !$promptInput.value.trim();
+    updateSendButton();
     // Auto-resize
     this.style.height = 'auto';
     this.style.height = Math.min(this.scrollHeight, 120) + 'px';
@@ -428,6 +511,115 @@
       sendPrompt();
     }
   });
+
+  // ---- Attachments ----
+  $btnAttach.addEventListener('click', function () {
+    $fileInput.click();
+  });
+
+  $fileInput.addEventListener('change', function () {
+    var files = Array.from(this.files);
+    this.value = ''; // reset so same file can be picked again
+    files.forEach(function (file) {
+      uploadFile(file);
+    });
+  });
+
+  function uploadFile(file) {
+    if (file.size > 10 * 1024 * 1024) {
+      alert('File too large (max 10MB): ' + file.name);
+      return;
+    }
+
+    var reader = new FileReader();
+    reader.onload = function () {
+      var base64 = reader.result.split(',')[1]; // strip data:...;base64, prefix
+      fetch('/api/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          filename: file.name,
+          mediaType: file.type || 'application/octet-stream',
+          data: base64,
+        }),
+      })
+      .then(function (r) { return r.json(); })
+      .then(function (result) {
+        var att = {
+          id: result.id,
+          path: result.path,
+          filename: result.filename,
+          mediaType: result.mediaType,
+          previewUrl: file.type && file.type.startsWith('image/')
+            ? URL.createObjectURL(file) : null,
+          serverFilename: result.path.split('/').pop(),
+        };
+        pendingAttachments.push(att);
+        renderAttachmentPreview();
+        updateSendButton();
+      })
+      .catch(function () {
+        alert('Upload failed: ' + file.name);
+      });
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function renderAttachmentPreview() {
+    if (pendingAttachments.length === 0) {
+      $attachmentPreview.classList.add('hidden');
+      $attachmentPreview.innerHTML = '';
+      return;
+    }
+
+    $attachmentPreview.classList.remove('hidden');
+    $attachmentPreview.innerHTML = pendingAttachments.map(function (att, idx) {
+      if (att.previewUrl) {
+        return (
+          '<div class="attachment-chip" data-idx="' + idx + '">' +
+            '<img class="attachment-thumb" src="' + att.previewUrl + '" alt="' + escapeHtml(att.filename) + '">' +
+            '<span class="attachment-name">' + escapeHtml(att.filename) + '</span>' +
+            '<button class="attachment-remove" data-idx="' + idx + '">&times;</button>' +
+          '</div>'
+        );
+      }
+      return (
+        '<div class="attachment-chip" data-idx="' + idx + '">' +
+          '<span class="attachment-icon">&#128196;</span>' +
+          '<span class="attachment-name">' + escapeHtml(att.filename) + '</span>' +
+          '<button class="attachment-remove" data-idx="' + idx + '">&times;</button>' +
+        '</div>'
+      );
+    }).join('');
+
+    // Attach remove handlers
+    var removeButtons = $attachmentPreview.querySelectorAll('.attachment-remove');
+    for (var i = 0; i < removeButtons.length; i++) {
+      removeButtons[i].addEventListener('click', function (e) {
+        e.stopPropagation();
+        var idx = parseInt(e.currentTarget.getAttribute('data-idx'));
+        removeAttachment(idx);
+      });
+    }
+  }
+
+  function removeAttachment(idx) {
+    var att = pendingAttachments[idx];
+    if (att && att.previewUrl) {
+      URL.revokeObjectURL(att.previewUrl);
+    }
+    pendingAttachments.splice(idx, 1);
+    renderAttachmentPreview();
+    updateSendButton();
+  }
+
+  function clearAttachments() {
+    pendingAttachments.forEach(function (att) {
+      if (att.previewUrl) URL.revokeObjectURL(att.previewUrl);
+    });
+    pendingAttachments = [];
+    renderAttachmentPreview();
+  }
 
   // ---- Helpers ----
   function escapeHtml(str) {

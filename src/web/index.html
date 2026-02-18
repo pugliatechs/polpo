@@ -59,6 +59,12 @@
       <span id="detail-type"></span>
     </div>
 
+    <!-- Auto-approve indicator -->
+    <div id="auto-approve-banner" class="auto-approve-banner hidden">
+      <span>Auto-approve ON</span>
+      <button id="btn-stop-auto-approve" class="btn btn-small">Stop</button>
+    </div>
+
     <!-- Approval Banner -->
     <div id="approval-banner" class="approval-banner hidden">
       <div class="approval-info">
@@ -68,6 +74,7 @@
       </div>
       <div class="approval-buttons">
         <button id="btn-approve" class="btn btn-approve">Approve</button>
+        <button id="btn-approve-all" class="btn btn-approve-all">Approve All</button>
         <button id="btn-reject" class="btn btn-reject">Reject</button>
       </div>
     </div>
@@ -77,8 +84,13 @@
 
     <!-- Input Area -->
     <div class="input-area">
-      <textarea id="prompt-input" placeholder="Send a prompt..." rows="1"></textarea>
-      <button id="btn-send" class="btn btn-send" disabled>&#9654;</button>
+      <div id="attachment-preview" class="attachment-preview hidden"></div>
+      <div class="input-row">
+        <button id="btn-attach" class="btn-icon btn-attach" title="Attach file">&#128206;</button>
+        <textarea id="prompt-input" placeholder="Send a prompt..." rows="1"></textarea>
+        <button id="btn-send" class="btn btn-send" disabled>&#9654;</button>
+      </div>
+      <input type="file" id="file-input" accept="image/*,.txt,.md,.json,.yaml,.yml,.toml,.csv,.log,.py,.js,.ts,.go,.rs,.java,.c,.cpp,.h,.pdf" multiple hidden>
     </div>
   </main>
 

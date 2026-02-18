@@ -51,6 +51,10 @@ function setupWebSocket(server, instanceManager) {
     broadcastToDashboards({ type: 'instance:approval', ...data });
   });
 
+  instanceManager.on('instance:autoApprove', (data) => {
+    broadcastToDashboards({ type: 'instance:autoApprove', ...data });
+  });
+
   wss.on('connection', (ws, req) => {
     const params = url.parse(req.url, true).query;
     const role = params.role; // 'dashboard' or 'agent'
@@ -110,15 +114,17 @@ function handleDashboardMessage(msg, instanceManager) {
   switch (msg.type) {
     case 'send_prompt': {
       // Send a user prompt to a specific Claude Code instance
-      const { instanceId, text } = msg;
+      const { instanceId, text, attachments } = msg;
       instanceManager.sendToAgent(instanceId, {
         type: 'prompt',
         text,
+        attachments: attachments || [],
       });
       instanceManager.addMessage(instanceId, {
         role: 'user',
         content: text,
         source: 'mobile',
+        attachments: attachments || [],
       });
       break;
     }

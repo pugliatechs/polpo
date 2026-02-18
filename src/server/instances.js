@@ -21,6 +21,7 @@ class InstanceManager extends EventEmitter {
       registeredAt: Date.now(),
       conversation: [],
       pendingApproval: null,
+      autoApprove: false,
       agentSocket: null, // WebSocket back to the agent
     };
     this.instances.set(id, instance);
@@ -53,6 +54,7 @@ class InstanceManager extends EventEmitter {
       registeredAt: inst.registeredAt,
       conversationLength: inst.conversation.length,
       pendingApproval: inst.pendingApproval,
+      autoApprove: inst.autoApprove,
     }));
   }
 
@@ -106,6 +108,15 @@ class InstanceManager extends EventEmitter {
       }
       instance.lastActivity = Date.now();
       this.emit('instance:approval', { id, approval: null });
+    }
+  }
+
+  setAutoApprove(id, value) {
+    const instance = this.instances.get(id);
+    if (instance) {
+      instance.autoApprove = !!value;
+      instance.lastActivity = Date.now();
+      this.emit('instance:autoApprove', { id, autoApprove: instance.autoApprove });
     }
   }
 
