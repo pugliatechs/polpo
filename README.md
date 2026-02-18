@@ -1,4 +1,4 @@
-# 🐙 Polpo
+# Polpo
 
 **Work on Claude Code from your phone.**
 
@@ -7,29 +7,35 @@ Polpo lets developers send prompts, see responses, and control Claude Code sessi
 ## Architecture
 
 ```
-                    📱 Phone (VPN / LAN)
-                       │
-              ┌────────▼─────────┐
-              │  Polpo Hub       │ :7890
-              │  (Express + WS)  │
-              └──┬───────────┬───┘
-                 │           │
-    ┌────────────▼──┐   ┌────▼───────────┐
-    │ Session Agent │   │ Hook Bridge    │
-    │ (wrapped)     │   │ (monitoring)   │
-    └────────┬──────┘   └───┬────────────┘
-             │              │
-    ┌────────▼──────┐   ┌───▼────────────┐
-    │ claude CLI    │   │ Claude Code    │
-    │ (stream-json) │   │ (VS Code)      │
-    └───────────────┘   └────────────────┘
-       full control        read-only
+                    Phone (VPN / LAN)
+                       |
+              +--------v---------+
+              |  Polpo Hub       | :7890
+              |  (Express + WS)  |
+              +--+-------+---+---+
+                 |       |   |
+    +------------v--+ +--v---+----------+  +--v-----------+
+    | Session Agent | | Hook Bridge     |  | Session      |
+    | (wrapped)     | | (monitoring)    |  | Browser      |
+    +--------+------+ +---+------------+   +--------------+
+             |             |                reads JSONL
+    +--------v------+ +---v------------+    session files
+    | claude CLI    | | Claude Code    |
+    | (stream-json) | | (VS Code/term) |
+    +-------+-------+ +----------------+
+            |            read-only
+    +-------v-------+
+    | MCP Permission|
+    | Server        |
+    +---------------+
+      phone approval
 ```
 
-Two integration modes:
+Three integration modes:
 
-- **Session**: spawns `claude` CLI with JSON streaming for full bidirectional control from phone
-- **Hooks**: taps into existing VS Code sessions via Claude Code hooks for read-only monitoring
+- **Session**: spawns `claude` CLI with JSON streaming for full bidirectional control from phone, including MCP-based tool approval
+- **Hooks**: taps into existing VS Code/terminal sessions via Claude Code hooks for read-only monitoring (with optional approval)
+- **Session Browser**: discovers and displays past Claude Code sessions from JSONL files, with the ability to resume them
 
 ## Quick Start
 
@@ -59,16 +65,7 @@ node bin/polpo.js session --resume <session-id>
 
 Navigate to `http://<your-computer-ip>:7890` on your phone's browser.
 
-Type a prompt, see the response stream in real-time, watch tool calls execute, and abort if needed.
-
-## Use Case: Work from Anywhere
-
-1. Start the hub + a session on your workstation
-2. Leave your desk (keep the PC running)
-3. On your phone over VPN, open the Polpo dashboard
-4. Continue working: send prompts, see tool calls, review output
-
-The session process stays alive between prompts. If it exits, resume with `--resume <session-id>`.
+The dashboard shows active sessions, past session history, and lets you send prompts, watch tool calls, approve or reject actions, and abort tasks.
 
 ## Features
 
@@ -76,13 +73,15 @@ The session process stays alive between prompts. If it exits, resume with `--res
 |---------|-------------|
 | Full Remote Control | Send prompts and see responses from your phone |
 | Real-time Streaming | Tool calls, results, and text stream as they happen |
-| Instance Dashboard | See all sessions at a glance with live status |
+| Phone-based Approval | Approve or reject tool use from your phone (MCP for sessions, hooks for VS Code) |
+| Session Browser | Browse past Claude Code sessions with conversation history |
+| Session Resume | Resume any past session directly from the phone dashboard |
+| Instance Dashboard | See all active sessions at a glance with live status |
 | Tool Call Cards | Bash commands, file edits, and searches rendered as mobile-native cards |
 | Abort | Stop any running task with a tap |
-| Session Resume | Pick up where you left off with `--resume` |
 | Multi-Instance | Run and monitor unlimited parallel sessions |
 | Cost Tracking | Per-turn API costs displayed inline |
-| Mobile-First UI | Dark OLED theme, touch-optimized, safe-area support |
+| Mobile-First UI | Dark OLED theme, touch-optimized, safe-area support, responsive layout |
 | VS Code Monitoring | Passively watch existing VS Code sessions via hooks |
 
 ## Remote Sessions (Full Control)
@@ -101,7 +100,17 @@ How it works:
 4. Relays everything: prompts in, responses + tool calls + results out
 5. Process stays alive for multi-turn conversations
 
-Options:
+### Tool Approval
+
+When a session runs in `default` permission mode, an MCP permission server handles tool approval. When Claude needs to run a tool that requires permission, the request appears on your phone as a banner with approve/reject buttons. The CLI blocks until you respond.
+
+To skip approval entirely (use with caution):
+
+```bash
+node bin/polpo.js session --cwd /path/to/project --permissions bypass
+```
+
+### Options
 
 | Flag | Description |
 |------|-------------|
@@ -109,8 +118,14 @@ Options:
 | `--cwd <dir>` | Project directory (default: current) |
 | `--resume <id>` | Resume an existing Claude Code session |
 | `--model <model>` | Model to use (e.g. opus, sonnet) |
-| `--permissions <mode>` | Permission mode: `default` or `bypass` |
+| `--permissions <mode>` | `default` (phone approval via MCP) or `bypass` (skip all) |
 | `--server <url>` | Hub WebSocket URL (default: `ws://127.0.0.1:7890`) |
+
+## Session Browser
+
+The dashboard automatically discovers past Claude Code sessions from `~/.claude/projects/` and displays them as cards with the session's first prompt as the title. Tap a session to view its full conversation history, or resume it to continue working from your phone.
+
+Sessions are loaded from JSONL files and deduplicated to show clean conversation threads.
 
 ## VS Code Monitoring (Hooks)
 
@@ -142,8 +157,10 @@ By default hooks are read-only. To enable phone-based tool approval, set `POLPO_
 - Tool calls rendered as cards (Bash commands, file paths, search patterns)
 - Tool results shown as collapsible code blocks
 - Per-turn cost displayed inline
-- Touch-friendly with safe-area support for notched phones
-- Auto-reconnect on network changes
+- Touch-friendly with 44px minimum touch targets
+- Safe-area support for notched/island phones
+- Responsive layout with breakpoints for small phones, landscape, and tablets
+- Virtual keyboard handling (no content jump on iOS/Android)
 
 ## API
 
@@ -151,15 +168,20 @@ By default hooks are read-only. To enable phone-based tool approval, set `POLPO_
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/instances` | List all instances |
+| GET | `/api/sessions` | List discovered Claude Code sessions |
+| GET | `/api/sessions/:id/history` | Get conversation history from JSONL |
+| POST | `/api/sessions/:id/resume` | Resume a session (spawns wrapped agent) |
+| GET | `/api/instances` | List all active instances |
 | GET | `/api/instances/:id` | Get instance details |
 | GET | `/api/instances/:id/conversation` | Get conversation history |
 | POST | `/api/instances` | Register a new instance |
 | DELETE | `/api/instances/:id` | Unregister an instance |
 | POST | `/api/instances/:id/prompt` | Send a prompt |
-| POST | `/api/instances/:id/approve` | Approve pending action |
-| POST | `/api/instances/:id/reject` | Reject pending action |
+| POST | `/api/instances/:id/approve` | Approve pending tool use |
+| POST | `/api/instances/:id/reject` | Reject pending tool use |
 | POST | `/api/instances/:id/abort` | Abort current task |
+| POST | `/api/permission-request` | MCP permission server long-poll |
+| GET | `/health` | Health check |
 
 ### WebSocket
 

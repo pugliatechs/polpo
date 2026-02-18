@@ -8,6 +8,10 @@ function createApiRouter(instanceManager) {
   // Track spawned wrapped agents so we can clean them up
   const wrappedAgents = new Map();
 
+  // Pending permission decisions: instanceId -> { resolve, timeout }
+  // Used by the MCP permission server long-poll endpoint.
+  const pendingDecisions = new Map();
+
   // List discovered Claude Code sessions
   router.get('/sessions', async (req, res) => {
     try {
@@ -128,25 +132,96 @@ function createApiRouter(instanceManager) {
     }
   });
 
+  // Permission request from MCP server (long-poll).
+  // Blocks until the phone user approves or rejects, then returns the decision.
+  router.post('/permission-request', (req, res) => {
+    const { instanceId, toolUseId, toolName, toolInput } = req.body;
+    if (!instanceId) return res.status(400).json({ error: 'instanceId required' });
+
+    // Build description for the phone UI
+    let description = toolName || 'unknown';
+    let command = '';
+    if (toolName === 'Bash' || toolName === 'bash') {
+      command = (toolInput && toolInput.command) || '';
+      description = command
+        ? `Run: ${command.length > 120 ? command.slice(0, 120) + '...' : command}`
+        : 'Run shell command';
+    } else if (toolName === 'Write' || toolName === 'write') {
+      description = `Write file: ${(toolInput && toolInput.file_path) || ''}`;
+    } else if (toolName === 'Edit' || toolName === 'edit') {
+      description = `Edit file: ${(toolInput && toolInput.file_path) || ''}`;
+    } else if (toolName === 'WebFetch') {
+      description = `Fetch URL: ${(toolInput && toolInput.url) || ''}`;
+    } else if (toolName === 'Task') {
+      description = `Spawn agent: ${(toolInput && toolInput.description) || ''}`;
+    } else if (toolName === 'NotebookEdit') {
+      description = `Edit notebook: ${(toolInput && toolInput.notebook_path) || ''}`;
+    }
+
+    // Show approval banner on phone
+    instanceManager.setPendingApproval(instanceId, { tool: toolName, description, command });
+
+    // Cancel any previous pending decision for this instance
+    const existing = pendingDecisions.get(instanceId);
+    if (existing) {
+      clearTimeout(existing.timeout);
+      existing.resolve({ behavior: 'allow', updatedInput: toolInput });
+    }
+
+    // Wait for phone decision (up to 5 minutes)
+    const promise = new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        pendingDecisions.delete(instanceId);
+        instanceManager.clearPendingApproval(instanceId);
+        resolve({ behavior: 'deny', message: 'Approval timed out' });
+      }, 5 * 60 * 1000);
+
+      pendingDecisions.set(instanceId, { resolve, timeout, toolInput });
+    });
+
+    promise.then((decision) => res.json(decision));
+  });
+
   // Approve pending action
   router.post('/instances/:id/approve', (req, res) => {
-    const sent = instanceManager.sendToAgent(req.params.id, { type: 'approve' });
-    if (sent) {
-      instanceManager.clearPendingApproval(req.params.id);
+    const id = req.params.id;
+    const pending = pendingDecisions.get(id);
+    if (pending) {
+      clearTimeout(pending.timeout);
+      pendingDecisions.delete(id);
+      instanceManager.clearPendingApproval(id);
+      pending.resolve({ behavior: 'allow', updatedInput: pending.toolInput });
       res.json({ ok: true });
     } else {
-      res.status(502).json({ error: 'Agent not connected' });
+      // Fallback: try sending via WebSocket (hook-based approval)
+      const sent = instanceManager.sendToAgent(id, { type: 'approve' });
+      if (sent) {
+        instanceManager.clearPendingApproval(id);
+        res.json({ ok: true });
+      } else {
+        res.status(502).json({ error: 'No pending approval' });
+      }
     }
   });
 
   // Reject pending action
   router.post('/instances/:id/reject', (req, res) => {
-    const sent = instanceManager.sendToAgent(req.params.id, { type: 'reject' });
-    if (sent) {
-      instanceManager.clearPendingApproval(req.params.id);
+    const id = req.params.id;
+    const pending = pendingDecisions.get(id);
+    if (pending) {
+      clearTimeout(pending.timeout);
+      pendingDecisions.delete(id);
+      instanceManager.clearPendingApproval(id);
+      pending.resolve({ behavior: 'deny', message: 'Rejected via Polpo' });
       res.json({ ok: true });
     } else {
-      res.status(502).json({ error: 'Agent not connected' });
+      const sent = instanceManager.sendToAgent(id, { type: 'reject' });
+      if (sent) {
+        instanceManager.clearPendingApproval(id);
+        res.json({ ok: true });
+      } else {
+        res.status(502).json({ error: 'No pending approval' });
+      }
     }
   });
 

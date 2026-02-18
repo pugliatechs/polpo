@@ -105,6 +105,7 @@ class InstanceManager extends EventEmitter {
         instance.status = 'busy';
       }
       instance.lastActivity = Date.now();
+      this.emit('instance:approval', { id, approval: null });
     }
   }
 

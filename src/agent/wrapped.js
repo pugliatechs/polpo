@@ -19,6 +19,8 @@
 const { spawn } = require('child_process');
 const WebSocket = require('ws');
 const http = require('http');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const readline = require('readline');
 
@@ -46,6 +48,9 @@ class WrappedAgent {
     this.claudeSessionId = null;
     this.busy = false;
     this.outputBuffer = '';
+
+    // Permission server path for MCP-based approval
+    this.permissionServerPath = path.join(__dirname, 'permission-server.js');
   }
 
   // --- Hub registration ---
@@ -138,8 +143,8 @@ class WrappedAgent {
         this.abort();
         break;
       case 'approve':
-        // In the current model, permissions are handled by claude's own system.
-        // Future: intercept permission requests and relay to phone.
+        // Permissions are now handled by the MCP permission server
+        // via the hub's /api/permission-request endpoint. No action needed here.
         break;
       case 'reject':
         break;
@@ -166,7 +171,28 @@ class WrappedAgent {
     if (this.permissionMode === 'bypass') {
       args.push('--dangerously-skip-permissions');
     } else {
-      args.push('--permission-mode', this.permissionMode);
+      // Use the MCP permission server for interactive approval from the phone.
+      // Write config to a temp file so there are no inline-JSON parsing issues.
+      const permissionServerPath = path.join(__dirname, 'permission-server.js');
+      const mcpConfigObj = {
+        mcpServers: {
+          polpo: {
+            command: process.execPath,
+            args: [permissionServerPath],
+            env: {
+              POLPO_INSTANCE_ID: this.instanceId,
+              POLPO_HUB_URL: this.serverUrl
+                .replace('ws://', 'http://')
+                .replace('wss://', 'https://'),
+            },
+          },
+        },
+      };
+      const mcpConfigPath = path.join(os.tmpdir(), `polpo-mcp-${this.instanceId}.json`);
+      fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfigObj, null, 2));
+      this._log(`MCP config written to ${mcpConfigPath}`);
+      args.push('--permission-prompt-tool', 'mcp__polpo__polpo_approve');
+      args.push('--mcp-config', mcpConfigPath);
     }
 
     this._log(`Spawning: ${this.claudeBinary} ${args.join(' ')}`);
@@ -341,6 +367,7 @@ class WrappedAgent {
         }
         break;
       }
+
     }
   }
 

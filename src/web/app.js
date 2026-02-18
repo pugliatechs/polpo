@@ -120,7 +120,11 @@
       case 'instance:approval':
         if (instances.has(msg.id)) {
           instances.get(msg.id).pendingApproval = msg.approval;
-          instances.get(msg.id).status = 'waiting';
+          if (msg.approval) {
+            instances.get(msg.id).status = 'waiting';
+          } else {
+            instances.get(msg.id).status = 'busy';
+          }
         }
         renderList();
         if (activeInstanceId === msg.id) renderDetail();
@@ -311,6 +315,8 @@
     if (contentType === 'tool_result') {
       var cls = 'msg msg-tool-result' + (m.isError ? ' tool-error' : '');
       var content = m.content || '';
+      // Strip XML wrapper tags from tool errors
+      content = content.replace(/<\/?tool_use_error>/g, '');
       if (content.length > 500) {
         content = content.slice(0, 500) + '\n...';
       }
@@ -384,13 +390,28 @@
 
   $btnApprove.addEventListener('click', function () {
     if (activeInstanceId) {
-      send({ type: 'approve', instanceId: activeInstanceId });
+      // Optimistic UI: hide banner immediately
+      var inst = instances.get(activeInstanceId);
+      if (inst) {
+        inst.pendingApproval = null;
+        inst.status = 'busy';
+      }
+      renderDetail();
+      fetch('/api/instances/' + activeInstanceId + '/approve', { method: 'POST' })
+        .catch(function () {});
     }
   });
 
   $btnReject.addEventListener('click', function () {
     if (activeInstanceId) {
-      send({ type: 'reject', instanceId: activeInstanceId });
+      var inst = instances.get(activeInstanceId);
+      if (inst) {
+        inst.pendingApproval = null;
+        inst.status = 'busy';
+      }
+      renderDetail();
+      fetch('/api/instances/' + activeInstanceId + '/reject', { method: 'POST' })
+        .catch(function () {});
     }
   });
 
