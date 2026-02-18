@@ -407,9 +407,14 @@ class WrappedAgent {
     if (!attachments || attachments.length === 0) return text;
 
     const blocks = [];
+    const TEXT_INLINE_LIMIT = 100 * 1024; // inline text files up to 100KB
 
     for (const att of attachments) {
       const isImage = att.mediaType && att.mediaType.startsWith('image/');
+      const isPdf = att.mediaType === 'application/pdf'
+        || (att.filename || '').toLowerCase().endsWith('.pdf');
+      const isText = this._isTextFile(att.filename, att.mediaType);
+
       if (isImage) {
         try {
           const data = fs.readFileSync(att.path).toString('base64');
@@ -425,7 +430,43 @@ class WrappedAgent {
           this._log(`Failed to read attachment ${att.path}: ${err.message}`);
           blocks.push({ type: 'text', text: `[Failed to attach image: ${att.filename}]` });
         }
+      } else if (isPdf) {
+        try {
+          const data = fs.readFileSync(att.path).toString('base64');
+          blocks.push({
+            type: 'document',
+            source: {
+              type: 'base64',
+              media_type: 'application/pdf',
+              data,
+            },
+          });
+        } catch (err) {
+          this._log(`Failed to read PDF ${att.path}: ${err.message}`);
+          blocks.push({ type: 'text', text: `[Failed to attach PDF: ${att.filename}]` });
+        }
+      } else if (isText) {
+        // Inline small text files so Claude sees them without a tool call
+        try {
+          const stat = fs.statSync(att.path);
+          if (stat.size <= TEXT_INLINE_LIMIT) {
+            const content = fs.readFileSync(att.path, 'utf8');
+            blocks.push({
+              type: 'text',
+              text: `--- ${att.filename} ---\n${content}\n--- end ${att.filename} ---`,
+            });
+          } else {
+            blocks.push({
+              type: 'text',
+              text: `[Attached file: ${att.path} (${(stat.size / 1024).toFixed(0)}KB)] — use the Read tool to view its contents`,
+            });
+          }
+        } catch (err) {
+          this._log(`Failed to read attachment ${att.path}: ${err.message}`);
+          blocks.push({ type: 'text', text: `[Failed to read file: ${att.filename}]` });
+        }
       } else {
+        // Binary / large files: reference by path
         blocks.push({
           type: 'text',
           text: `[Attached file: ${att.path}] — use the Read tool to view its contents`,
@@ -439,6 +480,26 @@ class WrappedAgent {
     }
 
     return blocks;
+  }
+
+  _isTextFile(filename, mediaType) {
+    if (mediaType && mediaType.startsWith('text/')) return true;
+    if (mediaType === 'application/json' || mediaType === 'application/xml') return true;
+    const ext = (filename || '').split('.').pop().toLowerCase();
+    const textExts = new Set([
+      'txt', 'md', 'markdown', 'rst', 'csv', 'tsv', 'log',
+      'json', 'jsonl', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf', 'env',
+      'xml', 'html', 'htm', 'css', 'svg',
+      'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx',
+      'py', 'rb', 'go', 'rs', 'java', 'kt', 'scala', 'clj',
+      'c', 'h', 'cpp', 'hpp', 'cc', 'cs', 'swift', 'm',
+      'sh', 'bash', 'zsh', 'fish', 'ps1', 'bat', 'cmd',
+      'sql', 'graphql', 'gql', 'proto',
+      'dockerfile', 'makefile', 'cmake',
+      'gitignore', 'dockerignore', 'editorconfig',
+      'lock', 'sum', 'mod',
+    ]);
+    return textExts.has(ext);
   }
 
   /**
