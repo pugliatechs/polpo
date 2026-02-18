@@ -50,6 +50,24 @@ Three integration modes:
 - **Hooks** — taps into existing VS Code/terminal sessions via Claude Code hooks for read-only monitoring (with optional approval)
 - **Session Browser** — discovers and displays past Claude Code sessions from JSONL files, with the ability to resume them
 
+## Requirements
+
+- **Node.js** 18+ (for built-in test runner; 16+ works for everything else)
+- **Claude Code** CLI installed and authenticated
+- **macOS** or **Linux** (Windows is not currently supported)
+
+### macOS Notes
+
+Polpo works natively on macOS — no extra setup needed. For tunnel providers:
+
+```bash
+# cloudflared (recommended)
+brew install cloudflare/cloudflare/cloudflared
+
+# ngrok (optional)
+brew install ngrok
+```
+
 ## Quick Start
 
 ### 1. Install
