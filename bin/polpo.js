@@ -182,7 +182,7 @@ async function runServer() {
       console.log('  └─────────────────────────────────────────────┘\n');
     } else {
       console.log('\n  ┌─────────────────────────────────────────────┐');
-      console.log('  │  🔐 TOTP — scan with AUTHENTICATOR APP       │');
+      console.log('  │  🔐 TOTP — scan with AUTHENTICATOR APP      │');
       console.log('  └─────────────────────────────────────────────┘\n');
     }
     qrcode.generate(totpUri, { small: true }, (qr) => {
