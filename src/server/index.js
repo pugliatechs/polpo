@@ -99,7 +99,7 @@ function createServer(options = {}) {
   app.use('/api', createAuthMiddleware(getAuthState));
 
   // API routes
-  app.use('/api', createApiRouter(instanceManager));
+  app.use('/api', createApiRouter(instanceManager, getAuthState));
 
   // SPA fallback — serve index.html for non-API routes
   app.get('*', (req, res) => {

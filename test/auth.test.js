@@ -347,6 +347,23 @@ describe('createStaticAuthMiddleware', () => {
     });
   });
 
+  it('skips API paths (handled by API auth middleware)', (_, done) => {
+    const state = new AuthState({ token: 'tok', mode: 'pin' });
+    state.tokenBurned = true; // token already used
+    const mw = createStaticAuthMiddleware(() => state);
+    const req = mockReq({ path: '/api/instances/123/conversation' });
+    mw(req, mockRes(), () => { done(); }); // should call next(), not redirect
+  });
+
+  it('skips all /api sub-paths regardless of auth state', (_, done) => {
+    const state = new AuthState({ token: 'tok', mode: 'paranoid' });
+    state.tokenBurned = true;
+    const mw = createStaticAuthMiddleware(() => state);
+    // No session cookie, no token — should still call next() for API paths
+    const req = mockReq({ path: '/api/sessions/abc/resume' });
+    mw(req, mockRes(), () => { done(); });
+  });
+
   it('redirects to auth page for MFA after burn', () => {
     const state = new AuthState({ token: 'tok', mode: 'pin' });
     const mw = createStaticAuthMiddleware(() => state);
@@ -357,6 +374,79 @@ describe('createStaticAuthMiddleware', () => {
     assert.equal(nextCalled, false);
     assert.ok(res.redirectUrl);
     assert.ok(res.redirectUrl.includes('auth.html'));
+  });
+
+  it('returns 401 for unauthenticated non-API non-MFA request', () => {
+    const state = new AuthState({ token: 'tok' }); // no MFA mode
+    state.tokenBurned = true;
+    const mw = createStaticAuthMiddleware(() => state);
+    const req = mockReq({ path: '/' });
+    const res = mockRes();
+    let nextCalled = false;
+    mw(req, res, () => { nextCalled = true; });
+    assert.equal(nextCalled, false);
+    assert.equal(res.statusCode, 401);
+  });
+
+  it('rejects burned token on second use', () => {
+    const state = new AuthState({ token: 'tok' });
+    const mw = createStaticAuthMiddleware(() => state);
+    // First use: burns token, creates session
+    const req1 = mockReq({ url: '/?token=tok', path: '/' });
+    const res1 = mockRes();
+    let firstNext = false;
+    mw(req1, res1, () => { firstNext = true; });
+    assert.equal(firstNext, true); // no MFA, creates session
+    assert.equal(state.tokenBurned, true);
+
+    // Second use: token is burned, should fail
+    const req2 = mockReq({ url: '/?token=tok', path: '/' });
+    const res2 = mockRes();
+    let secondNext = false;
+    mw(req2, res2, () => { secondNext = true; });
+    assert.equal(secondNext, false);
+    assert.equal(res2.statusCode, 401);
+  });
+
+  it('allows access with session cookie after token burn', (_, done) => {
+    const state = new AuthState({ token: 'tok' });
+    const mw = createStaticAuthMiddleware(() => state);
+    // Burn the token first
+    const req1 = mockReq({ url: '/?token=tok', path: '/' });
+    const res1 = mockRes();
+    mw(req1, res1, () => {});
+    // Extract session cookie from response
+    const cookie = res1.headers['Set-Cookie'];
+    const sessionId = cookie.match(/polpo_session=([^;]+)/)[1];
+
+    // Now access with session cookie
+    const req2 = mockReq({ path: '/', headers: { cookie: `polpo_session=${sessionId}` } });
+    mw(req2, mockRes(), () => { done(); });
+  });
+});
+
+// --- Auth middleware: Bearer token after burn ---
+
+describe('createAuthMiddleware — post-burn', () => {
+  it('accepts Bearer token even after token is burned', (_, done) => {
+    const state = new AuthState({ token: 'tok', mode: 'pin' });
+    burnToken(state); // burn the single-use token
+    const mw = createAuthMiddleware(() => state);
+    // Agent uses raw Bearer token — should still work
+    const req = mockReq({ headers: { authorization: 'Bearer tok' } });
+    mw(req, mockRes(), () => { done(); });
+  });
+
+  it('rejects wrong Bearer token after burn', () => {
+    const state = new AuthState({ token: 'tok', mode: 'pin' });
+    burnToken(state);
+    const mw = createAuthMiddleware(() => state);
+    const req = mockReq({ headers: { authorization: 'Bearer wrong' } });
+    const res = mockRes();
+    let nextCalled = false;
+    mw(req, res, () => { nextCalled = true; });
+    assert.equal(nextCalled, false);
+    assert.equal(res.statusCode, 401);
   });
 });
 
@@ -390,6 +480,159 @@ describe('validateWsAuth', () => {
     const state = new AuthState({ token: 'tok' });
     const req = mockReq({ url: '/?token=wrong' });
     assert.equal(validateWsAuth(state, req), false);
+  });
+});
+
+// --- Full auth flow ---
+
+describe('full auth flow: token → burn → PIN → session', () => {
+  it('complete PIN flow produces valid session', () => {
+    const state = new AuthState({ token: 'tok', mode: 'pin' });
+    state.pin = '9876';
+
+    // Step 1: static middleware burns token, redirects to PIN page
+    const staticMw = createStaticAuthMiddleware(() => state);
+    const req1 = mockReq({ url: '/?token=tok', path: '/' });
+    const res1 = mockRes();
+    let next1 = false;
+    staticMw(req1, res1, () => { next1 = true; });
+    assert.equal(next1, false);
+    assert.ok(res1.redirectUrl.includes('mode=pin'));
+    assert.equal(state.tokenBurned, true);
+    assert.equal(state.pin, '9876'); // preserved
+
+    // Step 2: verify PIN, get session
+    const pinResult = verifyPin(state, '9876');
+    assert.equal(pinResult.valid, true);
+    const sessionId = createSession(state);
+
+    // Step 3: session cookie grants access
+    const req2 = mockReq({ path: '/', headers: { cookie: `polpo_session=${sessionId}` } });
+    let next2 = false;
+    staticMw(req2, mockRes(), () => { next2 = true; });
+    assert.equal(next2, true);
+
+    // Step 4: API auth also passes with the session
+    const apiMw = createAuthMiddleware(() => state);
+    let next3 = false;
+    apiMw(req2, mockRes(), () => { next3 = true; });
+    assert.equal(next3, true);
+  });
+
+  it('complete TOTP flow produces valid session', () => {
+    const secret = generateTotpSecret();
+    const state = new AuthState({ token: 'tok', mode: 'paranoid', totpSecret: secret });
+
+    // Step 1: burn token
+    const staticMw = createStaticAuthMiddleware(() => state);
+    const req1 = mockReq({ url: '/?token=tok', path: '/' });
+    const res1 = mockRes();
+    staticMw(req1, res1, () => {});
+    assert.ok(res1.redirectUrl.includes('mode=paranoid'));
+
+    // Step 2: verify TOTP
+    const step = Math.floor(Date.now() / 30000);
+    const code = computeTotp(secret, step);
+    assert.equal(verifyTotp(secret, code), true);
+    const sessionId = createSession(state);
+
+    // Step 3: session + API access work
+    const req2 = mockReq({ path: '/dashboard', headers: { cookie: `polpo_session=${sessionId}` } });
+    let staticOk = false;
+    staticMw(req2, mockRes(), () => { staticOk = true; });
+    assert.equal(staticOk, true);
+
+    const apiMw = createAuthMiddleware(() => state);
+    let apiOk = false;
+    apiMw(req2, mockRes(), () => { apiOk = true; });
+    assert.equal(apiOk, true);
+  });
+
+  it('agent token works alongside MFA sessions', (_, done) => {
+    const state = new AuthState({ token: 'tok', mode: 'paranoid' });
+    burnToken(state);
+
+    // Dashboard user gets a session
+    const sessionId = createSession(state);
+
+    // Agent uses Bearer token — both should pass API auth
+    const apiMw = createAuthMiddleware(() => state);
+
+    const dashReq = mockReq({ headers: { cookie: `polpo_session=${sessionId}` } });
+    let dashOk = false;
+    apiMw(dashReq, mockRes(), () => { dashOk = true; });
+    assert.equal(dashOk, true);
+
+    const agentReq = mockReq({ headers: { authorization: 'Bearer tok' } });
+    apiMw(agentReq, mockRes(), () => { done(); });
+  });
+});
+
+// --- TOTP edge cases ---
+
+describe('TOTP window', () => {
+  it('accepts code from ±2 time steps (150s window)', () => {
+    const secret = generateTotpSecret();
+    const now = Math.floor(Date.now() / 30000);
+    // Code from 2 steps ago should still be valid
+    const oldCode = computeTotp(secret, now - 2);
+    assert.equal(verifyTotp(secret, oldCode), true);
+    // Code from 2 steps ahead should still be valid
+    const futureCode = computeTotp(secret, now + 2);
+    assert.equal(verifyTotp(secret, futureCode), true);
+  });
+
+  it('rejects code from 3+ time steps away', () => {
+    const secret = generateTotpSecret();
+    const now = Math.floor(Date.now() / 30000);
+    const tooOld = computeTotp(secret, now - 3);
+    assert.equal(verifyTotp(secret, tooOld), false);
+    const tooNew = computeTotp(secret, now + 3);
+    assert.equal(verifyTotp(secret, tooNew), false);
+  });
+});
+
+// --- PIN edge cases ---
+
+describe('PIN edge cases', () => {
+  it('rejects PIN when none is set', () => {
+    const state = new AuthState({ token: 'x', mode: 'pin' });
+    // pin is null by default
+    const result = verifyPin(state, '1234');
+    assert.equal(result.valid, false);
+  });
+
+  it('timing-safe comparison for PIN', () => {
+    const state = new AuthState({ token: 'x', mode: 'pin' });
+    state.pin = '1234';
+    // Same length but different value
+    const result = verifyPin(state, '1235');
+    assert.equal(result.valid, false);
+    assert.equal(state.pinAttempts, 1);
+  });
+
+  it('resets attempts after successful verification', () => {
+    const state = new AuthState({ token: 'x', mode: 'pin' });
+    state.pin = '1234';
+    verifyPin(state, '0000'); // fail 1
+    verifyPin(state, '0000'); // fail 2
+    const result = verifyPin(state, '1234'); // success before lockout
+    assert.equal(result.valid, true);
+    assert.equal(state.pinAttempts, 0);
+  });
+});
+
+// --- Session isolation ---
+
+describe('session isolation', () => {
+  it('different AuthState instances have independent sessions', () => {
+    const state1 = new AuthState({ token: 'tok1' });
+    const state2 = new AuthState({ token: 'tok2' });
+    const session1 = createSession(state1);
+    const req = mockReq({ headers: { cookie: `polpo_session=${session1}` } });
+    // Session from state1 should not work on state2
+    assert.equal(validateSession(state1, req), true);
+    assert.equal(validateSession(state2, req), false);
   });
 });
 

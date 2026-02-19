@@ -87,8 +87,16 @@ class WrappedAgent {
           let data = '';
           res.on('data', (chunk) => (data += chunk));
           res.on('end', () => {
+            if (res.statusCode < 200 || res.statusCode >= 300) {
+              reject(new Error(`Registration failed (${res.statusCode}): ${data}`));
+              return;
+            }
             try {
               const result = JSON.parse(data);
+              if (!result.id) {
+                reject(new Error('Registration response missing instance id'));
+                return;
+              }
               this.instanceId = result.id;
               resolve(result);
             } catch (e) {

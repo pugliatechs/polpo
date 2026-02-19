@@ -241,6 +241,9 @@ function createStaticAuthMiddleware(getAuthState) {
     const state = typeof getAuthState === 'function' ? getAuthState() : getAuthState;
     if (!state || !state.enabled) return next();
 
+    // Skip API paths — handled by the API auth middleware
+    if (req.path.startsWith('/api')) return next();
+
     // Allow auth page
     if (req.path === '/auth' || req.path === '/auth.html') return next();
 

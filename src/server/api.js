@@ -14,7 +14,7 @@ function isValidSessionId(id) {
   return typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
 }
 
-function createApiRouter(instanceManager) {
+function createApiRouter(instanceManager, getAuthState) {
   const router = express.Router();
 
   // Track spawned wrapped agents so we can clean them up
@@ -103,7 +103,7 @@ function createApiRouter(instanceManager) {
     if (!isValidSessionId(sessionId)) {
       return res.status(400).json({ error: 'Invalid sessionId' });
     }
-    const { name } = req.body;
+    const { name, cwd } = req.body;
 
     // Don't spawn duplicates
     if (wrappedAgents.has(sessionId)) {
@@ -111,12 +111,29 @@ function createApiRouter(instanceManager) {
       return res.json({ instanceId: existing.instanceId, alreadyRunning: true });
     }
 
+    // Validate cwd: must be an absolute path to an existing directory
+    let resolvedCwd = process.cwd();
+    if (cwd && typeof cwd === 'string' && path.isAbsolute(cwd)) {
+      try {
+        if (fs.statSync(cwd).isDirectory()) {
+          resolvedCwd = cwd;
+        }
+      } catch {
+        // Directory doesn't exist, use default
+      }
+    }
+
+    // Pass auth token so the spawned agent can register with the hub
+    const authState = typeof getAuthState === 'function' ? getAuthState() : null;
+    const authToken = authState && authState.enabled ? authState.token : undefined;
+
     try {
       const agent = new WrappedAgent({
         name: name || `Resumed (${sessionId.slice(0, 8)})`,
-        cwd: process.cwd(),
+        cwd: resolvedCwd,
         resumeSessionId: sessionId,
         serverUrl: `ws://127.0.0.1:${req.socket.localPort}`,
+        token: authToken,
       });
 
       await agent.start();
