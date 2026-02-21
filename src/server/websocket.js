@@ -137,7 +137,7 @@ function setupWebSocket(server, instanceManager, getAuthState) {
       ws.on('message', (raw) => {
         try {
           const msg = JSON.parse(raw);
-          handleAgentMessage(instanceId, msg, instanceManager);
+          handleAgentMessage(instanceId, msg, instanceManager, activeWatchers);
         } catch (e) {
           // ignore malformed messages
         }
@@ -207,7 +207,7 @@ function handleDashboardMessage(msg, instanceManager) {
   }
 }
 
-function handleAgentMessage(instanceId, msg, instanceManager) {
+function handleAgentMessage(instanceId, msg, instanceManager, activeWatchers) {
   switch (msg.type) {
     case 'status':
       instanceManager.updateStatus(instanceId, msg.status);
