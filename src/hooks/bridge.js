@@ -27,9 +27,25 @@ function getArg(name) {
   return idx !== -1 && args[idx + 1] ? args[idx + 1] : null;
 }
 
+// Auto-discover token and server URL from server.json
+function loadServerInfo() {
+  try {
+    const infoPath = path.join(require('os').homedir(), '.config', 'polpo', 'server.json');
+    const info = JSON.parse(fs.readFileSync(infoPath, 'utf8'));
+    // Verify the server process is still running
+    if (info.pid) {
+      try { process.kill(info.pid, 0); } catch (e) { return {}; }
+    }
+    return info;
+  } catch (e) {
+    return {};
+  }
+}
+const serverInfo = loadServerInfo();
+
 const config = {
-  serverUrl: getArg('server') || process.env.POLPO_SERVER || 'ws://127.0.0.1:7890',
-  token: getArg('token') || process.env.POLPO_TOKEN || null,
+  serverUrl: getArg('server') || process.env.POLPO_SERVER || serverInfo.url || 'ws://127.0.0.1:7890',
+  token: getArg('token') || process.env.POLPO_TOKEN || serverInfo.token || null,
   name: getArg('name') || process.env.POLPO_NAME || null,
   type: getArg('type') || 'vscode',
   project: getArg('project') || null,

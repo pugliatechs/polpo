@@ -92,7 +92,6 @@ The dashboard shows active sessions, past session history, and lets you send pro
 | Cost Tracking | Per-turn API costs displayed inline |
 | Mobile-First UI | Dark OLED theme, touch-optimized, safe-area support, responsive layout |
 | Tunnel Access | Expose the hub over the internet with `--tunnel` (cloudflared, localtunnel, ngrok, SSH) |
-| VS Code Monitoring | Passively watch existing VS Code sessions via hooks |
 
 ## Security
 

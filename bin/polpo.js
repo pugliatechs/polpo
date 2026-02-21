@@ -271,8 +271,34 @@ async function runServer() {
     console.log('     Pass to agents: polpo session --server ws://host:port --token <token>\n');
   }
 
+  // Write server info to a well-known file so bridges can auto-discover the token
+  const serverInfoPath = require('path').join(os.homedir(), '.config', 'polpo', 'server.json');
+  try {
+    const fsNode = require('fs');
+    const serverInfoDir = require('path').dirname(serverInfoPath);
+    if (!fsNode.existsSync(serverInfoDir)) {
+      fsNode.mkdirSync(serverInfoDir, { recursive: true, mode: 0o700 });
+    }
+    fsNode.writeFileSync(serverInfoPath, JSON.stringify({
+      token: token || null,
+      port,
+      url: `ws://127.0.0.1:${port}`,
+      pid: process.pid,
+      startedAt: Date.now(),
+    }), { mode: 0o600 });
+    // Ensure permissions even if the file already existed
+    fsNode.chmodSync(serverInfoPath, 0o600);
+  } catch (e) {
+    // not critical
+  }
+
+  function cleanupServerInfo() {
+    try { require('fs').unlinkSync(serverInfoPath); } catch (e) {}
+  }
+
   process.on('SIGINT', async () => {
     console.log('\n  Shutting down...');
+    cleanupServerInfo();
     if (tunnel) {
       try { tunnel.close(); } catch (e) { /* ignore */ }
     }
@@ -281,6 +307,7 @@ async function runServer() {
   });
 
   process.on('SIGTERM', async () => {
+    cleanupServerInfo();
     if (tunnel) {
       try { tunnel.close(); } catch (e) { /* ignore */ }
     }
