@@ -22,12 +22,16 @@ const { ensureBridge, send, readStdin } = require('./client');
     }
 
     const content = hookData.message || hookData.title || JSON.stringify(hookData);
+    const sessionId = hookData.session_id || null;
+    const transcriptPath = hookData.transcript_path || null;
 
     const socketPath = await ensureBridge({ cwd: process.cwd() });
 
     await send(socketPath, {
       type: 'notification',
       content,
+      sessionId,
+      transcriptPath,
     });
 
     // Claude Code is idle when it sends a notification (task finished)

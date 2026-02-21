@@ -349,6 +349,12 @@ function printHooks() {
           command: `node ${path.join(hooksDir, 'notification.js')}`,
         },
       ],
+      UserPromptSubmit: [
+        {
+          matcher: '',
+          command: `node ${path.join(hooksDir, 'user-prompt-submit.js')}`,
+        },
+      ],
     },
   };
 

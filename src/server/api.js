@@ -386,6 +386,46 @@ function createApiRouter(instanceManager, getAuthState) {
     res.json({ ok: true, autoApprove: !!value });
   });
 
+  // Take over a hook bridge instance (spawn WrappedAgent to enable prompts)
+  router.post('/instances/:id/takeover', async (req, res) => {
+    const id = req.params.id;
+    const inst = instanceManager.get(id);
+    if (!inst) return res.status(404).json({ error: 'Instance not found' });
+    if (!inst.sessionId) return res.status(400).json({ error: 'Instance has no sessionId' });
+
+    // Don't spawn duplicates
+    if (wrappedAgents.has(inst.sessionId)) {
+      const existing = wrappedAgents.get(inst.sessionId);
+      return res.json({ instanceId: existing.instanceId, alreadyRunning: true });
+    }
+
+    const authState = typeof getAuthState === 'function' ? getAuthState() : null;
+    const authToken = authState && authState.enabled ? authState.token : undefined;
+
+    try {
+      const agent = new WrappedAgent({
+        name: `Takeover (${inst.name})`,
+        cwd: inst.cwd,
+        resumeSessionId: inst.sessionId,
+        serverUrl: `ws://127.0.0.1:${req.socket.localPort}`,
+        token: authToken,
+      });
+
+      await agent.start();
+      wrappedAgents.set(inst.sessionId, agent);
+
+      const cleanup = () => wrappedAgents.delete(inst.sessionId);
+      if (agent.ws) agent.ws.on('close', cleanup);
+
+      res.json({
+        instanceId: agent.instanceId,
+        warning: 'A second Claude process is now running. When done, return to terminal and run: claude --continue',
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // Abort current task
   router.post('/instances/:id/abort', (req, res) => {
     const sent = instanceManager.sendToAgent(req.params.id, { type: 'abort' });

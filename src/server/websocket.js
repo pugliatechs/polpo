@@ -1,12 +1,16 @@
 const WebSocket = require('ws');
 const url = require('url');
 const { validateWsAuth } = require('./auth');
+const { JsonlWatcher } = require('./jsonl-watcher');
 
 function setupWebSocket(server, instanceManager, getAuthState) {
   const wss = new WebSocket.Server({ server });
 
   // Track mobile/browser clients
   const dashboardClients = new Set();
+
+  // Track JSONL file watchers: instanceId -> JsonlWatcher
+  const activeWatchers = new Map();
 
   function broadcastToDashboards(message) {
     const data = JSON.stringify(message);
@@ -38,6 +42,13 @@ function setupWebSocket(server, instanceManager, getAuthState) {
       type: 'instance:disconnected',
       instanceId: instance.id,
     });
+
+    // Clean up JSONL watcher
+    const watcher = activeWatchers.get(instance.id);
+    if (watcher) {
+      watcher.close();
+      activeWatchers.delete(instance.id);
+    }
   });
 
   instanceManager.on('instance:status', (data) => {
@@ -54,6 +65,33 @@ function setupWebSocket(server, instanceManager, getAuthState) {
 
   instanceManager.on('instance:autoApprove', (data) => {
     broadcastToDashboards({ type: 'instance:autoApprove', ...data });
+  });
+
+  instanceManager.on('instance:session_info', (data) => {
+    broadcastToDashboards({ type: 'instance:session_info', ...data });
+
+    // Start watching the JSONL file for this instance
+    if (data.transcriptPath && !activeWatchers.has(data.id)) {
+      const watcher = new JsonlWatcher(data.transcriptPath);
+      activeWatchers.set(data.id, watcher);
+
+      watcher.on('message', (msg) => {
+        instanceManager.addMessage(data.id, msg);
+      });
+
+      watcher.on('message_update', (update) => {
+        broadcastToDashboards({
+          type: 'instance:message_update',
+          id: data.id,
+          ...update,
+        });
+      });
+
+      watcher.on('error', () => {});
+
+      // Skip to end — phone loads history via API when opening the instance
+      watcher.start({ catchUp: false });
+    }
   });
 
   wss.on('connection', (ws, req) => {
@@ -184,12 +222,18 @@ function handleAgentMessage(instanceId, msg, instanceManager) {
         command: msg.command,
       });
       break;
+    case 'session_info':
+      instanceManager.setSessionInfo(instanceId, msg.sessionId, msg.transcriptPath);
+      break;
     case 'output':
-      instanceManager.addMessage(instanceId, {
-        role: 'assistant',
-        content: msg.content,
-        contentType: msg.contentType || 'text',
-      });
+      // If JSONL watcher is active, skip hook-based output (JSONL provides full content)
+      if (!activeWatchers.has(instanceId)) {
+        instanceManager.addMessage(instanceId, {
+          role: 'assistant',
+          content: msg.content,
+          contentType: msg.contentType || 'text',
+        });
+      }
       break;
   }
 }

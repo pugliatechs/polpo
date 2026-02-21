@@ -53,6 +53,9 @@
   const $sessionsSection = document.getElementById('sessions-section');
   const $sessionsList = document.getElementById('sessions-list');
   const $btnRefreshSessions = document.getElementById('btn-refresh-sessions');
+  const $takeoverBanner = document.getElementById('takeover-banner');
+  const $btnTakeover = document.getElementById('btn-takeover');
+  const $inputArea = document.getElementById('input-area');
   const $btnAttach = document.getElementById('btn-attach');
   const $fileInput = document.getElementById('file-input');
   const $attachmentPreview = document.getElementById('attachment-preview');
@@ -182,6 +185,14 @@
         }
         if (activeInstanceId === msg.id) renderDetail();
         break;
+
+      case 'instance:session_info':
+        if (instances.has(msg.id)) {
+          instances.get(msg.id).sessionId = msg.sessionId;
+          instances.get(msg.id).transcriptPath = msg.transcriptPath;
+        }
+        renderList();
+        break;
     }
   }
 
@@ -261,13 +272,26 @@
     // Fetch conversation if we don't have it yet
     var inst = instances.get(id);
     if (inst && (!inst.conversation || inst.conversation.length === 0)) {
-      authFetch('/api/instances/' + id + '/conversation?limit=100')
-        .then(function (r) { return r.json(); })
-        .then(function (msgs) {
-          inst.conversation = msgs;
-          renderConversation();
-        })
-        .catch(function () {});
+      // If the instance has a sessionId, load full history from JSONL
+      if (inst.sessionId) {
+        authFetch('/api/sessions/' + inst.sessionId + '/history')
+          .then(function (r) { return r.json(); })
+          .then(function (history) {
+            if (history.length > 0) {
+              inst.conversation = history.concat(inst.conversation || []);
+            }
+            renderConversation();
+          })
+          .catch(function () {});
+      } else {
+        authFetch('/api/instances/' + id + '/conversation?limit=100')
+          .then(function (r) { return r.json(); })
+          .then(function (msgs) {
+            inst.conversation = msgs;
+            renderConversation();
+          })
+          .catch(function () {});
+      }
     }
 
     $viewList.classList.add('hidden');
@@ -293,6 +317,16 @@
     $detailStatus.className = 'badge badge-' + inst.status;
     $detailProject.textContent = '📁 ' + (inst.project || '');
     $detailType.textContent = inst.type === 'vscode' ? '💻 VS Code' : '⬛ Terminal';
+
+    // Takeover vs prompt input
+    var canPrompt = inst.canReceivePrompts !== false;
+    if (!canPrompt && inst.sessionId) {
+      $takeoverBanner.classList.remove('hidden');
+      $inputArea.classList.add('hidden');
+    } else {
+      $takeoverBanner.classList.add('hidden');
+      $inputArea.classList.remove('hidden');
+    }
 
     // Auto-approve indicator
     if (inst.autoApprove) {
@@ -482,10 +516,33 @@
     $btnSend.disabled = !$promptInput.value.trim() && pendingAttachments.length === 0;
   }
 
+  function takeover(instanceId) {
+    authFetch('/api/instances/' + instanceId + '/takeover', { method: 'POST' })
+      .then(function (r) { return r.json(); })
+      .then(function (result) {
+        if (result.instanceId) {
+          // Switch to the new takeover instance when it appears
+          var tryOpen = function (attempts) {
+            if (instances.has(result.instanceId)) {
+              openDetail(result.instanceId);
+            } else if (attempts > 0) {
+              setTimeout(function () { tryOpen(attempts - 1); }, 500);
+            }
+          };
+          tryOpen(6);
+        }
+      })
+      .catch(function () {});
+  }
+
   // ---- Event Listeners ----
   $btnBack.addEventListener('click', closeDetail);
 
   $btnSend.addEventListener('click', sendPrompt);
+
+  $btnTakeover.addEventListener('click', function () {
+    if (activeInstanceId) takeover(activeInstanceId);
+  });
 
   $btnAbort.addEventListener('click', function () {
     if (activeInstanceId && confirm('Abort current task?')) {

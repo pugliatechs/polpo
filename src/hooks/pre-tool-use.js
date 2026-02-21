@@ -33,6 +33,8 @@ const APPROVAL_TIMEOUT = parseInt(process.env.POLPO_TIMEOUT) || 5 * 60 * 1000;
 
     const toolName = hookData.tool_name;
     const toolInput = hookData.tool_input || {};
+    const sessionId = hookData.session_id || null;
+    const transcriptPath = hookData.transcript_path || null;
 
     // Build a human-readable description
     let description = toolName;
@@ -73,6 +75,8 @@ const APPROVAL_TIMEOUT = parseInt(process.env.POLPO_TIMEOUT) || 5 * 60 * 1000;
           description,
           command,
           timeout: APPROVAL_TIMEOUT,
+          sessionId,
+          transcriptPath,
         },
         APPROVAL_TIMEOUT + 5000
       );
@@ -91,6 +95,8 @@ const APPROVAL_TIMEOUT = parseInt(process.env.POLPO_TIMEOUT) || 5 * 60 * 1000;
         tool: toolName,
         description,
         command,
+        sessionId,
+        transcriptPath,
       });
     }
   } catch (e) {

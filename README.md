@@ -19,7 +19,7 @@ Polpo frees you from the keyboard. Grab a coffee, kick off a refactor while wait
 Three integration modes:
 
 - **Session** - spawns `claude` CLI with JSON streaming for full bidirectional control from phone, including MCP-based tool approval
-- **Hooks** - taps into existing VS Code/terminal sessions via Claude Code hooks for read-only monitoring (with optional approval)
+- **Hooks** - taps into existing VS Code/terminal sessions via Claude Code hooks for live conversation sync (with optional approval and phone takeover)
 - **Session Browser** - discovers and displays past Claude Code sessions from JSONL files, with the ability to resume them
 
 ## Requirements
@@ -83,6 +83,8 @@ The dashboard shows active sessions, past session history, and lets you send pro
 | File Attachments | Send any file from your phone - images, PDFs, code, documents, etc. |
 | Session Browser | Browse past Claude Code sessions with conversation history |
 | Session Resume | Resume any past session directly from the phone dashboard |
+| Live History Sync | Terminal/VS Code conversations synced to phone in real-time via JSONL watcher |
+| Phone Takeover | Take over a terminal session from your phone to send prompts |
 | Instance Dashboard | See all active sessions at a glance with live status |
 | Tool Call Cards | Bash commands, file edits, and searches rendered as mobile-native cards |
 | Abort | Stop any running task with a tap |
@@ -214,9 +216,9 @@ The dashboard automatically discovers past Claude Code sessions from `~/.claude/
 
 Sessions are loaded from JSONL files and deduplicated to show clean conversation threads.
 
-## VS Code Monitoring (Hooks)
+## VS Code / Terminal Sync (Hooks)
 
-For passively monitoring existing VS Code Claude Code sessions, use the hooks integration.
+Hook into existing VS Code or terminal Claude Code sessions for live conversation sync.
 
 ### Setup
 
@@ -227,9 +229,17 @@ node bin/polpo.js hooks
 
 Add the output to `~/.claude/settings.json`. Instances appear on your phone automatically when Claude Code uses a tool.
 
+Once connected, Polpo watches the session's JSONL file in real-time, so the phone shows the full conversation (not just tool summaries). Terminal prompts are forwarded to the phone as they're typed.
+
+### Phone Takeover
+
+Hook instances are read-only by default - you can see the conversation but can't send prompts. Tap **Take Over** to spawn a new agent that resumes the session, giving you full control from your phone.
+
+When you return to your terminal, run `claude --continue` to reload the conversation.
+
 ### Approval Mode
 
-By default hooks are read-only. To enable phone-based tool approval, set `POLPO_APPROVE=1`:
+To enable phone-based tool approval for hook instances, set `POLPO_APPROVE=1`:
 
 ```json
 {
@@ -277,6 +287,7 @@ Tap the paperclip icon to attach files from your phone. Supported types:
 | POST | `/api/instances/:id/reject` | Reject pending tool use |
 | POST | `/api/instances/:id/auto-approve` | Toggle auto-approve for an instance |
 | POST | `/api/instances/:id/answer` | Submit answers to pending questions |
+| POST | `/api/instances/:id/takeover` | Take over a hook instance (spawns wrapped agent) |
 | POST | `/api/instances/:id/abort` | Abort current task |
 | POST | `/api/upload` | Upload a file attachment (base64) |
 | POST | `/api/permission-request` | MCP permission server long-poll |
@@ -306,7 +317,7 @@ Connect to `ws://<host>:<port>?role=agent&instanceId=<id>` as an agent.
 npm test
 ```
 
-Runs unit tests with Node's built-in test runner. Tests cover authentication (token, PIN, TOTP, sessions, middleware), instance manager, tunnel provider logic, and session JSONL parsing.
+Runs unit tests with Node's built-in test runner. Tests cover authentication (token, PIN, TOTP, sessions, middleware), instance manager, tunnel provider logic, session JSONL parsing, and JSONL file watcher.
 
 ## System Overview
 
@@ -338,7 +349,9 @@ graph TD
     Hub --> Hooks
     Hub --> Browser
     Session --> Claude
-    Hooks -->|"read-only"| VSCode
+    Hooks -->|"status + approvals"| VSCode
+    VSCode -->|"writes"| JSONL
+    Hub -->|"JSONL watcher"| JSONL
     Claude --> MCP
     MCP -->|"phone approval"| Hub
     Browser -->|"reads"| JSONL

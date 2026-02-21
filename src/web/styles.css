@@ -943,6 +943,24 @@ h5.plan-h { font-size: 13px; }
 }
 
 /* ---- Input Area ---- */
+.takeover-banner {
+  padding: 16px 12px;
+  padding-left: calc(12px + var(--safe-left));
+  padding-right: calc(12px + var(--safe-right));
+  padding-bottom: calc(16px + var(--safe-bottom));
+  background: var(--bg-card);
+  border-top: 1px solid rgba(255,255,255,0.06);
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.takeover-hint {
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+
 .input-area {
   display: flex;
   flex-direction: column;

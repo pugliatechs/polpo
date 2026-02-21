@@ -109,8 +109,14 @@
     <!-- Conversation -->
     <div id="conversation" class="conversation"></div>
 
+    <!-- Takeover Banner (for hook bridge instances) -->
+    <div id="takeover-banner" class="takeover-banner hidden">
+      <p class="takeover-hint">This session is running in your terminal. To send prompts from here, take over.</p>
+      <button id="btn-takeover" class="btn btn-approve">Take Over Session</button>
+    </div>
+
     <!-- Input Area -->
-    <div class="input-area">
+    <div class="input-area" id="input-area">
       <div id="attachment-preview" class="attachment-preview hidden"></div>
       <div class="input-row">
         <button id="btn-attach" class="btn-icon btn-attach" title="Attach file">&#128206;</button>

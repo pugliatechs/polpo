@@ -23,6 +23,9 @@ class InstanceManager extends EventEmitter {
       pendingApproval: null,
       autoApprove: false,
       agentSocket: null, // WebSocket back to the agent
+      sessionId: info.sessionId || null,
+      transcriptPath: info.transcriptPath || null,
+      canReceivePrompts: info.canReceivePrompts !== undefined ? info.canReceivePrompts : true,
     };
     this.instances.set(id, instance);
     this.emit('instance:registered', instance);
@@ -55,6 +58,8 @@ class InstanceManager extends EventEmitter {
       conversationLength: inst.conversation.length,
       pendingApproval: inst.pendingApproval,
       autoApprove: inst.autoApprove,
+      sessionId: inst.sessionId,
+      canReceivePrompts: inst.canReceivePrompts,
     }));
   }
 
@@ -117,6 +122,16 @@ class InstanceManager extends EventEmitter {
       instance.autoApprove = !!value;
       instance.lastActivity = Date.now();
       this.emit('instance:autoApprove', { id, autoApprove: instance.autoApprove });
+    }
+  }
+
+  setSessionInfo(id, sessionId, transcriptPath) {
+    const instance = this.instances.get(id);
+    if (instance) {
+      instance.sessionId = sessionId;
+      instance.transcriptPath = transcriptPath;
+      instance.lastActivity = Date.now();
+      this.emit('instance:session_info', { id, sessionId, transcriptPath });
     }
   }
 

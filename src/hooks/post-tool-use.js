@@ -24,6 +24,8 @@ const { ensureBridge, send, readStdin } = require('./client');
     const toolName = hookData.tool_name;
     const toolInput = hookData.tool_input || {};
     const toolOutput = hookData.tool_output;
+    const sessionId = hookData.session_id || null;
+    const transcriptPath = hookData.transcript_path || null;
 
     // Build a compact result summary
     let summary = `[${toolName}] done`;
@@ -58,6 +60,8 @@ const { ensureBridge, send, readStdin } = require('./client');
       type: 'tool_result',
       tool: toolName,
       content: summary,
+      sessionId,
+      transcriptPath,
     });
 
     // Tool is done, back to busy (Claude Code is still processing)

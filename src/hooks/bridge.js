@@ -52,6 +52,8 @@ let ws = null;
 let unixServer = null;
 let reconnectTimer = null;
 let inactivityTimer = null;
+let sessionId = null;
+let transcriptPath = null;
 const pendingApprovals = new Map(); // requestId -> { socket, timer }
 const hookClients = new Set();
 
@@ -83,6 +85,7 @@ async function register() {
     type: config.type,
     project: config.project,
     cwd: config.cwd,
+    canReceivePrompts: false,
   });
 
   return new Promise((resolve, reject) => {
@@ -253,8 +256,17 @@ function startUnixServer() {
 
 // --- Handle messages from hook scripts ---
 
+function captureSessionInfo(msg) {
+  if (msg.sessionId && !sessionId) {
+    sessionId = msg.sessionId;
+    transcriptPath = msg.transcriptPath || null;
+    sendToHub({ type: 'session_info', sessionId, transcriptPath });
+  }
+}
+
 function handleHookMessage(msg, socket) {
   resetInactivity();
+  captureSessionInfo(msg);
 
   switch (msg.type) {
     case 'approval_request': {
@@ -330,6 +342,19 @@ function handleHookMessage(msg, socket) {
         content: `[notification] ${msg.content}`,
         contentType: 'text',
       });
+      break;
+    }
+
+    case 'user_prompt': {
+      sendToHub({
+        type: 'message',
+        message: {
+          role: 'user',
+          content: msg.prompt,
+          source: 'terminal',
+        },
+      });
+      sendToHub({ type: 'status', status: 'busy' });
       break;
     }
 
