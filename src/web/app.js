@@ -352,8 +352,12 @@
     if (!inst) return;
 
     $detailName.textContent = inst.name;
-    $detailStatus.textContent = inst.status;
     $detailStatus.className = 'badge badge-' + inst.status;
+    if (inst.status === 'busy') {
+      $detailStatus.innerHTML = '<span class="pulse-dot"></span>' + escapeHtml(inst.status);
+    } else {
+      $detailStatus.textContent = inst.status;
+    }
     $detailProject.textContent = '📁 ' + (inst.project || '');
     $detailType.textContent = inst.type === 'vscode' ? '💻 VS Code' : '⬛ Terminal';
 
