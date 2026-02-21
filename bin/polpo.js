@@ -272,7 +272,7 @@ async function runServer() {
   }
 
   // Write server info to a well-known file so bridges can auto-discover the token
-  const serverInfoPath = require('path').join(os.homedir(), '.config', 'polpo', 'server.json');
+  const serverInfoPath = require('path').join(require('os').homedir(), '.config', 'polpo', 'server.json');
   try {
     const fsNode = require('fs');
     const serverInfoDir = require('path').dirname(serverInfoPath);
