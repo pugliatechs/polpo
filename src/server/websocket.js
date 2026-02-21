@@ -213,7 +213,10 @@ function handleAgentMessage(instanceId, msg, instanceManager, activeWatchers) {
       instanceManager.updateStatus(instanceId, msg.status);
       break;
     case 'message':
-      instanceManager.addMessage(instanceId, msg.message);
+      // If JSONL watcher is active, skip hook-delivered messages (watcher provides them)
+      if (!activeWatchers.has(instanceId)) {
+        instanceManager.addMessage(instanceId, msg.message);
+      }
       break;
     case 'approval_request':
       instanceManager.setPendingApproval(instanceId, {

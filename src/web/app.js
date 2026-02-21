@@ -271,19 +271,22 @@
 
     // Fetch conversation if we don't have it yet
     var inst = instances.get(id);
-    if (inst && (!inst.conversation || inst.conversation.length === 0)) {
-      // If the instance has a sessionId, load full history from JSONL
-      if (inst.sessionId) {
+    if (inst) {
+      var hasConversation = inst.conversation && inst.conversation.length > 0;
+      // If the instance has a sessionId, always load full history from JSONL
+      // (watcher may have added recent messages, but we need the full history)
+      if (inst.sessionId && !inst._historyLoaded) {
         authFetch('/api/sessions/' + inst.sessionId + '/history')
           .then(function (r) { return r.json(); })
           .then(function (history) {
             if (history.length > 0) {
               inst.conversation = history.concat(inst.conversation || []);
             }
+            inst._historyLoaded = true;
             renderConversation();
           })
           .catch(function () {});
-      } else {
+      } else if (!hasConversation) {
         authFetch('/api/instances/' + id + '/conversation?limit=100')
           .then(function (r) { return r.json(); })
           .then(function (msgs) {
