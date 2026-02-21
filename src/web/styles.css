@@ -222,10 +222,29 @@ main {
 }
 
 .badge-idle { background: rgba(148,163,184,0.15); color: var(--text-muted); }
-.badge-busy { background: rgba(59,130,246,0.15); color: var(--blue); }
+.badge-busy {
+  background: rgba(59,130,246,0.15);
+  color: var(--blue);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
 .badge-waiting { background: rgba(234,179,8,0.2); color: var(--yellow); }
 .badge-paused { background: rgba(249,115,22,0.15); color: var(--orange); }
 .badge-disconnected { background: rgba(239,68,68,0.15); color: var(--red); }
+
+.pulse-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--blue);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.75); }
+}
 
 .card-meta {
   display: flex;

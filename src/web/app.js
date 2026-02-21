@@ -268,7 +268,7 @@
           '<div class="' + cardClass + '" data-id="' + inst.id + '">' +
             '<div class="card-top">' +
               '<span class="card-name">' + escapeHtml(title) + '</span>' +
-              '<span class="' + badgeClass + '">' + inst.status + '</span>' +
+              '<span class="' + badgeClass + '">' + (inst.status === 'busy' ? '<span class="pulse-dot"></span>' : '') + inst.status + '</span>' +
             '</div>' +
             '<div class="card-meta">' +
               '<span>' + escapeHtml(inst.project || '') + '</span>' +
