@@ -250,7 +250,7 @@ Add the output to `~/.claude/settings.json`. The bridge daemon auto-discovers th
 
 Auto-discovered and hook instances are read-only by default — you can see the conversation but can't send prompts. Tap **Take Over** to spawn a new agent that resumes the session, giving you full control from your phone.
 
-When you return to your terminal, run `claude --continue` to reload the conversation.
+When you return to your terminal, run `claude --continue` to reload the conversation. In VS Code, reload the window (`Ctrl+Shift+P` → "Reload Window") to pick up messages sent from Polpo — the VS Code extension caches conversations in memory and only re-reads JSONL on reload.
 
 ### Approval Mode
 
