@@ -136,6 +136,7 @@ function createServer(options = {}) {
     },
     stop() {
       return new Promise((resolve) => {
+        if (wss.scanner) wss.scanner.stop();
         for (const client of wss.clients) {
           client.terminate();
         }

@@ -128,6 +128,7 @@
         instances.clear();
         msg.instances.forEach(function (inst) {
           inst.conversation = inst.conversation || [];
+          inst._firstPrompt = inst.firstPrompt || getFirstPrompt(inst.conversation);
           instances.set(inst.id, inst);
         });
         renderList();
@@ -135,6 +136,7 @@
 
       case 'instance:registered':
         msg.instance.conversation = [];
+        msg.instance._firstPrompt = msg.instance.firstPrompt || null;
         instances.set(msg.instance.id, msg.instance);
         renderList();
         break;
@@ -160,6 +162,11 @@
           var inst = instances.get(msg.id);
           if (!inst.conversation) inst.conversation = [];
           inst.conversation.push(msg.message);
+          // Cache first prompt for card title; re-render list when it first appears
+          if (!inst._firstPrompt && msg.message.role === 'user' && (!msg.message.contentType || msg.message.contentType === 'text') && msg.message.content) {
+            inst._firstPrompt = msg.message.content;
+            renderList();
+          }
         }
         if (activeInstanceId === msg.id) {
           appendMessage(msg.message);
@@ -194,6 +201,23 @@
         renderList();
         break;
     }
+  }
+
+  // ---- Helpers: Instance ----
+  function getFirstPrompt(conversation) {
+    if (!conversation) return null;
+    for (var i = 0; i < conversation.length; i++) {
+      var m = conversation[i];
+      if (m.role === 'user' && (!m.contentType || m.contentType === 'text') && m.content) {
+        return m.content;
+      }
+    }
+    return null;
+  }
+
+  function truncate(str, max) {
+    if (!str) return '';
+    return str.length > max ? str.slice(0, max) + '...' : str;
   }
 
   // ---- Render: Instance List ----
@@ -236,14 +260,18 @@
             escapeHtml(inst.pendingApproval.description || 'Action requires approval') +
             '</div>';
         }
+        // Use first prompt as title (matching session cards), fall back to name
+        var title = inst._firstPrompt
+          ? truncate(inst._firstPrompt, 60)
+          : inst.name;
         return (
           '<div class="' + cardClass + '" data-id="' + inst.id + '">' +
             '<div class="card-top">' +
-              '<span class="card-name">' + escapeHtml(inst.name) + '</span>' +
+              '<span class="card-name">' + escapeHtml(title) + '</span>' +
               '<span class="' + badgeClass + '">' + inst.status + '</span>' +
             '</div>' +
             '<div class="card-meta">' +
-              '<span>📁 ' + escapeHtml(inst.project || '') + '</span>' +
+              '<span>' + escapeHtml(inst.project || '') + '</span>' +
               '<span>' + (inst.type === 'vscode' ? '💻 VS Code' : '⬛ Terminal') + '</span>' +
             '</div>' +
             approvalHtml +
@@ -283,6 +311,10 @@
               inst.conversation = history.concat(inst.conversation || []);
             }
             inst._historyLoaded = true;
+            if (!inst._firstPrompt) {
+              inst._firstPrompt = getFirstPrompt(inst.conversation);
+              renderList();
+            }
             renderConversation();
           })
           .catch(function () {});
@@ -291,6 +323,10 @@
           .then(function (r) { return r.json(); })
           .then(function (msgs) {
             inst.conversation = msgs;
+            if (!inst._firstPrompt) {
+              inst._firstPrompt = getFirstPrompt(inst.conversation);
+              renderList();
+            }
             renderConversation();
           })
           .catch(function () {});
@@ -938,22 +974,92 @@
   function renderMarkdown(str) {
     var escaped = escapeHtml(str);
 
-    // Code blocks: ```lang\n...\n``` → <pre><code>...</code></pre>
+    // 1. Extract code blocks to protect their contents
+    var codeBlocks = [];
     escaped = escaped.replace(/```(\w*)\n([\s\S]*?)```/g, function (match, lang, code) {
-      return '<pre class="code-block"><code>' + code.replace(/\n$/, '') + '</code></pre>';
+      var idx = codeBlocks.length;
+      codeBlocks.push(
+        '<pre class="code-block"' + (lang ? ' data-lang="' + lang + '"' : '') + '>' +
+        (lang ? '<div class="code-lang">' + lang + '</div>' : '') +
+        '<code>' + code.replace(/\n$/, '') + '</code></pre>'
+      );
+      return '\x00CB' + idx + '\x00';
     });
 
-    // Inline code: `...` → <code>...</code>
-    escaped = escaped.replace(/`([^`\n]+)`/g, '<code class="code-inline">$1</code>');
+    // 2. Extract inline code
+    var inlineCodes = [];
+    escaped = escaped.replace(/`([^`\n]+)`/g, function (match, code) {
+      var idx = inlineCodes.length;
+      inlineCodes.push('<code class="code-inline">' + code + '</code>');
+      return '\x00IC' + idx + '\x00';
+    });
 
-    // Bold: **...** → <strong>...</strong>
+    // 3. Tables
+    escaped = escaped.replace(/((?:^|\n)\|.+\|(?:\n\|.+\|)+)/g, function (block) {
+      var rows = block.trim().split('\n');
+      var html = '<table class="md-table">';
+      var isHeader = true;
+      for (var r = 0; r < rows.length; r++) {
+        var row = rows[r].trim();
+        if (!row.startsWith('|')) continue;
+        if (/^\|[\s\-:|]+\|$/.test(row)) { isHeader = false; continue; }
+        var cells = row.split('|').filter(function (c, i, arr) { return i > 0 && i < arr.length - 1; });
+        var tag = isHeader ? 'th' : 'td';
+        html += '<tr>' + cells.map(function (c) { return '<' + tag + '>' + c.trim() + '</' + tag + '>'; }).join('') + '</tr>';
+        if (isHeader && r === 0) isHeader = true;
+      }
+      html += '</table>';
+      return html;
+    });
+
+    // 4. Headers
+    escaped = escaped.replace(/^####\s+(.+)$/gm, '<div class="md-h md-h4">$1</div>');
+    escaped = escaped.replace(/^###\s+(.+)$/gm, '<div class="md-h md-h3">$1</div>');
+    escaped = escaped.replace(/^##\s+(.+)$/gm, '<div class="md-h md-h2">$1</div>');
+    escaped = escaped.replace(/^#\s+(.+)$/gm, '<div class="md-h md-h1">$1</div>');
+
+    // 5. Horizontal rules
+    escaped = escaped.replace(/^[-*_]{3,}$/gm, '<hr class="md-hr">');
+
+    // 6. Blockquotes (> is escaped to &gt;)
+    escaped = escaped.replace(/^&gt;\s+(.+)$/gm, '<div class="md-blockquote">$1</div>');
+
+    // 7. Bold + italic
+    escaped = escaped.replace(/\*\*\*([^*]+)\*\*\*/g, '<strong><em>$1</em></strong>');
+
+    // 8. Bold
     escaped = escaped.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
 
-    // Numbered lists: lines starting with "1. " etc
-    escaped = escaped.replace(/^(\d+)\.\s+(.*)$/gm, '<span class="list-item"><span class="list-num">$1.</span> $2</span>');
+    // 9. Italic
+    escaped = escaped.replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
 
-    // Arrow → (just render nicely)
+    // 10. Strikethrough
+    escaped = escaped.replace(/~~([^~]+)~~/g, '<del>$1</del>');
+
+    // 11. Links [text](url) — unescape &amp; back to & in href
+    escaped = escaped.replace(/\[([^\]]+)\]\(([^)]+)\)/g, function (match, text, url) {
+      var href = url.replace(/&amp;/g, '&');
+      return '<a href="' + href + '" target="_blank" rel="noopener" class="md-link">' + text + '</a>';
+    });
+
+    // 12. Bullet lists
+    escaped = escaped.replace(/^[\-\*]\s+(.+)$/gm, '<div class="md-bullet"><span class="md-bullet-dot"></span>$1</div>');
+
+    // 13. Numbered lists
+    escaped = escaped.replace(/^(\d+)\.\s+(.+)$/gm, '<div class="md-numbered"><span class="md-num">$1.</span> $2</div>');
+
+    // 14. Arrow
     escaped = escaped.replace(/→/g, '<span class="arrow">→</span>');
+
+    // 15. Restore inline code
+    escaped = escaped.replace(/\x00IC(\d+)\x00/g, function (match, idx) {
+      return inlineCodes[parseInt(idx)];
+    });
+
+    // 16. Restore code blocks
+    escaped = escaped.replace(/\x00CB(\d+)\x00/g, function (match, idx) {
+      return codeBlocks[parseInt(idx)];
+    });
 
     return escaped;
   }

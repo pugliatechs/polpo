@@ -16,10 +16,11 @@ Polpo frees you from the keyboard. Grab a coffee, kick off a refactor while wait
 
 ## Architecture
 
-Three integration modes:
+Four integration modes:
 
 - **Session** - spawns `claude` CLI with JSON streaming for full bidirectional control from phone, including MCP-based tool approval
-- **Hooks** - taps into existing VS Code/terminal sessions via Claude Code hooks for live conversation sync (with optional approval and phone takeover)
+- **Auto-Discovery** - watches `~/.claude/projects/` for active JSONL files using `fs.watch()`, auto-registers sessions on the dashboard with real-time conversation sync — no setup needed
+- **Hooks** - taps into existing terminal sessions via Claude Code hooks for terminal prompt forwarding and phone-based tool approval
 - **Session Browser** - discovers and displays past Claude Code sessions from JSONL files, with the ability to resume them
 
 ## Requirements
@@ -83,9 +84,10 @@ The dashboard shows active sessions, past session history, and lets you send pro
 | File Attachments | Send any file from your phone - images, PDFs, code, documents, etc. |
 | Session Browser | Browse past Claude Code sessions with conversation history |
 | Session Resume | Resume any past session directly from the phone dashboard |
+| Auto-Discovery | Active sessions detected automatically via filesystem watching — no hooks required |
 | Live History Sync | Terminal/VS Code conversations synced to phone in real-time via JSONL watcher |
 | Phone Takeover | Take over a terminal session from your phone to send prompts |
-| Instance Dashboard | See all active sessions at a glance with live status |
+| Instance Dashboard | See all active sessions at a glance with live status (busy/idle derived from JSONL) |
 | Tool Call Cards | Bash commands, file edits, and searches rendered as mobile-native cards |
 | Abort | Stop any running task with a tap |
 | Multi-Instance | Run and monitor unlimited parallel sessions |
@@ -215,9 +217,23 @@ The dashboard automatically discovers past Claude Code sessions from `~/.claude/
 
 Sessions are loaded from JSONL files and deduplicated to show clean conversation threads.
 
-## VS Code / Terminal Sync (Hooks)
+## Auto-Discovery
 
-Hook into existing VS Code or terminal Claude Code sessions for live conversation sync.
+The Polpo server automatically discovers active Claude Code sessions by watching `~/.claude/projects/` for JSONL file changes. This is event-driven using `fs.watch()` — no polling, no hooks, no setup.
+
+When a session is detected:
+1. An instance appears on the phone dashboard
+2. A JSONL watcher starts streaming the full conversation in real-time
+3. Status (busy/idle) is derived from the JSONL content — user messages set busy, assistant turn completions set idle
+
+Auto-discovery works with any Claude Code interface (terminal CLI, VS Code extension, web) since all write to the same JSONL files.
+
+## Terminal Sync (Hooks)
+
+Hooks are **optional** — auto-discovery handles session detection and conversation sync without them. Hooks add two capabilities:
+
+- **Terminal prompt forwarding** — see what the terminal user types in real-time (via `UserPromptSubmit` hook)
+- **Phone-based tool approval** — approve or reject tool calls from your phone (via `PreToolUse` hook with `POLPO_APPROVE=1`)
 
 ### Setup
 
@@ -226,13 +242,13 @@ Hook into existing VS Code or terminal Claude Code sessions for live conversatio
 node bin/polpo.js hooks
 ```
 
-Add the output to `~/.claude/settings.json`. Instances appear on your phone automatically when Claude Code uses a tool.
+Add the output to `~/.claude/settings.json`. The bridge daemon auto-discovers the server token from `~/.config/polpo/server.json` — no manual token passing needed.
 
-Once connected, Polpo watches the session's JSONL file in real-time, so the phone shows the full conversation (not just tool summaries). Terminal prompts are forwarded to the phone as they're typed.
+> **Note**: Shell hooks from `settings.json` work with the `claude` CLI. The VS Code extension uses its own internal hook mechanism and does not execute shell hooks. For VS Code sessions, auto-discovery provides full conversation sync without hooks.
 
 ### Phone Takeover
 
-Hook instances are read-only by default - you can see the conversation but can't send prompts. Tap **Take Over** to spawn a new agent that resumes the session, giving you full control from your phone.
+Auto-discovered and hook instances are read-only by default — you can see the conversation but can't send prompts. Tap **Take Over** to spawn a new agent that resumes the session, giving you full control from your phone.
 
 When you return to your terminal, run `claude --continue` to reload the conversation.
 
@@ -259,6 +275,7 @@ Tap the paperclip icon to attach files from your phone. Supported types:
 ## Mobile UI
 
 - Dark theme optimized for OLED screens
+- Full markdown rendering — headers, bold, italic, code blocks (with language labels), inline code, bullet/numbered lists, tables, blockquotes, links, horizontal rules, strikethrough
 - Tool calls rendered as cards (Bash commands, file paths, search patterns)
 - Tool results shown as collapsible code blocks
 - Per-turn cost displayed inline
@@ -316,7 +333,7 @@ Connect to `ws://<host>:<port>?role=agent&instanceId=<id>` as an agent.
 npm test
 ```
 
-Runs unit tests with Node's built-in test runner. Tests cover authentication (token, PIN, TOTP, sessions, middleware), instance manager, tunnel provider logic, session JSONL parsing, and JSONL file watcher.
+Runs unit tests with Node's built-in test runner. Tests cover authentication (token, PIN, TOTP, sessions, middleware), instance manager, tunnel provider logic, session JSONL parsing, JSONL file watcher (messages, status events, dedup), and session scanner (auto-discovery, idle detection, project watching).
 
 ## System Overview
 
@@ -329,8 +346,10 @@ graph TD
     Express + WebSocket"]
     Session["Session Agent
     (wrapped)"]
+    Scanner["Session Scanner
+    (fs.watch)"]
     Hooks["Hook Bridge
-    (monitoring)"]
+    (optional)"]
     Browser["Session Browser"]
     Claude["claude CLI
     (stream-json)"]
@@ -345,10 +364,12 @@ graph TD
     Phone -->|"VPN / LAN"| Hub
     Tunnel --> Hub
     Hub --> Session
+    Hub --> Scanner
     Hub --> Hooks
     Hub --> Browser
     Session --> Claude
-    Hooks -->|"status + approvals"| VSCode
+    Scanner -->|"auto-discover"| JSONL
+    Hooks -->|"approvals + prompts"| VSCode
     VSCode -->|"writes"| JSONL
     Hub -->|"JSONL watcher"| JSONL
     Claude --> MCP

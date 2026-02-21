@@ -136,11 +136,30 @@
     // Auto-focus and auto-advance
     inputs.forEach(function(inp, idx) {
       inp.addEventListener('input', function() {
-        inp.value = inp.value.replace(/[^0-9]/g, '');
-        if (inp.value && idx < digits - 1) {
-          inputs[idx + 1].focus();
+        var val = inp.value.replace(/[^0-9]/g, '');
+        // Handle OS autofill or multi-char input (e.g. iOS OTP autofill)
+        if (val.length > 1) {
+          for (var j = 0; j < digits && j < val.length; j++) {
+            inputs[j].value = val[j];
+          }
+          if (val.length >= digits) {
+            inputs[digits - 1].focus();
+            updateButton();
+            setTimeout(submit, 150);
+            return;
+          }
+          inputs[Math.min(val.length, digits - 1)].focus();
+        } else {
+          inp.value = val;
+          if (val && idx < digits - 1) {
+            inputs[idx + 1].focus();
+          }
         }
         updateButton();
+        // Auto-submit when all digits are filled
+        if (getCode().length === digits) {
+          setTimeout(submit, 150);
+        }
       });
       inp.addEventListener('keydown', function(e) {
         if (e.key === 'Backspace' && !inp.value && idx > 0) {
@@ -150,7 +169,7 @@
           submit();
         }
       });
-      // Handle paste
+      // Handle paste — fill all fields and auto-submit
       inp.addEventListener('paste', function(e) {
         e.preventDefault();
         var data = (e.clipboardData || window.clipboardData).getData('text').replace(/[^0-9]/g, '');
@@ -159,10 +178,13 @@
         }
         if (data.length >= digits) {
           inputs[digits - 1].focus();
+          updateButton();
+          // Auto-submit after a brief flash so user sees the filled code
+          setTimeout(submit, 150);
         } else {
           inputs[Math.min(data.length, digits - 1)].focus();
+          updateButton();
         }
-        updateButton();
       });
     });
 

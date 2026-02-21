@@ -360,4 +360,60 @@ describe('JsonlWatcher', () => {
     assert.ok(msgs[0].content.length < 3000);
     assert.ok(msgs[0].content.includes('...'));
   });
+
+  it('emits busy status on user text message', async () => {
+    fs.writeFileSync(filePath, '');
+    watcher = new JsonlWatcher(filePath, { debounceMs: 20 });
+
+    const statuses = [];
+    watcher.on('status', (s) => statuses.push(s));
+    await watcher.start({ catchUp: false });
+
+    fs.appendFileSync(filePath, userLine('Hello') + '\n');
+    await wait(200);
+
+    assert.ok(statuses.includes('busy'), 'Should emit busy on user text');
+  });
+
+  it('emits idle status on assistant with stop_reason', async () => {
+    fs.writeFileSync(filePath, '');
+    watcher = new JsonlWatcher(filePath, { debounceMs: 20 });
+
+    const statuses = [];
+    watcher.on('status', (s) => statuses.push(s));
+    await watcher.start({ catchUp: false });
+
+    // Write an assistant message with stop_reason
+    const line = JSON.stringify({
+      type: 'assistant',
+      uuid: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      message: {
+        id: `msg_${crypto.randomUUID()}`,
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Done!' }],
+        stop_reason: 'end_turn',
+      },
+    });
+    fs.appendFileSync(filePath, line + '\n');
+    await wait(200);
+
+    assert.ok(statuses.includes('idle'), 'Should emit idle on stop_reason');
+  });
+
+  it('does not emit idle for assistant with null stop_reason', async () => {
+    fs.writeFileSync(filePath, '');
+    watcher = new JsonlWatcher(filePath, { debounceMs: 20 });
+
+    const statuses = [];
+    watcher.on('status', (s) => statuses.push(s));
+    await watcher.start({ catchUp: false });
+
+    // Normal assistant line (streaming, no stop_reason)
+    fs.appendFileSync(filePath, assistantLine('thinking...') + '\n');
+    await wait(200);
+
+    const idleStatuses = statuses.filter((s) => s === 'idle');
+    assert.equal(idleStatuses.length, 0, 'Should not emit idle for null stop_reason');
+  });
 });

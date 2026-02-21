@@ -146,6 +146,11 @@ class JsonlWatcher extends EventEmitter {
       this._emitUserMessage(obj);
     } else if (obj.type === 'assistant') {
       this._emitAssistantMessage(obj);
+      // Detect turn completion: non-null stop_reason means model finished
+      const stopReason = obj.message && obj.message.stop_reason;
+      if (stopReason) {
+        this.emit('status', 'idle');
+      }
     }
     // Skip queue-operation, progress, file-history-snapshot, etc.
   }
@@ -156,6 +161,8 @@ class JsonlWatcher extends EventEmitter {
 
     for (const block of content) {
       if (block.type === 'text' && !block.text.startsWith('<')) {
+        // User sent a prompt — model will start working
+        this.emit('status', 'busy');
         this.emit('message', {
           role: 'user',
           content: block.text,

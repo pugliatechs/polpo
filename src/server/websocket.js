@@ -2,6 +2,7 @@ const WebSocket = require('ws');
 const url = require('url');
 const { validateWsAuth } = require('./auth');
 const { JsonlWatcher } = require('./jsonl-watcher');
+const { SessionScanner } = require('./session-scanner');
 
 function setupWebSocket(server, instanceManager, getAuthState) {
   const wss = new WebSocket.Server({ server });
@@ -11,6 +12,9 @@ function setupWebSocket(server, instanceManager, getAuthState) {
 
   // Track JSONL file watchers: instanceId -> JsonlWatcher
   const activeWatchers = new Map();
+
+  // Track session-to-instance mapping for auto-discovered sessions
+  const sessionToInstance = new Map(); // sessionId -> instanceId
 
   function broadcastToDashboards(message) {
     const data = JSON.stringify(message);
@@ -71,28 +75,77 @@ function setupWebSocket(server, instanceManager, getAuthState) {
     broadcastToDashboards({ type: 'instance:session_info', ...data });
 
     // Start watching the JSONL file for this instance
-    if (data.transcriptPath && !activeWatchers.has(data.id)) {
-      const watcher = new JsonlWatcher(data.transcriptPath);
-      activeWatchers.set(data.id, watcher);
+    startWatcherForInstance(data.id, data.transcriptPath);
+  });
 
-      watcher.on('message', (msg) => {
-        instanceManager.addMessage(data.id, msg);
+  /**
+   * Start a JSONL watcher for an instance (shared by hook-bridge and auto-discovery).
+   */
+  function startWatcherForInstance(instanceId, transcriptPath) {
+    if (!transcriptPath || activeWatchers.has(instanceId)) return;
+
+    const watcher = new JsonlWatcher(transcriptPath);
+    activeWatchers.set(instanceId, watcher);
+
+    watcher.on('message', (msg) => {
+      instanceManager.addMessage(instanceId, msg);
+    });
+
+    watcher.on('message_update', (update) => {
+      broadcastToDashboards({
+        type: 'instance:message_update',
+        id: instanceId,
+        ...update,
       });
+    });
 
-      watcher.on('message_update', (update) => {
-        broadcastToDashboards({
-          type: 'instance:message_update',
-          id: data.id,
-          ...update,
-        });
-      });
+    watcher.on('status', (status) => {
+      instanceManager.updateStatus(instanceId, status);
+    });
 
-      watcher.on('error', () => {});
+    watcher.on('error', () => {});
 
-      // Skip to end — phone loads history via API when opening the instance
-      watcher.start({ catchUp: false });
+    // Skip to end — phone loads history via API when opening the instance
+    watcher.start({ catchUp: false });
+  }
+
+  // --- Auto-discovery: scan for active JSONL sessions ---
+  const scanner = new SessionScanner();
+
+  scanner.on('session:discovered', (data) => {
+    const { sessionId, transcriptPath, cwd, projectName, firstPrompt } = data;
+
+    // Don't duplicate if a bridge already registered this session
+    if (sessionToInstance.has(sessionId)) return;
+
+    const instance = instanceManager.register({
+      name: firstPrompt || projectName,
+      type: 'vscode',
+      project: projectName,
+      cwd,
+      sessionId,
+      transcriptPath,
+      firstPrompt: firstPrompt || null,
+      canReceivePrompts: false, // auto-discovered, no agent socket
+    });
+
+    sessionToInstance.set(sessionId, instance.id);
+    instanceManager.updateStatus(instance.id, 'busy');
+
+    // Start watching the JSONL file
+    startWatcherForInstance(instance.id, transcriptPath);
+  });
+
+  scanner.on('session:inactive', (data) => {
+    const instanceId = sessionToInstance.get(data.sessionId);
+    if (instanceId) {
+      instanceManager.updateStatus(instanceId, 'disconnected');
+      instanceManager.unregister(instanceId);
+      sessionToInstance.delete(data.sessionId);
     }
   });
+
+  scanner.start();
 
   wss.on('connection', (ws, req) => {
     const authState = typeof getAuthState === 'function' ? getAuthState() : getAuthState;
@@ -152,6 +205,9 @@ function setupWebSocket(server, instanceManager, getAuthState) {
     }
   });
 
+  // Expose scanner for cleanup
+  wss.scanner = scanner;
+
   return wss;
 }
 
@@ -210,7 +266,10 @@ function handleDashboardMessage(msg, instanceManager) {
 function handleAgentMessage(instanceId, msg, instanceManager, activeWatchers) {
   switch (msg.type) {
     case 'status':
-      instanceManager.updateStatus(instanceId, msg.status);
+      // If JSONL watcher is active, it provides status via stop_reason detection
+      if (!activeWatchers.has(instanceId)) {
+        instanceManager.updateStatus(instanceId, msg.status);
+      }
       break;
     case 'message':
       // If JSONL watcher is active, skip hook-delivered messages (watcher provides them)
