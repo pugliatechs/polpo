@@ -26,6 +26,7 @@ class SessionScanner extends EventEmitter {
     this.sessions = new Map(); // sessionId -> { path, projectSlug, cwd, lastModified, registered }
     this.watchers = new Map(); // projectSlug -> fs.FSWatcher
     this.rootWatcher = null;
+    this.creationWatcher = null;
     this.idleTimer = null;
     this.closed = false;
   }
@@ -46,6 +47,10 @@ class SessionScanner extends EventEmitter {
     if (this.idleTimer) {
       clearInterval(this.idleTimer);
       this.idleTimer = null;
+    }
+    if (this.creationWatcher) {
+      this.creationWatcher.close();
+      this.creationWatcher = null;
     }
     if (this.rootWatcher) {
       this.rootWatcher.close();
@@ -69,12 +74,14 @@ class SessionScanner extends EventEmitter {
         if (this.closed) return;
         if (filename === basename && fs.existsSync(this.projectsDir)) {
           w.close();
+          this.creationWatcher = null;
           this._watchRoot();
           this._watchExistingProjects();
           this._startIdleCheck();
         }
       });
       w.on('error', () => {});
+      this.creationWatcher = w;
     } catch {
       // parent dir doesn't exist
     }

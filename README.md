@@ -4,29 +4,29 @@
   <img src="assets/logo.png" alt="Polpo" width="240" height="240">
 </p>
 
-<p align="center"><strong>Work on Claude Code from your phone.</strong></p>
+<p align="center"><strong>Work on Claude Code and Codex from your phone.</strong></p>
 
-Polpo lets developers send prompts, see responses, and control Claude Code sessions from any mobile device over VPN, Wi-Fi, LAN, or a public tunnel.
+Polpo lets developers send prompts, see responses, and control Claude Code and OpenAI Codex CLI sessions from any mobile device over VPN, Wi-Fi, LAN, or a public tunnel.
 
 ## Why
 
-Claude Code sessions can run for minutes while reading files, writing code, and running tests. During that time, developers are tethered to their terminal waiting to approve tool calls, review output, or send the next prompt.
+AI coding sessions can run for minutes while reading files, writing code, and running tests. During that time, developers are tethered to their terminal waiting to approve tool calls, review output, or send the next prompt.
 
-Polpo frees you from the keyboard. Grab a coffee, kick off a refactor while waiting for a train, or review tool calls from an airport lounge - your phone becomes a full remote control for Claude Code. You see every tool call as it happens, approve or reject actions with a tap, send follow-up prompts, and abort tasks when something goes wrong. All in real time, from any network.
+Polpo frees you from the keyboard. Grab a coffee, kick off a refactor while waiting for a train, or review tool calls from an airport lounge - your phone becomes a full remote control for Claude Code and Codex. You see every tool call as it happens, approve or reject actions with a tap, send follow-up prompts, and abort tasks when something goes wrong. All in real time, from any network.
 
 ## Architecture
 
-Four integration modes:
+Four integration modes, supporting both **Claude Code** and **OpenAI Codex CLI**:
 
-- **Session** - spawns `claude` CLI with JSON streaming for full bidirectional control from phone, including MCP-based tool approval
-- **Auto-Discovery** - watches `~/.claude/projects/` for active JSONL files using `fs.watch()`, auto-registers sessions on the dashboard with real-time conversation sync — no setup needed
+- **Session** - spawns `claude` or `codex exec --json` with full bidirectional control from phone, including MCP-based tool approval
+- **Auto-Discovery** - watches `~/.claude/projects/` and `~/.codex/sessions/` for active JSONL files using `fs.watch()`, auto-registers sessions on the dashboard with real-time conversation sync — no setup needed
 - **Hooks** - taps into existing terminal sessions via Claude Code hooks for terminal prompt forwarding and phone-based tool approval
-- **Session Browser** - discovers and displays past Claude Code sessions from JSONL files, with the ability to resume them
+- **Session Browser** - discovers and displays past sessions from both Claude Code and Codex JSONL files, with the ability to resume them
 
 ## Requirements
 
 - **Node.js** 18+ (for built-in test runner; 16+ works for everything else)
-- **Claude Code** CLI installed and authenticated
+- **Claude Code** CLI installed and authenticated, **and/or** **Codex CLI** installed and authenticated
 - **macOS** or **Linux** (Windows is not currently supported)
 
 ### macOS Notes
@@ -58,10 +58,13 @@ node bin/polpo.js server
 ### 3. Start a Session
 
 ```bash
-# New session in a project directory
+# New Claude Code session
 node bin/polpo.js session --cwd /path/to/project --name "Backend API"
 
-# Resume an existing Claude Code session
+# New Codex session
+node bin/polpo.js session --agent codex --cwd /path/to/project --name "Codex Task"
+
+# Resume an existing session
 node bin/polpo.js session --resume <session-id>
 ```
 
@@ -82,7 +85,8 @@ The dashboard shows active sessions, past session history, and lets you send pro
 | Question Answers | Answer multi-choice questions from your phone when Claude asks |
 | Auto-approve | Tap "Approve All" to auto-approve tool calls (plans and questions always require review) |
 | File Attachments | Send any file from your phone - images, PDFs, code, documents, etc. |
-| Session Browser | Browse past Claude Code sessions with conversation history |
+| Multi-Agent | Full support for both Claude Code and OpenAI Codex CLI |
+| Session Browser | Browse past sessions from Claude Code and Codex with conversation history |
 | Session Resume | Resume any past session directly from the phone dashboard |
 | Auto-Discovery | Active sessions detected automatically via filesystem watching — no hooks required |
 | Live History Sync | Terminal/VS Code conversations synced to phone in real-time via JSONL watcher |
@@ -175,10 +179,14 @@ If the tunnel fails, the server still runs normally on LAN.
 
 ## Remote Sessions (Full Control)
 
-The `session` command spawns a `claude` CLI process with JSON streaming and gives your phone full bidirectional control.
+The `session` command spawns a CLI process with JSON streaming and gives your phone full bidirectional control. Use `--agent` to select the agent type.
 
 ```bash
+# Claude Code (default)
 node bin/polpo.js session --cwd /path/to/project --name "My Task"
+
+# OpenAI Codex
+node bin/polpo.js session --agent codex --cwd /path/to/project --name "Codex Task"
 ```
 
 ### Tool Approval
@@ -205,28 +213,52 @@ node bin/polpo.js session --cwd /path/to/project --permissions bypass
 |------|-------------|
 | `--name <name>` | Display name for this session |
 | `--cwd <dir>` | Project directory (default: current) |
-| `--resume <id>` | Resume an existing Claude Code session |
-| `--model <model>` | Model to use (e.g. opus, sonnet) |
+| `--resume <id>` | Resume an existing session |
+| `--model <model>` | Model to use (e.g. opus, sonnet for Claude; gpt-5-codex for Codex) |
 | `--permissions <mode>` | `default` (phone approval via MCP) or `bypass` (skip all) |
+| `--agent <type>` | Agent type: `claude` (default) or `codex` |
 | `--server <url>` | Hub WebSocket URL (default: `ws://127.0.0.1:7890`) |
 | `--token <token>` | Auth token (or set `POLPO_TOKEN` env var) |
 
 ## Session Browser
 
-The dashboard automatically discovers past Claude Code sessions from `~/.claude/projects/` and displays them as cards with the session's first prompt as the title. Tap a session to view its full conversation history, or resume it to continue working from your phone.
+The dashboard automatically discovers past sessions from `~/.claude/projects/` (Claude Code) and `~/.codex/sessions/` (Codex) and displays them as cards with the session's first prompt as the title. Each card shows an agent type badge (Claude or Codex). Tap a session to view its full conversation history, or resume it to continue working from your phone.
 
-Sessions are loaded from JSONL files and deduplicated to show clean conversation threads.
+Sessions are loaded from JSONL files and deduplicated to show clean conversation threads. Use the `?source=claude|codex|all` query parameter on the `/api/sessions` endpoint to filter by agent type.
 
 ## Auto-Discovery
 
-The Polpo server automatically discovers active Claude Code sessions by watching `~/.claude/projects/` for JSONL file changes. This is event-driven using `fs.watch()` — no polling, no hooks, no setup.
+The Polpo server automatically discovers active sessions from both Claude Code and Codex by watching their respective JSONL directories:
+
+- **Claude Code**: `~/.claude/projects/<project-slug>/*.jsonl`
+- **Codex CLI**: `~/.codex/sessions/*.jsonl`
+
+This is event-driven using `fs.watch()` — no polling, no hooks, no setup.
 
 When a session is detected:
-1. An instance appears on the phone dashboard
-2. A JSONL watcher starts streaming the full conversation in real-time
-3. Status (busy/idle) is derived from the JSONL content — user messages set busy, assistant turn completions set idle
+1. An instance appears on the phone dashboard with the appropriate agent type badge
+2. A JSONL watcher starts streaming the full conversation in real-time (using the correct adapter for each agent's JSONL format)
+3. Status (busy/idle) is derived from the JSONL content — user messages set busy, turn completions set idle
 
-Auto-discovery works with any Claude Code interface (terminal CLI, VS Code extension, web) since all write to the same JSONL files.
+Auto-discovery works with any interface that writes JSONL files (terminal CLI, VS Code extension, web).
+
+## Codex CLI Support
+
+Polpo supports OpenAI Codex CLI with full parity:
+
+- **Session spawning** — `polpo session --agent codex` spawns `codex exec --json` processes
+- **Multi-turn** — each prompt spawns a new process using `codex exec resume <thread-id> --json "prompt"`, keeping the conversation context
+- **Auto-discovery** — watches `~/.codex/sessions/` for active JSONL files
+- **Session browser** — lists past Codex sessions alongside Claude Code sessions
+- **Takeover** — take over a terminal Codex session from your phone
+- **Event translation** — Codex's event format (`thread.started`, `item.*`, `turn.*`) is translated to Polpo's uniform message format
+
+### Codex-Specific Notes
+
+- Codex uses one-shot process invocation (`codex exec`) rather than stdin streaming. Multi-turn requires killing and respawning with `resume`, which adds ~1-2s between prompts.
+- Permission handling uses `--full-auto` for bypass mode and `-a on-request` for default mode.
+- Images are attached via `--image <path>` flag; other files are referenced in the prompt text.
+- The dashboard shows a green "Codex" badge on Codex instances, and a purple "Claude" badge on Claude instances.
 
 ## Terminal Sync (Hooks)
 
@@ -290,7 +322,7 @@ Tap the paperclip icon to attach files from your phone. Supported types:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/sessions` | List discovered Claude Code sessions |
+| GET | `/api/sessions` | List discovered sessions (`?source=claude\|codex\|all`) |
 | GET | `/api/sessions/:id/history` | Get conversation history from JSONL |
 | POST | `/api/sessions/:id/resume` | Resume a session (spawns wrapped agent) |
 | GET | `/api/instances` | List all active instances |
@@ -333,7 +365,7 @@ Connect to `ws://<host>:<port>?role=agent&instanceId=<id>` as an agent.
 npm test
 ```
 
-Runs unit tests with Node's built-in test runner. Tests cover authentication (token, PIN, TOTP, sessions, middleware), instance manager, tunnel provider logic, session JSONL parsing, JSONL file watcher (messages, status events, dedup), and session scanner (auto-discovery, idle detection, project watching).
+Runs unit tests with Node's built-in test runner. Tests cover authentication (token, PIN, TOTP, sessions, middleware), instance manager, tunnel provider logic, session JSONL parsing, JSONL file watcher (messages, status events, dedup), session scanner (Claude auto-discovery, idle detection, project watching), Codex agent (event translation, hub messages, multi-turn), Codex scanner (Codex session discovery), and agent factory (agent type routing).
 
 ## System Overview
 
@@ -344,37 +376,44 @@ graph TD
     cloudflared / localtunnel / ngrok / SSH"]
     Hub["Polpo Hub :7890
     Express + WebSocket"]
-    Session["Session Agent
-    (wrapped)"]
+    Factory["Agent Factory"]
     Scanner["Session Scanner
-    (fs.watch)"]
+    (Claude + Codex)"]
     Hooks["Hook Bridge
     (optional)"]
     Browser["Session Browser"]
     Claude["claude CLI
     (stream-json)"]
-    VSCode["Claude Code
+    Codex["codex exec --json"]
+    VSCode["Claude Code / Codex
     (VS Code / terminal)"]
     MCP["MCP Permission
     Server"]
-    JSONL["~/.claude/projects/
+    ClaudeJSONL["~/.claude/projects/
+    JSONL files"]
+    CodexJSONL["~/.codex/sessions/
     JSONL files"]
 
     Phone -->|"cellular / internet"| Tunnel
     Phone -->|"VPN / LAN"| Hub
     Tunnel --> Hub
-    Hub --> Session
+    Hub --> Factory
     Hub --> Scanner
     Hub --> Hooks
     Hub --> Browser
-    Session --> Claude
-    Scanner -->|"auto-discover"| JSONL
+    Factory -->|"claude agent"| Claude
+    Factory -->|"codex agent"| Codex
+    Scanner -->|"auto-discover"| ClaudeJSONL
+    Scanner -->|"auto-discover"| CodexJSONL
     Hooks -->|"approvals + prompts"| VSCode
-    VSCode -->|"writes"| JSONL
-    Hub -->|"JSONL watcher"| JSONL
+    VSCode -->|"writes"| ClaudeJSONL
+    VSCode -->|"writes"| CodexJSONL
+    Hub -->|"JSONL watcher"| ClaudeJSONL
+    Hub -->|"Codex adapter"| CodexJSONL
     Claude --> MCP
     MCP -->|"phone approval"| Hub
-    Browser -->|"reads"| JSONL
+    Browser -->|"reads"| ClaudeJSONL
+    Browser -->|"reads"| CodexJSONL
 ```
 
 See [docs/diagrams.md](docs/diagrams.md) for auth, tunnel, session, and hook flow diagrams.

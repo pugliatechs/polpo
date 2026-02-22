@@ -62,9 +62,10 @@ function printHelp() {
   SESSION OPTIONS
     --name <name>       Display name for this session
     --cwd <dir>         Project directory to work in (default: current)
-    --resume <id>       Resume an existing Claude Code session
-    --model <model>     Model to use (e.g. opus, sonnet)
+    --resume <id>       Resume an existing session
+    --model <model>     Model to use (e.g. opus, sonnet for Claude; gpt-5-codex for Codex)
     --permissions <m>   Permission mode: default | bypass (default: default)
+    --agent <type>      Agent type: claude | codex (default: claude)
     --server <url>      Polpo server WebSocket URL (default: ws://127.0.0.1:7890)
     --token <tok>       Auth token (or set POLPO_TOKEN env var)
 
@@ -91,6 +92,9 @@ function printHelp() {
 
     # Start a phone-controllable Claude Code session
     polpo session --cwd /path/to/project --name "Backend work"
+
+    # Start a Codex session
+    polpo session --agent codex --cwd /path/to/project --name "Codex task"
 
     # Resume an existing session from your phone
     polpo session --resume <session-id>
@@ -327,8 +331,9 @@ async function runAgent() {
 }
 
 async function runSession() {
-  const { runWrapped } = require('../src/agent/wrapped');
-  await runWrapped({
+  const agentType = flags.agent || 'claude';
+  const { createAgent } = require('../src/agent/agent-factory');
+  const agent = createAgent(agentType, {
     name: flags.name,
     cwd: flags.cwd || process.cwd(),
     resumeSessionId: flags.resume || undefined,
@@ -336,6 +341,30 @@ async function runSession() {
     permissionMode: flags.permissions || 'default',
     serverUrl: flags.server || undefined,
     token: flags.token || process.env.POLPO_TOKEN || undefined,
+  });
+
+  await agent.start();
+
+  // Allow local stdin for testing
+  if (process.stdin.isTTY) {
+    const readline = require('readline');
+    const rl = readline.createInterface({ input: process.stdin });
+    rl.on('line', (line) => {
+      if (line.trim()) {
+        agent.sendPrompt(line.trim());
+      }
+    });
+    console.error(`[${agentType}-agent] Local stdin active — type prompts here or use phone`);
+  }
+
+  process.on('SIGINT', () => {
+    agent.stop();
+    process.exit(0);
+  });
+
+  process.on('SIGTERM', () => {
+    agent.stop();
+    process.exit(0);
   });
 }
 

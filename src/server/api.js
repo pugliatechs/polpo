@@ -4,7 +4,7 @@ const path = require('path');
 const crypto = require('crypto');
 const os = require('os');
 const { scanSessions, loadHistory } = require('./sessions');
-const { WrappedAgent } = require('../agent/wrapped');
+const { createAgent } = require('../agent/agent-factory');
 
 const UPLOAD_DIR = path.join(os.tmpdir(), 'polpo-uploads');
 const MAX_UPLOAD_SIZE = 10 * 1024 * 1024; // 10MB decoded
@@ -74,9 +74,11 @@ function createApiRouter(instanceManager, getAuthState) {
     try {
       const maxDays = Math.min(parseInt(req.query.days) || 7, 365);
       const limit = Math.min(parseInt(req.query.limit) || 50, 500);
+      const source = req.query.source || 'all'; // 'claude' | 'codex' | 'all'
       const sessions = await scanSessions({
         maxAge: maxDays * 24 * 60 * 60 * 1000,
         limit,
+        source,
       });
       res.json(sessions);
     } catch (err) {
@@ -103,7 +105,7 @@ function createApiRouter(instanceManager, getAuthState) {
     if (!isValidSessionId(sessionId)) {
       return res.status(400).json({ error: 'Invalid sessionId' });
     }
-    const { name, cwd } = req.body;
+    const { name, cwd, agentType } = req.body;
 
     // Don't spawn duplicates
     if (wrappedAgents.has(sessionId)) {
@@ -128,7 +130,7 @@ function createApiRouter(instanceManager, getAuthState) {
     const authToken = authState && authState.enabled ? authState.token : undefined;
 
     try {
-      const agent = new WrappedAgent({
+      const agent = createAgent(agentType || 'claude', {
         name: name || `Resumed (${sessionId.slice(0, 8)})`,
         cwd: resolvedCwd,
         resumeSessionId: sessionId,
@@ -403,7 +405,7 @@ function createApiRouter(instanceManager, getAuthState) {
     const authToken = authState && authState.enabled ? authState.token : undefined;
 
     try {
-      const agent = new WrappedAgent({
+      const agent = createAgent(inst.agentType || 'claude', {
         name: `Takeover (${inst.name})`,
         cwd: inst.cwd,
         resumeSessionId: inst.sessionId,

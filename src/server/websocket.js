@@ -2,7 +2,9 @@ const WebSocket = require('ws');
 const url = require('url');
 const { validateWsAuth } = require('./auth');
 const { JsonlWatcher } = require('./jsonl-watcher');
+const { CodexJsonlAdapter } = require('./codex-jsonl-adapter');
 const { SessionScanner } = require('./session-scanner');
+const { CodexScanner } = require('./codex-scanner');
 
 function setupWebSocket(server, instanceManager, getAuthState) {
   const wss = new WebSocket.Server({ server });
@@ -37,6 +39,10 @@ function setupWebSocket(server, instanceManager, getAuthState) {
         cwd: instance.cwd,
         status: instance.status,
         registeredAt: instance.registeredAt,
+        sessionId: instance.sessionId,
+        canReceivePrompts: instance.canReceivePrompts,
+        firstPrompt: instance.firstPrompt,
+        agentType: instance.agentType,
       },
     });
   });
@@ -75,16 +81,21 @@ function setupWebSocket(server, instanceManager, getAuthState) {
     broadcastToDashboards({ type: 'instance:session_info', ...data });
 
     // Start watching the JSONL file for this instance
-    startWatcherForInstance(data.id, data.transcriptPath);
+    const inst = instanceManager.get(data.id);
+    const agentType = inst ? inst.agentType : 'claude';
+    startWatcherForInstance(data.id, data.transcriptPath, agentType);
   });
 
   /**
    * Start a JSONL watcher for an instance (shared by hook-bridge and auto-discovery).
+   * Uses CodexJsonlAdapter for Codex sessions, JsonlWatcher for Claude sessions.
    */
-  function startWatcherForInstance(instanceId, transcriptPath) {
+  function startWatcherForInstance(instanceId, transcriptPath, agentType) {
     if (!transcriptPath || activeWatchers.has(instanceId)) return;
 
-    const watcher = new JsonlWatcher(transcriptPath);
+    const watcher = agentType === 'codex'
+      ? new CodexJsonlAdapter(transcriptPath)
+      : new JsonlWatcher(transcriptPath);
     activeWatchers.set(instanceId, watcher);
 
     watcher.on('message', (msg) => {
@@ -133,7 +144,7 @@ function setupWebSocket(server, instanceManager, getAuthState) {
     instanceManager.updateStatus(instance.id, 'busy');
 
     // Start watching the JSONL file
-    startWatcherForInstance(instance.id, transcriptPath);
+    startWatcherForInstance(instance.id, transcriptPath, 'claude');
   });
 
   scanner.on('session:inactive', (data) => {
@@ -146,6 +157,43 @@ function setupWebSocket(server, instanceManager, getAuthState) {
   });
 
   scanner.start();
+
+  // --- Codex auto-discovery: scan for active Codex sessions ---
+  const codexScanner = new CodexScanner();
+
+  codexScanner.on('session:discovered', (data) => {
+    const { sessionId, transcriptPath, cwd, projectName, firstPrompt } = data;
+
+    if (sessionToInstance.has(sessionId)) return;
+
+    const instance = instanceManager.register({
+      name: firstPrompt || projectName || 'Codex',
+      type: 'terminal',
+      project: projectName || 'codex',
+      cwd,
+      sessionId,
+      transcriptPath,
+      firstPrompt: firstPrompt || null,
+      canReceivePrompts: false,
+      agentType: 'codex',
+    });
+
+    sessionToInstance.set(sessionId, instance.id);
+    instanceManager.updateStatus(instance.id, 'busy');
+
+    startWatcherForInstance(instance.id, transcriptPath, 'codex');
+  });
+
+  codexScanner.on('session:inactive', (data) => {
+    const instanceId = sessionToInstance.get(data.sessionId);
+    if (instanceId) {
+      instanceManager.updateStatus(instanceId, 'disconnected');
+      instanceManager.unregister(instanceId);
+      sessionToInstance.delete(data.sessionId);
+    }
+  });
+
+  codexScanner.start();
 
   wss.on('connection', (ws, req) => {
     const authState = typeof getAuthState === 'function' ? getAuthState() : getAuthState;
@@ -205,8 +253,9 @@ function setupWebSocket(server, instanceManager, getAuthState) {
     }
   });
 
-  // Expose scanner for cleanup
+  // Expose scanners for cleanup
   wss.scanner = scanner;
+  wss.codexScanner = codexScanner;
 
   return wss;
 }

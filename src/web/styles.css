@@ -265,6 +265,23 @@ main {
   white-space: nowrap;
 }
 
+.agent-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.agent-claude {
+  background: rgba(124,58,237,0.15);
+  color: var(--accent-light);
+}
+.agent-codex {
+  background: rgba(16,185,129,0.15);
+  color: #34d399;
+}
+
 .card-approval {
   margin-top: 10px;
   padding: 8px 10px;
@@ -784,6 +801,7 @@ h5.plan-h { font-size: 13px; }
   word-wrap: break-word;
   white-space: pre-wrap;
   min-width: 0;
+  flex-shrink: 0;
 }
 
 .msg-user {
@@ -977,40 +995,111 @@ h5.plan-h { font-size: 13px; }
   align-self: center;
 }
 
-.msg-tool-use {
-  background: rgba(59,130,246,0.08);
+/* Unified tool block (tool_use + tool_result combined) */
+.msg-tool-block {
+  background: rgba(30,41,59,0.6);
   border: 1px solid rgba(59,130,246,0.2);
+  border-radius: 8px;
   color: var(--text);
   align-self: flex-start;
-  border-bottom-left-radius: 4px;
   max-width: 95%;
+  padding: 0;
+  overflow: visible;
+  white-space: normal;
+  flex-shrink: 0;
 }
 
-.tool-name {
+.tool-block-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: rgba(59,130,246,0.1);
+  border-bottom: 1px solid rgba(59,130,246,0.15);
+}
+
+.tool-block-name {
   font-size: 11px;
   font-weight: 700;
   color: var(--blue);
   text-transform: uppercase;
   letter-spacing: 0.3px;
-  margin-bottom: 4px;
 }
 
-.tool-input {
+.tool-block-desc {
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-block-label {
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 4px 10px 0;
+  opacity: 0.6;
+}
+
+.tool-block-input {
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+
+.tool-block-input pre {
   font-family: 'SF Mono', 'Fira Code', monospace;
   font-size: 12px;
+  line-height: 1.4;
   color: var(--accent-light);
-  overflow-wrap: break-word;
-  word-break: break-all;
+  padding: 4px 10px 8px;
+  margin: 0;
   white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 120px;
+  overflow-y: auto;
 }
 
+.tool-block-output pre {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-muted);
+  padding: 4px 10px 8px;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.tool-block-output.tool-error pre {
+  color: var(--red);
+}
+
+/* Fallback standalone tool_use (streaming, not yet paired) */
+.msg-tool-use {
+  background: rgba(30,41,59,0.6);
+  border: 1px solid rgba(59,130,246,0.2);
+  border-radius: 8px;
+  color: var(--text);
+  align-self: flex-start;
+  max-width: 95%;
+  padding: 0;
+  overflow: hidden;
+}
+
+/* Fallback standalone tool_result (orphaned) */
 .msg-tool-result {
-  background: rgba(255,255,255,0.03);
-  border-left: 2px solid rgba(148,163,184,0.3);
+  background: rgba(30,41,59,0.4);
+  border: 1px solid rgba(148,163,184,0.15);
+  border-radius: 8px;
   color: var(--text-muted);
   align-self: flex-start;
   max-width: 95%;
-  padding: 6px 10px;
+  padding: 0;
+  overflow: hidden;
 }
 
 .msg-tool-result pre {
@@ -1020,12 +1109,9 @@ h5.plan-h { font-size: 13px; }
   white-space: pre-wrap;
   word-break: break-all;
   margin: 0;
+  padding: 4px 10px 8px;
   max-height: 200px;
   overflow-y: auto;
-}
-
-.msg-tool-result.tool-error {
-  border-left-color: var(--red);
 }
 
 .msg-tool-result.tool-error pre {
@@ -1043,6 +1129,14 @@ h5.plan-h { font-size: 13px; }
   color: var(--text-muted);
   align-self: flex-start;
   font-size: 12px;
+}
+
+.msg-inline-image {
+  max-width: 100%;
+  max-height: 300px;
+  border-radius: 8px;
+  display: block;
+  object-fit: contain;
 }
 
 .msg-time {

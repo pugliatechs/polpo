@@ -161,15 +161,33 @@
         if (instances.has(msg.id)) {
           var inst = instances.get(msg.id);
           if (!inst.conversation) inst.conversation = [];
-          inst.conversation.push(msg.message);
-          // Cache first prompt for card title; re-render list when it first appears
-          if (!inst._firstPrompt && msg.message.role === 'user' && (!msg.message.contentType || msg.message.contentType === 'text') && msg.message.content) {
-            inst._firstPrompt = msg.message.content;
-            renderList();
+
+          // After history is loaded, skip watcher messages that overlap
+          // with the tail of history (same role + content = duplicate).
+          var dominated = false;
+          if (inst._historyLoaded && inst._historyLen) {
+            var tail = inst.conversation.slice(-20);
+            for (var ti = 0; ti < tail.length; ti++) {
+              if (tail[ti].role === msg.message.role &&
+                  tail[ti].content === msg.message.content &&
+                  tail[ti].contentType === msg.message.contentType) {
+                dominated = true;
+                break;
+              }
+            }
           }
-        }
-        if (activeInstanceId === msg.id) {
-          appendMessage(msg.message);
+
+          if (!dominated) {
+            inst.conversation.push(msg.message);
+            // Cache first prompt for card title; re-render list when it first appears
+            if (!inst._firstPrompt && msg.message.role === 'user' && (!msg.message.contentType || msg.message.contentType === 'text') && msg.message.content) {
+              inst._firstPrompt = msg.message.content;
+              renderList();
+            }
+            if (activeInstanceId === msg.id) {
+              appendMessage(msg.message);
+            }
+          }
         }
         break;
 
@@ -272,7 +290,7 @@
             '</div>' +
             '<div class="card-meta">' +
               '<span>' + escapeHtml(inst.project || '') + '</span>' +
-              '<span>' + (inst.type === 'vscode' ? '💻 VS Code' : '⬛ Terminal') + '</span>' +
+              '<span class="agent-badge agent-' + (inst.agentType || 'claude') + '">' + (inst.agentType === 'codex' ? 'Codex' : 'Claude') + '</span>' +
             '</div>' +
             approvalHtml +
           '</div>'
@@ -308,7 +326,12 @@
           .then(function (r) { return r.json(); })
           .then(function (history) {
             if (history.length > 0) {
-              inst.conversation = history.concat(inst.conversation || []);
+              // Replace conversation with authoritative history — avoids
+              // duplicates from watcher messages already in the history.
+              inst.conversation = history;
+              // Track how many messages came from history so appendMessage
+              // can skip watcher duplicates that overlap with the tail.
+              inst._historyLen = history.length;
             }
             inst._historyLoaded = true;
             if (!inst._firstPrompt) {
@@ -359,7 +382,7 @@
       $detailStatus.textContent = inst.status;
     }
     $detailProject.textContent = '📁 ' + (inst.project || '');
-    $detailType.textContent = inst.type === 'vscode' ? '💻 VS Code' : '⬛ Terminal';
+    $detailType.innerHTML = '<span class="agent-badge agent-' + (inst.agentType || 'claude') + '">' + (inst.agentType === 'codex' ? 'Codex' : 'Claude') + '</span>';
 
     // Takeover vs prompt input
     var canPrompt = inst.canReceivePrompts !== false;
@@ -414,7 +437,9 @@
       return;
     }
 
-    $conversation.innerHTML = inst.conversation
+    // Pre-process: pair tool_use with their tool_result by toolUseId
+    var merged = mergeToolMessages(inst.conversation);
+    $conversation.innerHTML = merged
       .map(function (m) {
         return formatMessage(m);
       })
@@ -422,7 +447,71 @@
     scrollToBottom();
   }
 
+  /**
+   * Merge tool_use and tool_result messages into unified blocks.
+   * Returns a new array where paired tool messages become { contentType: 'tool_block' }.
+   */
+  function mergeToolMessages(messages) {
+    // Build a map of toolUseId -> tool_result
+    var resultMap = {};
+    messages.forEach(function (m) {
+      if (m.contentType === 'tool_result' && m.toolUseId) {
+        resultMap[m.toolUseId] = m;
+      }
+    });
+
+    var merged = [];
+    var consumedResultIds = {};
+
+    messages.forEach(function (m) {
+      if (m.contentType === 'tool_use') {
+        try {
+          var tool = JSON.parse(m.content);
+          var result = tool.id ? resultMap[tool.id] : null;
+          if (result) consumedResultIds[result.toolUseId] = true;
+          merged.push({
+            contentType: 'tool_block',
+            tool: tool,
+            result: result,
+            timestamp: m.timestamp,
+            source: m.source,
+          });
+        } catch (e) {
+          merged.push(m);
+        }
+        return;
+      }
+      // Skip tool_results that were already merged
+      if (m.contentType === 'tool_result' && m.toolUseId && consumedResultIds[m.toolUseId]) {
+        return;
+      }
+      merged.push(m);
+    });
+
+    return merged;
+  }
+
   function appendMessage(msg) {
+    // For tool_result: try to merge into the preceding tool_use block
+    if (msg.contentType === 'tool_result' && msg.toolUseId) {
+      var toolBlock = $conversation.querySelector('[data-tool-id="' + msg.toolUseId + '"]');
+      if (toolBlock) {
+        var output = msg.content || '';
+        output = output.replace(/<\/?tool_use_error>/g, '');
+        var isError = msg.isError;
+        if (output.length > 800) {
+          output = output.slice(0, 800) + '\n... (' + msg.content.length + ' chars)';
+        }
+        var resultDiv = document.createElement('div');
+        resultDiv.className = 'tool-block-output' + (isError ? ' tool-error' : '');
+        resultDiv.innerHTML =
+          '<div class="tool-block-label">OUT</div>' +
+          '<pre>' + escapeHtml(output) + '</pre>';
+        toolBlock.appendChild(resultDiv);
+        scrollToBottom();
+        return;
+      }
+    }
     $conversation.insertAdjacentHTML('beforeend', formatMessage(msg));
     scrollToBottom();
   }
@@ -432,47 +521,30 @@
     var time = m.timestamp ? formatTime(m.timestamp) : '';
     var timeHtml = time ? '<div class="msg-time">' + time + '</div>' : '';
 
-    // Tool use: show as a compact card
+    // Unified tool block (tool_use + tool_result merged)
+    if (contentType === 'tool_block') {
+      return renderToolBlock(m.tool, m.result, timeHtml);
+    }
+
+    // Tool use: render as unified block (fallback for streaming/unmerged)
     if (contentType === 'tool_use') {
       try {
         var tool = JSON.parse(m.content);
-        var inputSummary = '';
-        if (tool.name === 'Bash' || tool.name === 'bash') {
-          inputSummary = tool.input && tool.input.command
-            ? escapeHtml(tool.input.command)
-            : '';
-        } else if (tool.name === 'Read') {
-          inputSummary = escapeHtml(tool.input && tool.input.file_path || '');
-        } else if (tool.name === 'Edit' || tool.name === 'Write') {
-          inputSummary = escapeHtml(tool.input && tool.input.file_path || '');
-        } else if (tool.name === 'Grep') {
-          inputSummary = escapeHtml(tool.input && tool.input.pattern || '');
-        } else if (tool.name === 'Glob') {
-          inputSummary = escapeHtml(tool.input && tool.input.pattern || '');
-        } else {
-          inputSummary = escapeHtml(JSON.stringify(tool.input || {}).slice(0, 120));
-        }
-        return (
-          '<div class="msg msg-tool-use">' +
-            '<div class="tool-name">' + escapeHtml(tool.name) + '</div>' +
-            (inputSummary ? '<div class="tool-input">' + inputSummary + '</div>' : '') +
-            timeHtml +
-          '</div>'
-        );
+        return renderToolBlock(tool, null, timeHtml);
       } catch (e) {}
     }
 
-    // Tool result: show as compact output
+    // Tool result: render standalone (fallback for orphan results)
     if (contentType === 'tool_result') {
       var cls = 'msg msg-tool-result' + (m.isError ? ' tool-error' : '');
       var content = m.content || '';
-      // Strip XML wrapper tags from tool errors
       content = content.replace(/<\/?tool_use_error>/g, '');
       if (content.length > 500) {
         content = content.slice(0, 500) + '\n...';
       }
       return (
         '<div class="' + cls + '">' +
+          '<div class="tool-block-label">OUT</div>' +
           '<pre>' + escapeHtml(content) + '</pre>' +
           timeHtml +
         '</div>'
@@ -492,6 +564,17 @@
           '</div>'
         );
       } catch (e) {}
+    }
+
+    // Inline image (base64 from JSONL or uploaded)
+    if (contentType === 'image') {
+      var imgCls = 'msg msg-' + (m.role || 'user');
+      return (
+        '<div class="' + imgCls + '">' +
+          '<img class="msg-inline-image" src="' + escapeHtml(m.content) + '" alt="image">' +
+          timeHtml +
+        '</div>'
+      );
     }
 
     // JSON system init: skip rendering
@@ -524,6 +607,82 @@
       '<div class="' + cls + '">' +
         attachHtml +
         rendered +
+        timeHtml +
+      '</div>'
+    );
+  }
+
+  /**
+   * Render a unified tool block (tool_use + optional tool_result).
+   * Shows: tool name header, description, IN command, OUT result.
+   */
+  function renderToolBlock(tool, result, timeHtml) {
+    var name = tool.name || 'Tool';
+    var description = '';
+    var inputSummary = '';
+
+    if (name === 'Bash' || name === 'bash') {
+      description = tool.input && tool.input.description || '';
+      inputSummary = tool.input && tool.input.command || '';
+    } else if (name === 'Read') {
+      inputSummary = tool.input && tool.input.file_path || '';
+    } else if (name === 'Edit' || name === 'Write') {
+      inputSummary = tool.input && tool.input.file_path || '';
+      if (tool.input && tool.input.old_string) {
+        description = 'Replace in file';
+      }
+    } else if (name === 'Grep') {
+      inputSummary = tool.input && tool.input.pattern || '';
+      if (tool.input && tool.input.path) {
+        inputSummary += ' in ' + tool.input.path;
+      }
+    } else if (name === 'Glob') {
+      inputSummary = tool.input && tool.input.pattern || '';
+    } else if (name === 'WebSearch') {
+      inputSummary = tool.input && tool.input.query || '';
+    } else if (name === 'WebFetch') {
+      inputSummary = tool.input && tool.input.url || '';
+    } else if (name === 'Task' || name === 'TodoWrite') {
+      description = tool.input && tool.input.description || '';
+      inputSummary = '';
+    } else {
+      var rawInput = JSON.stringify(tool.input || {});
+      if (rawInput.length > 150) rawInput = rawInput.slice(0, 150) + '...';
+      inputSummary = rawInput;
+    }
+
+    // Build result HTML
+    var resultHtml = '';
+    if (result) {
+      var output = result.content || '';
+      output = output.replace(/<\/?tool_use_error>/g, '');
+      var isError = result.isError;
+      var isTruncated = output.length > 800;
+      if (isTruncated) {
+        output = output.slice(0, 800) + '\n... (' + result.content.length + ' chars)';
+      }
+      resultHtml =
+        '<div class="tool-block-output' + (isError ? ' tool-error' : '') + '">' +
+          '<div class="tool-block-label">OUT</div>' +
+          '<pre>' + escapeHtml(output) + '</pre>' +
+        '</div>';
+    }
+
+    var toolId = tool.id || '';
+
+    return (
+      '<div class="msg msg-tool-block"' + (toolId ? ' data-tool-id="' + escapeHtml(toolId) + '"' : '') + '>' +
+        '<div class="tool-block-header">' +
+          '<span class="tool-block-name">' + escapeHtml(name) + '</span>' +
+          (description ? '<span class="tool-block-desc">' + escapeHtml(description) + '</span>' : '') +
+        '</div>' +
+        (inputSummary
+          ? '<div class="tool-block-input">' +
+              '<div class="tool-block-label">IN</div>' +
+              '<pre>' + escapeHtml(inputSummary) + '</pre>' +
+            '</div>'
+          : '') +
+        resultHtml +
         timeHtml +
       '</div>'
     );
@@ -1114,13 +1273,14 @@
         ? (s.firstPrompt.length > 60 ? s.firstPrompt.slice(0, 60) + '...' : s.firstPrompt)
         : s.slug || s.project;
       return (
-        '<div class="instance-card session-card" data-session-id="' + s.sessionId + '" data-cwd="' + escapeHtml(s.cwd) + '" data-project="' + escapeHtml(s.project) + '">' +
+        '<div class="instance-card session-card" data-session-id="' + s.sessionId + '" data-cwd="' + escapeHtml(s.cwd || '') + '" data-project="' + escapeHtml(s.project) + '" data-agent-type="' + (s.agentType || 'claude') + '">' +
           '<div class="card-top">' +
             '<span class="card-name">' + escapeHtml(title) + '</span>' +
             '<span class="badge badge-session">' + ago + '</span>' +
           '</div>' +
           '<div class="card-meta">' +
             '<span>' + escapeHtml(s.project) + '</span>' +
+            '<span class="agent-badge agent-' + (s.agentType || 'claude') + '">' + (s.agentType === 'codex' ? 'Codex' : 'Claude') + '</span>' +
           '</div>' +
         '</div>'
       );
@@ -1137,10 +1297,11 @@
     var sessionId = card.getAttribute('data-session-id');
     var cwd = card.getAttribute('data-cwd');
     var project = card.getAttribute('data-project');
-    resumeSession(sessionId, cwd, project);
+    var agentType = card.getAttribute('data-agent-type') || 'claude';
+    resumeSession(sessionId, cwd, project, agentType);
   }
 
-  function resumeSession(sessionId, cwd, project) {
+  function resumeSession(sessionId, cwd, project, agentType) {
     // Show loading state on the card
     var card = $sessionsList.querySelector('[data-session-id="' + sessionId + '"]');
     if (card) {
@@ -1156,7 +1317,7 @@
     var resumePromise = authFetch('/api/sessions/' + sessionId + '/resume', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: project, cwd: cwd }),
+      body: JSON.stringify({ name: project, cwd: cwd, agentType: agentType || 'claude' }),
     })
     .then(function (r) { return r.json(); })
     .catch(function () { return {}; });

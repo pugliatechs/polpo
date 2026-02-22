@@ -185,6 +185,14 @@ class JsonlWatcher extends EventEmitter {
           timestamp: obj.timestamp,
           source: 'jsonl',
         });
+      } else if (block.type === 'image' && block.source && block.source.data) {
+        this.emit('message', {
+          role: 'user',
+          content: `data:${block.source.media_type || 'image/png'};base64,${block.source.data}`,
+          contentType: 'image',
+          timestamp: obj.timestamp,
+          source: 'jsonl',
+        });
       }
     }
   }
@@ -194,20 +202,9 @@ class JsonlWatcher extends EventEmitter {
     if (!Array.isArray(content)) return;
     const msgId = obj.message && obj.message.id;
 
-    // Streaming dedup: same message.id appears multiple times
-    if (msgId) {
-      if (this.assistantMessageIds.has(msgId)) {
-        this.emit('message_update', {
-          msgId,
-          blocks: content,
-          timestamp: obj.timestamp,
-          source: 'jsonl',
-        });
-        return;
-      }
-      this.assistantMessageIds.add(msgId);
-    }
-
+    // Claude Code writes each new content block as a separate JSONL entry
+    // for the same message.id (incremental, not cumulative).
+    // Always emit new blocks — dedup tool_use by block.id to avoid duplicates.
     for (const block of content) {
       if (block.type === 'text' && block.text) {
         this.emit('message', {
@@ -219,6 +216,10 @@ class JsonlWatcher extends EventEmitter {
           msgId,
         });
       } else if (block.type === 'tool_use') {
+        // Dedup tool_use by block.id to handle any cumulative entries
+        const toolKey = `tool:${block.id}`;
+        if (this.assistantMessageIds.has(toolKey)) continue;
+        this.assistantMessageIds.add(toolKey);
         this.emit('message', {
           role: 'assistant',
           content: JSON.stringify({

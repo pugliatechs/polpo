@@ -27,6 +27,7 @@ class InstanceManager extends EventEmitter {
       transcriptPath: info.transcriptPath || null,
       canReceivePrompts: info.canReceivePrompts !== undefined ? info.canReceivePrompts : true,
       firstPrompt: info.firstPrompt || null,
+      agentType: info.agentType || 'claude',
     };
     this.instances.set(id, instance);
     this.emit('instance:registered', instance);
@@ -62,6 +63,7 @@ class InstanceManager extends EventEmitter {
       sessionId: inst.sessionId,
       canReceivePrompts: inst.canReceivePrompts,
       firstPrompt: inst.firstPrompt,
+      agentType: inst.agentType,
     }));
   }
 

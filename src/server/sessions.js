@@ -1,12 +1,11 @@
 /**
- * SessionScanner - Discovers Claude Code sessions from ~/.claude/projects/
+ * Session scanner — discovers sessions from Claude Code and Codex.
  *
- * Scans the JSONL session files to extract metadata:
- *   - Session ID, project CWD, first prompt summary
- *   - First and last activity timestamps
- *   - Model used
+ * Claude sessions:  ~/.claude/projects/<slug>/<sessionId>.jsonl
+ * Codex sessions:   ~/.codex/sessions/<threadId>.jsonl
  *
- * Only reads the first few and last few lines of each file for speed.
+ * Scans JSONL files to extract metadata (session ID, first prompt,
+ * timestamps, model). Only reads the first/last few lines for speed.
  */
 
 const fs = require('fs');
@@ -15,48 +14,71 @@ const os = require('os');
 const readline = require('readline');
 
 const CLAUDE_DIR = path.join(os.homedir(), '.claude', 'projects');
+const CODEX_DIR = path.join(os.homedir(), '.codex', 'sessions');
 
 /**
- * Scan all Claude Code projects and return session metadata.
+ * Scan sessions from Claude Code and/or Codex and return metadata.
  * @param {object} options
  * @param {number} options.maxAge - Max age in ms to include (default: 7 days)
  * @param {number} options.limit - Max sessions to return (default: 50)
+ * @param {string} options.source - 'claude' | 'codex' | 'all' (default: 'all')
  * @returns {Promise<Array>} sorted by lastActivity descending
  */
 async function scanSessions(options = {}) {
   const maxAge = options.maxAge || 7 * 24 * 60 * 60 * 1000;
   const limit = options.limit || 50;
+  const source = options.source || 'all';
   const cutoff = Date.now() - maxAge;
-
-  let projectDirs;
-  try {
-    projectDirs = fs.readdirSync(CLAUDE_DIR, { withFileTypes: true })
-      .filter(d => d.isDirectory())
-      .map(d => d.name);
-  } catch {
-    return [];
-  }
 
   const sessions = [];
 
-  for (const projectSlug of projectDirs) {
-    const projectPath = path.join(CLAUDE_DIR, projectSlug);
-    let files;
+  // Scan Claude sessions
+  if (source === 'all' || source === 'claude') {
+    let projectDirs;
     try {
-      files = fs.readdirSync(projectPath)
-        .filter(f => f.endsWith('.jsonl'));
+      projectDirs = fs.readdirSync(CLAUDE_DIR, { withFileTypes: true })
+        .filter(d => d.isDirectory())
+        .map(d => d.name);
     } catch {
-      continue;
+      projectDirs = [];
     }
 
-    for (const file of files) {
-      const filePath = path.join(projectPath, file);
+    for (const projectSlug of projectDirs) {
+      const projectPath = path.join(CLAUDE_DIR, projectSlug);
+      let files;
       try {
-        const stat = fs.statSync(filePath);
-        if (stat.mtimeMs < cutoff) continue;
+        files = fs.readdirSync(projectPath)
+          .filter(f => f.endsWith('.jsonl'));
+      } catch {
+        continue;
+      }
 
-        const meta = await extractMetadata(filePath);
+      for (const file of files) {
+        const filePath = path.join(projectPath, file);
+        try {
+          const stat = fs.statSync(filePath);
+          if (stat.mtimeMs < cutoff) continue;
+
+          const meta = await extractMetadata(filePath);
+          if (meta) {
+            meta.agentType = 'claude';
+            sessions.push(meta);
+          }
+        } catch {
+          continue;
+        }
+      }
+    }
+  }
+
+  // Scan Codex sessions (recursive — supports YYYY/MM/DD subdirs from VS Code extension)
+  if (source === 'all' || source === 'codex') {
+    const codexFiles = findJsonlRecursive(CODEX_DIR, cutoff);
+    for (const filePath of codexFiles) {
+      try {
+        const meta = await extractCodexMetadata(filePath);
         if (meta) {
+          meta.agentType = 'codex';
           sessions.push(meta);
         }
       } catch {
@@ -210,11 +232,15 @@ async function loadHistory(sessionId) {
           if (!Array.isArray(content)) return;
 
           if (msgId) {
-            // Streaming dedup: only push one placeholder per message.id,
-            // but keep updating the entry so the last one wins.
-            const alreadyPlaced = assistantMessages.has(msgId);
-            assistantMessages.set(msgId, { blocks: content, timestamp });
-            if (!alreadyPlaced) {
+            // Accumulate blocks across incremental entries for the same message.id.
+            // Claude Code writes each new content block as a separate JSONL entry,
+            // so we must concat rather than overwrite.
+            const existing = assistantMessages.get(msgId);
+            if (existing) {
+              existing.blocks = existing.blocks.concat(content);
+              existing.timestamp = timestamp;
+            } else {
+              assistantMessages.set(msgId, { blocks: [...content], timestamp });
               messages.push({ type: 'assistant', msgId, timestamp });
             }
           } else {
@@ -232,6 +258,14 @@ async function loadHistory(sessionId) {
                 type: 'user',
                 role: 'user',
                 content: block.text,
+                timestamp,
+              });
+            } else if (block.type === 'image' && block.source && block.source.data) {
+              messages.push({
+                type: 'user',
+                role: 'user',
+                content: `data:${block.source.media_type || 'image/png'};base64,${block.source.data}`,
+                contentType: 'image',
                 timestamp,
               });
             } else if (block.type === 'tool_result') {
@@ -315,22 +349,131 @@ async function loadHistory(sessionId) {
 }
 
 /**
- * Find the JSONL file for a session ID across all project directories.
+ * Recursively find all .jsonl files in a directory tree.
+ * Used for Codex sessions which may be in YYYY/MM/DD subdirs.
+ * @param {string} dirPath - Root directory to scan
+ * @param {number} cutoff - Only include files modified after this timestamp
+ * @returns {string[]} Array of absolute file paths
+ */
+function findJsonlRecursive(dirPath, cutoff) {
+  const results = [];
+  let entries;
+  try {
+    entries = fs.readdirSync(dirPath, { withFileTypes: true });
+  } catch {
+    return results;
+  }
+
+  for (const entry of entries) {
+    const fullPath = path.join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      results.push(...findJsonlRecursive(fullPath, cutoff));
+    } else if (entry.isFile() && entry.name.endsWith('.jsonl')) {
+      try {
+        const stat = fs.statSync(fullPath);
+        if (stat.mtimeMs >= cutoff) {
+          results.push(fullPath);
+        }
+      } catch {
+        // skip inaccessible files
+      }
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Extract metadata from a Codex session JSONL file.
+ * Codex uses: thread.started, item.*, turn.* event format.
+ */
+async function extractCodexMetadata(filePath) {
+  const sessionId = path.basename(filePath, '.jsonl');
+
+  const headLines = await readLines(filePath, 30, 'head');
+  const tailLines = await readLines(filePath, 5, 'tail');
+
+  let cwd = null;
+  let firstTimestamp = null;
+  let lastTimestamp = null;
+  let firstPrompt = null;
+  let threadId = null;
+
+  for (const line of headLines) {
+    try {
+      const obj = JSON.parse(line);
+
+      if (obj.cwd && !cwd) cwd = obj.cwd;
+      if (obj.timestamp && !firstTimestamp) firstTimestamp = obj.timestamp;
+      if (obj.type === 'thread.started' && obj.thread_id) {
+        threadId = obj.thread_id;
+        if (obj.cwd && !cwd) cwd = obj.cwd;
+      }
+
+      // First agent message or prompt as firstPrompt
+      if (obj.type === 'item.completed' && obj.item) {
+        if (obj.item.type === 'agent_message' && !firstPrompt) {
+          firstPrompt = (obj.item.text || '').slice(0, 120);
+        }
+      }
+      if (obj.prompt && !firstPrompt) {
+        firstPrompt = obj.prompt.slice(0, 120);
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  for (const line of tailLines) {
+    try {
+      const obj = JSON.parse(line);
+      if (obj.timestamp) lastTimestamp = obj.timestamp;
+    } catch {
+      continue;
+    }
+  }
+
+  return {
+    sessionId: threadId || sessionId,
+    slug: null,
+    cwd: cwd || null,
+    project: cwd ? path.basename(cwd) : 'codex',
+    firstPrompt: firstPrompt || null,
+    model: null,
+    firstActivity: firstTimestamp || null,
+    lastActivity: lastTimestamp || firstTimestamp || null,
+  };
+}
+
+/**
+ * Find the JSONL file for a session ID across Claude and Codex directories.
  */
 function findSessionFile(sessionId) {
+  // Check Claude projects
   let projectDirs;
   try {
     projectDirs = fs.readdirSync(CLAUDE_DIR, { withFileTypes: true })
       .filter(d => d.isDirectory())
       .map(d => d.name);
   } catch {
-    return null;
+    projectDirs = [];
   }
 
   for (const dir of projectDirs) {
     const candidate = path.join(CLAUDE_DIR, dir, sessionId + '.jsonl');
     if (fs.existsSync(candidate)) return candidate;
   }
+
+  // Check Codex sessions (flat and nested YYYY/MM/DD structure)
+  const codexCandidate = path.join(CODEX_DIR, sessionId + '.jsonl');
+  if (fs.existsSync(codexCandidate)) return codexCandidate;
+
+  // Search nested dirs for rollout-*.jsonl or thread-id.jsonl
+  const nested = findJsonlRecursive(CODEX_DIR, 0);
+  for (const fp of nested) {
+    if (path.basename(fp, '.jsonl') === sessionId) return fp;
+  }
+
   return null;
 }
 

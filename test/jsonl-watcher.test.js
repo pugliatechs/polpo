@@ -189,28 +189,28 @@ describe('JsonlWatcher', () => {
     assert.equal(msgs[1].content, 'Second');
   });
 
-  it('deduplicates streaming assistant messages by message.id', async () => {
+  it('emits all incremental blocks for same message.id', async () => {
     fs.writeFileSync(filePath, '');
     watcher = new JsonlWatcher(filePath, { debounceMs: 20 });
 
     const messages = [];
-    const updates = [];
     watcher.on('message', (m) => messages.push(m));
-    watcher.on('message_update', (u) => updates.push(u));
 
     await watcher.start({ catchUp: false });
 
+    // Simulate incremental JSONL entries: each entry has a new text block
     const msgId = 'msg_streaming_test';
     const uuid1 = crypto.randomUUID();
     const uuid2 = crypto.randomUUID();
-    fs.appendFileSync(filePath, assistantLine('Partial...', msgId, uuid1) + '\n');
+    fs.appendFileSync(filePath, assistantLine('First block', msgId, uuid1) + '\n');
     await wait(150);
-    fs.appendFileSync(filePath, assistantLine('Partial... complete answer', msgId, uuid2) + '\n');
+    fs.appendFileSync(filePath, assistantLine('Second block', msgId, uuid2) + '\n');
     await wait(150);
 
-    assert.equal(messages.length, 1);
-    assert.equal(messages[0].content, 'Partial...');
-    assert.equal(updates.length, 1);
+    // Both text blocks should be emitted (incremental, not cumulative)
+    assert.equal(messages.length, 2);
+    assert.equal(messages[0].content, 'First block');
+    assert.equal(messages[1].content, 'Second block');
   });
 
   it('skips non-conversation types', async () => {
