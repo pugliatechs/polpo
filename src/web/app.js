@@ -132,6 +132,17 @@
           instances.set(inst.id, inst);
         });
         renderList();
+        // After reconnect: reload history for the active detail view
+        if (activeInstanceId) {
+          var active = instances.get(activeInstanceId);
+          if (active) {
+            reloadHistory(active);
+            renderDetail();
+          } else {
+            // Instance gone — return to list
+            closeDetail();
+          }
+        }
         break;
 
       case 'instance:registered':
@@ -311,48 +322,52 @@
     openDetail(id);
   }
 
+  /**
+   * Load (or reload) conversation history for an instance.
+   * Uses the JSONL history endpoint when a sessionId is available,
+   * otherwise falls back to the in-memory conversation endpoint.
+   */
+  function reloadHistory(inst) {
+    if (inst.sessionId) {
+      authFetch('/api/sessions/' + inst.sessionId + '/history')
+        .then(function (r) { return r.json(); })
+        .then(function (history) {
+          if (history.length > 0) {
+            inst.conversation = history;
+            inst._historyLen = history.length;
+          }
+          inst._historyLoaded = true;
+          if (!inst._firstPrompt) {
+            inst._firstPrompt = getFirstPrompt(inst.conversation);
+            renderList();
+          }
+          if (activeInstanceId === inst.id) renderConversation();
+        })
+        .catch(function () {});
+    } else {
+      authFetch('/api/instances/' + inst.id + '/conversation?limit=100')
+        .then(function (r) { return r.json(); })
+        .then(function (msgs) {
+          inst.conversation = msgs;
+          if (!inst._firstPrompt) {
+            inst._firstPrompt = getFirstPrompt(inst.conversation);
+            renderList();
+          }
+          if (activeInstanceId === inst.id) renderConversation();
+        })
+        .catch(function () {});
+    }
+  }
+
   // ---- Render: Detail View ----
   function openDetail(id) {
     activeInstanceId = id;
 
-    // Fetch conversation if we don't have it yet
     var inst = instances.get(id);
     if (inst) {
       var hasConversation = inst.conversation && inst.conversation.length > 0;
-      // If the instance has a sessionId, always load full history from JSONL
-      // (watcher may have added recent messages, but we need the full history)
-      if (inst.sessionId && !inst._historyLoaded) {
-        authFetch('/api/sessions/' + inst.sessionId + '/history')
-          .then(function (r) { return r.json(); })
-          .then(function (history) {
-            if (history.length > 0) {
-              // Replace conversation with authoritative history — avoids
-              // duplicates from watcher messages already in the history.
-              inst.conversation = history;
-              // Track how many messages came from history so appendMessage
-              // can skip watcher duplicates that overlap with the tail.
-              inst._historyLen = history.length;
-            }
-            inst._historyLoaded = true;
-            if (!inst._firstPrompt) {
-              inst._firstPrompt = getFirstPrompt(inst.conversation);
-              renderList();
-            }
-            renderConversation();
-          })
-          .catch(function () {});
-      } else if (!hasConversation) {
-        authFetch('/api/instances/' + id + '/conversation?limit=100')
-          .then(function (r) { return r.json(); })
-          .then(function (msgs) {
-            inst.conversation = msgs;
-            if (!inst._firstPrompt) {
-              inst._firstPrompt = getFirstPrompt(inst.conversation);
-              renderList();
-            }
-            renderConversation();
-          })
-          .catch(function () {});
+      if ((inst.sessionId && !inst._historyLoaded) || !hasConversation) {
+        reloadHistory(inst);
       }
     }
 
