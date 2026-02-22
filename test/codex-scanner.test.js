@@ -16,14 +16,20 @@ function createCodexJsonl(dir, sessionId, opts = {}) {
   const filePath = path.join(dir, `${sessionId}.jsonl`);
   const lines = [];
   lines.push(JSON.stringify({
-    type: 'thread.started',
-    thread_id: sessionId,
-    cwd: opts.cwd || '/home/test/codex-project',
+    timestamp: new Date().toISOString(),
+    type: 'session_meta',
+    payload: {
+      id: sessionId,
+      cwd: opts.cwd || '/home/test/codex-project',
+      originator: 'codex_vscode',
+      source: 'vscode',
+    },
   }));
   if (opts.firstMessage) {
     lines.push(JSON.stringify({
-      type: 'item.completed',
-      item: { id: 'item_1', type: 'agent_message', text: opts.firstMessage },
+      timestamp: new Date().toISOString(),
+      type: 'event_msg',
+      payload: { type: 'user_message', message: opts.firstMessage },
     }));
   }
   fs.writeFileSync(filePath, lines.join('\n') + '\n');
@@ -220,7 +226,7 @@ describe('CodexScanner', () => {
     assert.ok(discovered.some(d => d.sessionId === sessionId), 'Should discover session in dynamically created subdir');
   });
 
-  it('reads cwd from thread.started event', async () => {
+  it('reads cwd from session_meta event', async () => {
     const sessionId = crypto.randomUUID();
     createCodexJsonl(sessionsDir, sessionId, { cwd: '/custom/cwd' });
 

@@ -2,8 +2,8 @@
  * CodexJsonlAdapter — tails a Codex JSONL session file and emits
  * parsed conversation messages in the same format as JsonlWatcher.
  *
- * Codex JSONL events (thread.started, item.*, turn.*) are translated
- * to the hub's uniform message format (role/content/contentType).
+ * Handles the VS Code Codex extension format:
+ *   session_meta, response_item, event_msg, turn_context
  *
  * Uses the same fs.watch() + byte-offset pattern as JsonlWatcher.
  */
@@ -134,15 +134,19 @@ class CodexJsonlAdapter extends EventEmitter {
 
   /**
    * Translate a Codex JSONL event into hub-format messages.
+   * Handles VS Code Codex extension format (session_meta, response_item,
+   * event_msg, turn_context).
    */
   _processEvent(event) {
+    const payload = event.payload || {};
+
     switch (event.type) {
-      case 'thread.started':
+      case 'session_meta':
         this.emit('message', {
           role: 'system',
           content: JSON.stringify({
             subtype: 'init',
-            session_id: event.thread_id,
+            session_id: payload.id || '',
             agent: 'codex',
           }),
           contentType: 'json',
@@ -150,137 +154,146 @@ class CodexJsonlAdapter extends EventEmitter {
         });
         break;
 
-      case 'turn.started':
+      case 'event_msg':
+        this._processEventMsg(payload, event.timestamp);
+        break;
+
+      case 'response_item':
+        this._processResponseItem(payload, event.timestamp);
+        break;
+
+      // turn_context — skip (metadata only)
+    }
+  }
+
+  /**
+   * Handle event_msg payloads (task lifecycle, user messages).
+   */
+  _processEventMsg(payload, timestamp) {
+    switch (payload.type) {
+      case 'task_started':
         this.emit('status', 'busy');
         break;
 
-      case 'item.started': {
-        const item = event.item || {};
-        if (!item.id) break;
-
-        // Dedup: skip if we've already seen this item
-        const startKey = `start:${item.id}`;
-        if (this.seenItemIds.has(startKey)) break;
-        this.seenItemIds.add(startKey);
-
-        if (item.type === 'command_execution') {
-          this.emit('message', {
-            role: 'assistant',
-            content: JSON.stringify({
-              type: 'tool_use',
-              name: 'Bash',
-              input: { command: item.command || '' },
-              id: item.id,
-            }),
-            contentType: 'tool_use',
-            source: 'jsonl',
-          });
-        } else if (item.type === 'file_change') {
-          const toolName = item.action === 'create' ? 'Write' : 'Edit';
-          this.emit('message', {
-            role: 'assistant',
-            content: JSON.stringify({
-              type: 'tool_use',
-              name: toolName,
-              input: { file_path: item.file || item.path || '' },
-              id: item.id,
-            }),
-            contentType: 'tool_use',
-            source: 'jsonl',
-          });
-        } else if (item.type === 'mcp_tool_call') {
-          this.emit('message', {
-            role: 'assistant',
-            content: JSON.stringify({
-              type: 'tool_use',
-              name: item.tool_name || item.name || 'mcp_tool',
-              input: item.arguments || item.input || {},
-              id: item.id,
-            }),
-            contentType: 'tool_use',
-            source: 'jsonl',
-          });
-        }
+      case 'task_complete':
+        this.emit('status', 'idle');
         break;
-      }
 
-      case 'item.completed': {
-        const item = event.item || {};
-        if (!item.id) break;
-
-        const completeKey = `complete:${item.id}`;
-        if (this.seenItemIds.has(completeKey)) break;
-        this.seenItemIds.add(completeKey);
-
-        if (item.type === 'agent_message') {
+      case 'user_message':
+        if (payload.message) {
           this.emit('message', {
-            role: 'assistant',
-            content: item.text || '',
+            role: 'user',
+            content: payload.message,
             contentType: 'text',
-            source: 'jsonl',
-          });
-        } else if (item.type === 'command_execution') {
-          const output = item.output || item.stdout || '';
-          const truncated = output.length > 2000
-            ? output.slice(0, 2000) + '\n... (' + output.length + ' chars)'
-            : output;
-          this.emit('message', {
-            role: 'tool',
-            content: truncated,
-            contentType: 'tool_result',
-            toolUseId: item.id,
-            isError: item.exit_code !== 0,
-            source: 'jsonl',
-          });
-        } else if (item.type === 'file_change') {
-          this.emit('message', {
-            role: 'tool',
-            content: `${item.action || 'modified'}: ${item.file || item.path || ''}`,
-            contentType: 'tool_result',
-            toolUseId: item.id,
-            source: 'jsonl',
-          });
-        } else if (item.type === 'mcp_tool_call') {
-          const result = typeof item.result === 'string'
-            ? item.result
-            : JSON.stringify(item.result || '');
-          const truncated = result.length > 2000
-            ? result.slice(0, 2000) + '\n... (' + result.length + ' chars)'
-            : result;
-          this.emit('message', {
-            role: 'tool',
-            content: truncated,
-            contentType: 'tool_result',
-            toolUseId: item.id,
-            isError: !!item.error,
+            timestamp,
             source: 'jsonl',
           });
         }
         break;
+
+      // Skip: agent_message (duplicated by response_item), agent_reasoning, token_count
+    }
+  }
+
+  /**
+   * Handle response_item payloads (messages, function calls, outputs).
+   */
+  _processResponseItem(payload, timestamp) {
+    switch (payload.type) {
+      case 'message': {
+        if (payload.role === 'assistant') {
+          const content = payload.content;
+          if (!Array.isArray(content)) break;
+          for (const block of content) {
+            if (block.type === 'output_text' && block.text) {
+              this.emit('message', {
+                role: 'assistant',
+                content: block.text,
+                contentType: 'text',
+                timestamp,
+                source: 'jsonl',
+              });
+            }
+          }
+        }
+        // Skip user/developer role messages (user_message in event_msg is cleaner)
+        break;
       }
 
-      case 'turn.completed':
-        this.emit('status', 'idle');
-        this.emit('message', {
-          role: 'system',
-          content: JSON.stringify({
-            type: 'turn_complete',
-            usage: event.usage || {},
-          }),
-          contentType: 'turn_complete',
-          source: 'jsonl',
-        });
-        break;
+      case 'function_call': {
+        const callId = payload.call_id;
+        if (!callId) break;
 
-      case 'turn.failed':
-        this.emit('status', 'idle');
+        const callKey = `call:${callId}`;
+        if (this.seenItemIds.has(callKey)) break;
+        this.seenItemIds.add(callKey);
+
+        let toolName = payload.name || 'unknown';
+        let input = {};
+
+        // Parse arguments (JSON string)
+        try {
+          input = JSON.parse(payload.arguments || '{}');
+        } catch {
+          input = { raw: payload.arguments || '' };
+        }
+
+        // Map exec_command to Bash for display
+        if (toolName === 'exec_command') {
+          toolName = 'Bash';
+          input = { command: input.cmd || input.command || '' };
+        }
+
         this.emit('message', {
-          role: 'system',
-          content: `[turn failed: ${event.error || event.message || 'unknown error'}]`,
-          contentType: 'text',
+          role: 'assistant',
+          content: JSON.stringify({
+            type: 'tool_use',
+            name: toolName,
+            input,
+            id: callId,
+          }),
+          contentType: 'tool_use',
+          timestamp,
           source: 'jsonl',
         });
         break;
+      }
+
+      case 'function_call_output': {
+        const callId = payload.call_id;
+        if (!callId) break;
+
+        const outKey = `out:${callId}`;
+        if (this.seenItemIds.has(outKey)) break;
+        this.seenItemIds.add(outKey);
+
+        // Extract clean output (strip Codex metadata prefix if present)
+        let output = payload.output || '';
+        const outputMarker = output.indexOf('\nOutput:\n');
+        if (outputMarker !== -1) {
+          output = output.slice(outputMarker + '\nOutput:\n'.length);
+        }
+
+        // Detect error from exit code in metadata
+        const isError = /Process exited with code [^0]/.test(payload.output || '');
+
+        const truncated = output.length > 2000
+          ? output.slice(0, 2000) + '\n... (' + output.length + ' chars)'
+          : output;
+
+        this.emit('message', {
+          role: 'tool',
+          content: truncated,
+          contentType: 'tool_result',
+          toolUseId: callId,
+          isError,
+          timestamp,
+          source: 'jsonl',
+        });
+        break;
+      }
+
+      // Skip: reasoning (internal)
     }
   }
 

@@ -235,7 +235,7 @@ class CodexScanner extends EventEmitter {
 
   /**
    * Read the first few JSONL lines to extract session metadata.
-   * Codex format: { type: 'thread.started', thread_id: '...' }
+   * VS Code Codex format: session_meta (cwd), event_msg user_message (prompt).
    */
   _readSessionInfo(filePath) {
     try {
@@ -253,19 +253,20 @@ class CodexScanner extends EventEmitter {
       for (const line of lines) {
         try {
           const obj = JSON.parse(line);
+          const payload = obj.payload || {};
 
+          // VS Code format: session_meta has cwd in payload
+          if (obj.type === 'session_meta' && payload.cwd && !cwd) {
+            cwd = payload.cwd;
+          }
+
+          // VS Code format: user prompt in event_msg.user_message
+          if (obj.type === 'event_msg' && payload.type === 'user_message' && payload.message && !firstPrompt) {
+            firstPrompt = payload.message.slice(0, 120);
+          }
+
+          // Fallback: top-level cwd (CLI format)
           if (obj.cwd && !cwd) cwd = obj.cwd;
-          if (obj.type === 'thread.started' && obj.cwd && !cwd) cwd = obj.cwd;
-
-          if (obj.type === 'item.completed' && obj.item) {
-            if (obj.item.type === 'agent_message' && !firstPrompt) {
-              firstPrompt = (obj.item.text || '').slice(0, 120);
-            }
-          }
-
-          if (obj.prompt && !firstPrompt) {
-            firstPrompt = obj.prompt.slice(0, 120);
-          }
 
           if (cwd && firstPrompt) break;
         } catch {

@@ -201,6 +201,7 @@ function readLines(filePath, n, mode) {
  * Load conversation history from a session JSONL file.
  * Parses all messages, deduplicates streaming updates (by message.id),
  * and returns an array in the format the frontend expects.
+ * Supports both Claude Code and Codex VS Code JSONL formats.
  *
  * @param {string} sessionId - The session UUID
  * @returns {Promise<Array>} conversation messages
@@ -210,9 +211,29 @@ async function loadHistory(sessionId) {
   const filePath = findSessionFile(sessionId);
   if (!filePath) return [];
 
+  // Detect format from the first line
+  const firstLines = await readLines(filePath, 1, 'head');
+  let isCodex = false;
+  if (firstLines.length > 0) {
+    try {
+      const first = JSON.parse(firstLines[0]);
+      isCodex = first.type === 'session_meta';
+    } catch {}
+  }
+
+  if (isCodex) {
+    return loadCodexHistory(filePath);
+  }
+
+  return loadClaudeHistory(filePath);
+}
+
+/**
+ * Load conversation history from a Claude Code JSONL file.
+ */
+function loadClaudeHistory(filePath) {
   return new Promise((resolve) => {
     const messages = [];
-    // Track last content per assistant message.id (streaming dedup)
     const assistantMessages = new Map();
 
     const stream = fs.createReadStream(filePath, { encoding: 'utf8' });
@@ -232,9 +253,6 @@ async function loadHistory(sessionId) {
           if (!Array.isArray(content)) return;
 
           if (msgId) {
-            // Accumulate blocks across incremental entries for the same message.id.
-            // Claude Code writes each new content block as a separate JSONL entry,
-            // so we must concat rather than overwrite.
             const existing = assistantMessages.get(msgId);
             if (existing) {
               existing.blocks = existing.blocks.concat(content);
@@ -293,7 +311,6 @@ async function loadHistory(sessionId) {
     });
 
     rl.on('close', () => {
-      // Resolve assistant message placeholders with final content
       const result = [];
       const seenToolIds = new Set();
       for (const msg of messages) {
@@ -309,7 +326,6 @@ async function loadHistory(sessionId) {
                 timestamp: entry.timestamp,
               });
             } else if (block.type === 'tool_use') {
-              // Deduplicate tool_use by id (safety net)
               if (seenToolIds.has(block.id)) continue;
               seenToolIds.add(block.id);
               result.push({
@@ -324,7 +340,6 @@ async function loadHistory(sessionId) {
                 timestamp: entry.timestamp,
               });
             }
-            // Skip 'thinking' blocks
           }
         } else if (msg.type === 'assistant' && msg.blocks) {
           for (const block of msg.blocks) {
@@ -344,6 +359,124 @@ async function loadHistory(sessionId) {
       resolve(result);
     });
 
+    stream.on('error', () => resolve([]));
+  });
+}
+
+/**
+ * Load conversation history from a Codex VS Code JSONL file.
+ * Handles session_meta, response_item, event_msg, turn_context format.
+ */
+function loadCodexHistory(filePath) {
+  return new Promise((resolve) => {
+    const result = [];
+    const seenCallIds = new Set();
+
+    const stream = fs.createReadStream(filePath, { encoding: 'utf8' });
+    const rl = readline.createInterface({ input: stream });
+
+    rl.on('line', (line) => {
+      try {
+        const obj = JSON.parse(line);
+        const payload = obj.payload || {};
+        const timestamp = obj.timestamp || null;
+
+        if (obj.type === 'event_msg') {
+          // User prompt
+          if (payload.type === 'user_message' && payload.message) {
+            result.push({
+              role: 'user',
+              content: payload.message,
+              timestamp,
+            });
+          }
+          return;
+        }
+
+        if (obj.type === 'response_item') {
+          // Assistant text message
+          if (payload.type === 'message' && payload.role === 'assistant') {
+            const content = payload.content;
+            if (Array.isArray(content)) {
+              for (const block of content) {
+                if (block.type === 'output_text' && block.text) {
+                  result.push({
+                    role: 'assistant',
+                    content: block.text,
+                    contentType: 'text',
+                    timestamp,
+                  });
+                }
+              }
+            }
+            return;
+          }
+
+          // Function call (tool use)
+          if (payload.type === 'function_call' && payload.call_id) {
+            if (seenCallIds.has(payload.call_id)) return;
+            seenCallIds.add(payload.call_id);
+
+            let toolName = payload.name || 'unknown';
+            let input = {};
+            try {
+              input = JSON.parse(payload.arguments || '{}');
+            } catch {
+              input = { raw: payload.arguments || '' };
+            }
+
+            if (toolName === 'exec_command') {
+              toolName = 'Bash';
+              input = { command: input.cmd || input.command || '' };
+            }
+
+            result.push({
+              role: 'assistant',
+              content: JSON.stringify({
+                type: 'tool_use',
+                name: toolName,
+                input,
+                id: payload.call_id,
+              }),
+              contentType: 'tool_use',
+              timestamp,
+            });
+            return;
+          }
+
+          // Function call output (tool result)
+          if (payload.type === 'function_call_output' && payload.call_id) {
+            const outKey = `out:${payload.call_id}`;
+            if (seenCallIds.has(outKey)) return;
+            seenCallIds.add(outKey);
+
+            let output = payload.output || '';
+            const outputMarker = output.indexOf('\nOutput:\n');
+            if (outputMarker !== -1) {
+              output = output.slice(outputMarker + '\nOutput:\n'.length);
+            }
+
+            const isError = /Process exited with code [^0]/.test(payload.output || '');
+            const truncated = output.length > 2000
+              ? output.slice(0, 2000) + '\n... (' + output.length + ' chars)'
+              : output;
+
+            result.push({
+              role: 'tool',
+              content: truncated,
+              contentType: 'tool_result',
+              toolUseId: payload.call_id,
+              isError,
+              timestamp,
+            });
+          }
+        }
+      } catch {
+        // skip unparseable lines
+      }
+    });
+
+    rl.on('close', () => resolve(result));
     stream.on('error', () => resolve([]));
   });
 }
@@ -385,7 +518,7 @@ function findJsonlRecursive(dirPath, cutoff) {
 
 /**
  * Extract metadata from a Codex session JSONL file.
- * Codex uses: thread.started, item.*, turn.* event format.
+ * Handles VS Code Codex extension format (session_meta, event_msg, response_item).
  */
 async function extractCodexMetadata(filePath) {
   const sessionId = path.basename(filePath, '.jsonl');
@@ -397,28 +530,34 @@ async function extractCodexMetadata(filePath) {
   let firstTimestamp = null;
   let lastTimestamp = null;
   let firstPrompt = null;
-  let threadId = null;
+  let metaId = null;
+  let model = null;
 
   for (const line of headLines) {
     try {
       const obj = JSON.parse(line);
+      const payload = obj.payload || {};
 
-      if (obj.cwd && !cwd) cwd = obj.cwd;
       if (obj.timestamp && !firstTimestamp) firstTimestamp = obj.timestamp;
-      if (obj.type === 'thread.started' && obj.thread_id) {
-        threadId = obj.thread_id;
-        if (obj.cwd && !cwd) cwd = obj.cwd;
+
+      // VS Code format: session_meta has cwd and id in payload
+      if (obj.type === 'session_meta') {
+        if (payload.cwd && !cwd) cwd = payload.cwd;
+        if (payload.id && !metaId) metaId = payload.id;
       }
 
-      // First agent message or prompt as firstPrompt
-      if (obj.type === 'item.completed' && obj.item) {
-        if (obj.item.type === 'agent_message' && !firstPrompt) {
-          firstPrompt = (obj.item.text || '').slice(0, 120);
-        }
+      // VS Code format: user prompt in event_msg.user_message
+      if (obj.type === 'event_msg' && payload.type === 'user_message' && payload.message && !firstPrompt) {
+        firstPrompt = payload.message.slice(0, 120);
       }
-      if (obj.prompt && !firstPrompt) {
-        firstPrompt = obj.prompt.slice(0, 120);
+
+      // VS Code format: model in turn_context
+      if (obj.type === 'turn_context' && payload.model && !model) {
+        model = payload.model;
       }
+
+      // Fallback: top-level cwd (CLI format)
+      if (obj.cwd && !cwd) cwd = obj.cwd;
     } catch {
       continue;
     }
@@ -434,12 +573,12 @@ async function extractCodexMetadata(filePath) {
   }
 
   return {
-    sessionId: threadId || sessionId,
+    sessionId: metaId || sessionId,
     slug: null,
     cwd: cwd || null,
     project: cwd ? path.basename(cwd) : 'codex',
     firstPrompt: firstPrompt || null,
-    model: null,
+    model: model || null,
     firstActivity: firstTimestamp || null,
     lastActivity: lastTimestamp || firstTimestamp || null,
   };
