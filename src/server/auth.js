@@ -75,7 +75,7 @@ function validateSession(authState, req) {
 
 function setSessionCookie(res, sessionId, secure) {
   res.setHeader('Set-Cookie',
-    `polpo_session=${sessionId}; Path=/; Max-Age=86400; HttpOnly; SameSite=Lax${secure ? '; Secure' : ''}`
+    `polpo_session=${sessionId}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax${secure ? '; Secure' : ''}`
   );
 }
 
