@@ -7,13 +7,13 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="theme-color" content="#0f172a">
   <title>Polpo — Claude Code Controller</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐙</text></svg>">
+  <link rel="icon" href="favicon.png" type="image/png">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <header id="app-header">
     <div class="header-left">
-      <span class="logo">🐙</span>
+      <img class="logo" src="logo-96.png" alt="Polpo" width="28" height="28">
       <h1>Polpo</h1>
     </div>
     <div class="header-right">
@@ -25,7 +25,7 @@
   <!-- Instance List View -->
   <main id="view-list">
     <div id="empty-state" class="empty-state">
-      <div class="empty-icon">🐙</div>
+      <img class="empty-icon" src="logo-96.png" alt="Polpo" width="64" height="64">
       <h2>No active sessions</h2>
       <p>Start a session or resume a past one from the list below.</p>
       <pre class="code-hint">polpo session --cwd /path/to/project</pre>

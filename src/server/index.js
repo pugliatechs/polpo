@@ -37,12 +37,18 @@ function createServer(options = {}) {
     res.json({ status: 'ok', instances: instanceManager.getAll().length });
   });
 
-  // Auth page (served to unauthenticated users)
+  // Auth page and its assets (served to unauthenticated users)
   app.get('/auth.html', (req, res) => {
     res.sendFile(path.join(__dirname, '..', 'web', 'auth.html'));
   });
   app.get('/auth', (req, res) => {
     res.sendFile(path.join(__dirname, '..', 'web', 'auth.html'));
+  });
+  app.get('/logo-96.png', (req, res) => {
+    res.sendFile(path.join(__dirname, '..', 'web', 'logo-96.png'));
+  });
+  app.get('/favicon.png', (req, res) => {
+    res.sendFile(path.join(__dirname, '..', 'web', 'favicon.png'));
   });
 
   // PIN verification

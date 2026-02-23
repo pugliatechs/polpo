@@ -69,7 +69,6 @@ body {
 }
 
 .logo {
-  font-size: 24px;
   flex-shrink: 0;
 }
 
@@ -129,7 +128,6 @@ main {
 }
 
 .empty-icon {
-  font-size: 64px;
   margin-bottom: 16px;
   opacity: 0.5;
 }
@@ -1352,7 +1350,6 @@ h5.plan-h { font-size: 13px; }
     min-height: 0;
   }
   .empty-icon {
-    font-size: 40px;
     margin-bottom: 8px;
   }
   .detail-header {
