@@ -76,6 +76,10 @@ The dashboard shows active sessions, past session history, and lets you send pro
 
 ## Features
 
+<p align="center">
+  <img src="assets/session-detail.jpg" alt="Session detail with tool calls and auto-approve" width="300">
+</p>
+
 | Feature | Description |
 |---------|-------------|
 | Full Remote Control | Send prompts and see responses from your phone |
@@ -112,6 +116,10 @@ When exposing Polpo over a tunnel or untrusted network, authentication prevents 
 | **paranoid** | `--auth paranoid` | URL token + TOTP (6-digit) | Yes | Long-lived tunnels, highest security |
 
 ### How It Works
+
+<p align="center">
+  <img src="assets/auth.jpeg" alt="TOTP authentication page" width="300">
+</p>
 
 - **Token**: A `crypto.randomBytes(32)` base64url token is baked into the QR code URL. It is single-use - after the first scan, it is burned and cannot be reused.
 - **PIN**: A 4-digit PIN is displayed in the terminal. After scanning the QR code, the phone must enter the PIN. After 3 failed attempts, a new PIN is generated.
@@ -197,6 +205,10 @@ When a session runs in `default` permission mode, an MCP permission server handl
 - **Approve All** - enable auto-approve for the rest of the session (all future tool calls are approved instantly without involving the phone)
 - **Reject** - deny this tool use
 
+<p align="center">
+  <img src="assets/tool-approval.jpg" alt="Tool approval dialog with Approve, Approve All, and Reject buttons" width="300">
+</p>
+
 When auto-approve is active, a green "Auto-approve ON" indicator appears with a "Stop" button to disable it.
 
 **Plans and questions always require review**, even when auto-approve is on. When Claude proposes a plan (`ExitPlanMode`), the full plan content is rendered with markdown (headings, tables, code blocks, lists) in a collapsible panel. When Claude asks questions (`AskUserQuestion`), the options appear as tappable radio buttons or checkboxes with a free-text "Other" fallback.
@@ -281,6 +293,10 @@ Add the output to `~/.claude/settings.json`. The bridge daemon auto-discovers th
 ### Phone Takeover
 
 Auto-discovered and hook instances are read-only by default — you can see the conversation but can't send prompts. Tap **Take Over** to spawn a new agent that resumes the session, giving you full control from your phone.
+
+<p align="center">
+  <img src="assets/codex-takeover.jpg" alt="Codex session with Take Over button" width="300">
+</p>
 
 When you return to your terminal, run `claude --continue` to reload the conversation. In VS Code, reload the window (`Ctrl+Shift+P` → "Reload Window") to pick up messages sent from Polpo — the VS Code extension caches conversations in memory and only re-reads JSONL on reload.
 
