@@ -39,7 +39,7 @@ sequenceDiagram
     Polpo-->>Phone: Dashboard + WebSocket
 ```
 
-## Session Flow
+## Session Flow (Claude)
 
 ```mermaid
 sequenceDiagram
@@ -64,6 +64,66 @@ sequenceDiagram
     Phone->>Hub: Approve / Reject
     Hub->>MCP: Return decision
     MCP->>CLI: allow / deny
+```
+
+## Session Flow (Codex / Gemini)
+
+Codex and Gemini use one-shot process invocation instead of long-running stdin streaming. Each prompt spawns a new process; multi-turn uses resume flags.
+
+```mermaid
+sequenceDiagram
+    participant Phone
+    participant Hub as Polpo Hub
+    participant Agent as Session Agent
+    participant CLI as codex / gemini CLI
+
+    Agent->>Hub: Register + WebSocket connect
+    Phone->>Hub: Send prompt
+    Hub->>Agent: Forward prompt
+    Agent->>CLI: Spawn process (codex exec --json / gemini -p ... --output-format stream-json)
+    CLI->>Agent: Streaming JSONL events (init, message deltas, tool_use, result)
+    Agent->>Hub: Relay messages
+    Hub->>Phone: Real-time updates
+    CLI->>Agent: Process exits on completion
+
+    Note over Phone,CLI: Follow-up prompt (multi-turn)
+    Phone->>Hub: Send next prompt
+    Hub->>Agent: Forward prompt
+    Agent->>CLI: Spawn new process with resume flag (codex exec resume / gemini --resume)
+    CLI->>Agent: Streaming response
+    Agent->>Hub: Relay messages
+    Hub->>Phone: Real-time updates
+```
+
+## Auto-Discovery & Takeover Flow
+
+```mermaid
+sequenceDiagram
+    participant Dev as Developer Terminal
+    participant FS as Session Files
+    participant Scanner as Session Scanner
+    participant Hub as Polpo Hub
+    participant Phone
+    participant Agent as Takeover Agent
+    participant CLI as CLI (claude / codex / gemini)
+
+    Dev->>FS: Run CLI (writes session files)
+    Scanner->>FS: fs.watch() detects new/changed files
+    Scanner->>Hub: session:discovered (sessionId, transcriptPath, agentType)
+    Hub->>Hub: Register read-only instance (canReceivePrompts: false)
+    Hub->>Phone: New instance card on dashboard
+
+    Note over Hub,FS: File watcher streams conversation
+    FS->>Hub: JSONL/JSON file changes (debounced)
+    Hub->>Phone: Real-time conversation sync
+
+    Note over Phone,CLI: Phone Takeover
+    Phone->>Hub: POST /instances/:id/takeover
+    Hub->>Hub: Copy conversation from old instance
+    Hub->>Agent: Spawn agent with --resume <sessionId>
+    Agent->>CLI: Start CLI process
+    Agent->>Hub: Register new instance (canReceivePrompts: true)
+    Hub->>Phone: Switch to new instance with full prompt capability
 ```
 
 ## Hook Flow

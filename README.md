@@ -477,7 +477,7 @@ graph TD
     Browser -->|"reads"| GeminiJSON
 ```
 
-See [docs/diagrams.md](docs/diagrams.md) for auth, tunnel, session, and hook flow diagrams.
+See [docs/diagrams.md](docs/diagrams.md) for auth, tunnel, session, auto-discovery, takeover, and hook flow diagrams.
 
 ## Disclaimer
 
