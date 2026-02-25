@@ -8,10 +8,44 @@ const { createAgent } = require('../agent/agent-factory');
 
 const UPLOAD_DIR = path.join(os.tmpdir(), 'polpo-uploads');
 const MAX_UPLOAD_SIZE = 10 * 1024 * 1024; // 10MB decoded
+const GEMINI_TMP_DIR = path.join(os.homedir(), '.gemini', 'tmp');
 
-// Session IDs are UUIDs — reject anything else to prevent path traversal / arg injection
+/**
+ * Resolve a Gemini filename-derived session ID to the real UUID
+ * from the JSON file, since `gemini --resume` expects a UUID.
+ */
+function resolveGeminiSessionId(sessionId, transcriptPath) {
+  // If we have the transcript path, read it directly
+  if (transcriptPath && transcriptPath.endsWith('.json')) {
+    try {
+      const data = JSON.parse(fs.readFileSync(transcriptPath, 'utf8'));
+      if (data.sessionId) return data.sessionId;
+    } catch {}
+  }
+
+  // Search Gemini tmp directories for the session file
+  try {
+    const slugDirs = fs.readdirSync(GEMINI_TMP_DIR, { withFileTypes: true })
+      .filter(d => d.isDirectory()).map(d => d.name);
+    for (const slug of slugDirs) {
+      const candidate = path.join(GEMINI_TMP_DIR, slug, 'chats', `session-${sessionId}.json`);
+      if (fs.existsSync(candidate)) {
+        const data = JSON.parse(fs.readFileSync(candidate, 'utf8'));
+        if (data.sessionId) return data.sessionId;
+      }
+    }
+  } catch {}
+
+  return sessionId; // fallback to original
+}
+
+// Session IDs can be UUIDs, Codex rollout IDs, or Gemini filename-derived IDs
 function isValidSessionId(id) {
-  return typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+  if (typeof id !== 'string' || id.length === 0 || id.length > 200) return false;
+  // Allow UUIDs, Codex rollout IDs (rollout-<uuid>), Gemini filename-derived IDs
+  // (2026-02-25T15-00-<hex>), and other alphanumeric session identifiers.
+  // Block path traversal and injection characters.
+  return /^[a-zA-Z0-9._-]+$/.test(id);
 }
 
 function createApiRouter(instanceManager, getAuthState) {
@@ -74,7 +108,7 @@ function createApiRouter(instanceManager, getAuthState) {
     try {
       const maxDays = Math.min(parseInt(req.query.days) || 7, 365);
       const limit = Math.min(parseInt(req.query.limit) || 50, 500);
-      const source = req.query.source || 'all'; // 'claude' | 'codex' | 'all'
+      const source = req.query.source || 'all'; // 'claude' | 'codex' | 'gemini' | 'all'
       const sessions = await scanSessions({
         maxAge: maxDays * 24 * 60 * 60 * 1000,
         limit,
@@ -130,10 +164,14 @@ function createApiRouter(instanceManager, getAuthState) {
     const authToken = authState && authState.enabled ? authState.token : undefined;
 
     try {
+      const resumeId = agentType === 'gemini'
+        ? resolveGeminiSessionId(sessionId)
+        : sessionId;
+
       const agent = createAgent(agentType || 'claude', {
         name: name || `Resumed (${sessionId.slice(0, 8)})`,
         cwd: resolvedCwd,
-        resumeSessionId: sessionId,
+        resumeSessionId: resumeId,
         serverUrl: `ws://127.0.0.1:${req.socket.localPort}`,
         token: authToken,
       });
@@ -405,10 +443,14 @@ function createApiRouter(instanceManager, getAuthState) {
     const authToken = authState && authState.enabled ? authState.token : undefined;
 
     try {
+      const resumeId = inst.agentType === 'gemini'
+        ? resolveGeminiSessionId(inst.sessionId, inst.transcriptPath)
+        : inst.sessionId;
+
       const agent = createAgent(inst.agentType || 'claude', {
         name: `Takeover (${inst.name})`,
         cwd: inst.cwd,
-        resumeSessionId: inst.sessionId,
+        resumeSessionId: resumeId,
         serverUrl: `ws://127.0.0.1:${req.socket.localPort}`,
         token: authToken,
       });
@@ -416,12 +458,20 @@ function createApiRouter(instanceManager, getAuthState) {
       await agent.start();
       wrappedAgents.set(inst.sessionId, agent);
 
+      // Copy conversation history from the old instance to the new takeover instance
+      const newInst = instanceManager.get(agent.instanceId);
+      if (newInst && inst.conversation && inst.conversation.length > 0) {
+        newInst.conversation = [...inst.conversation];
+        newInst.sessionId = inst.sessionId;
+        newInst.transcriptPath = inst.transcriptPath;
+      }
+
       const cleanup = () => wrappedAgents.delete(inst.sessionId);
       if (agent.ws) agent.ws.on('close', cleanup);
 
       res.json({
         instanceId: agent.instanceId,
-        warning: 'A second Claude process is now running. When done, return to terminal and run: claude --continue',
+        warning: 'Session taken over. You can now send prompts from your phone.',
       });
     } catch (err) {
       res.status(500).json({ error: err.message });

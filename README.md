@@ -4,29 +4,29 @@
   <img src="assets/logo.png" alt="Polpo" width="240" height="240">
 </p>
 
-<p align="center"><strong>Work on Claude Code and Codex from your phone.</strong></p>
+<p align="center"><strong>Work on Claude Code, Codex, and Gemini from your phone.</strong></p>
 
-Polpo lets developers send prompts, see responses, and control Claude Code and OpenAI Codex CLI sessions from any mobile device over VPN, Wi-Fi, LAN, or a public tunnel.
+Polpo lets developers send prompts, see responses, and control Claude Code, OpenAI Codex CLI, and Google Gemini CLI sessions from any mobile device over VPN, Wi-Fi, LAN, or a public tunnel.
 
 ## Why
 
 AI coding sessions can run for minutes while reading files, writing code, and running tests. During that time, developers are tethered to their terminal waiting to approve tool calls, review output, or send the next prompt.
 
-Polpo frees you from the keyboard. Grab a coffee, kick off a refactor while waiting for a train, or review tool calls from an airport lounge - your phone becomes a full remote control for Claude Code and Codex. You see every tool call as it happens, approve or reject actions with a tap, send follow-up prompts, and abort tasks when something goes wrong. All in real time, from any network.
+Polpo frees you from the keyboard. Grab a coffee, kick off a refactor while waiting for a train, or review tool calls from an airport lounge - your phone becomes a full remote control for Claude Code, Codex, and Gemini. You see every tool call as it happens, approve or reject actions with a tap, send follow-up prompts, and abort tasks when something goes wrong. All in real time, from any network.
 
 ## Architecture
 
-Four integration modes, supporting both **Claude Code** and **OpenAI Codex CLI**:
+Four integration modes, supporting **Claude Code**, **OpenAI Codex CLI**, and **Google Gemini CLI**:
 
-- **Session** - spawns `claude` or `codex exec --json` with full bidirectional control from phone, including MCP-based tool approval
-- **Auto-Discovery** - watches `~/.claude/projects/` and `~/.codex/sessions/` for active JSONL files using `fs.watch()`, auto-registers sessions on the dashboard with real-time conversation sync — no setup needed
+- **Session** - spawns `claude`, `codex exec --json`, or `gemini --output-format stream-json` with full bidirectional control from phone, including MCP-based tool approval
+- **Auto-Discovery** - watches `~/.claude/projects/`, `~/.codex/sessions/`, and `~/.gemini/tmp/` for active session files using `fs.watch()`, auto-registers sessions on the dashboard with real-time conversation sync — no setup needed
 - **Hooks** - taps into existing terminal sessions via Claude Code hooks for terminal prompt forwarding and phone-based tool approval
-- **Session Browser** - discovers and displays past sessions from both Claude Code and Codex JSONL files, with the ability to resume them
+- **Session Browser** - discovers and displays past sessions from Claude Code, Codex, and Gemini session files, with the ability to resume them
 
 ## Requirements
 
 - **Node.js** 18+ (for built-in test runner; 16+ works for everything else)
-- **Claude Code** CLI installed and authenticated, **and/or** **Codex CLI** installed and authenticated
+- **Claude Code** CLI installed and authenticated, **and/or** **Codex CLI** installed and authenticated, **and/or** **Gemini CLI** installed and authenticated
 - **macOS** or **Linux** (Windows is not currently supported)
 
 ### macOS Notes
@@ -64,6 +64,9 @@ node bin/polpo.js session --cwd /path/to/project --name "Backend API"
 # New Codex session
 node bin/polpo.js session --agent codex --cwd /path/to/project --name "Codex Task"
 
+# New Gemini session
+node bin/polpo.js session --agent gemini --cwd /path/to/project --name "Gemini Task"
+
 # Resume an existing session
 node bin/polpo.js session --resume <session-id>
 ```
@@ -89,8 +92,8 @@ The dashboard shows active sessions, past session history, and lets you send pro
 | Question Answers | Answer multi-choice questions from your phone when Claude asks |
 | Auto-approve | Tap "Approve All" to auto-approve tool calls (plans and questions always require review) |
 | File Attachments | Send any file from your phone - images, PDFs, code, documents, etc. |
-| Multi-Agent | Full support for both Claude Code and OpenAI Codex CLI |
-| Session Browser | Browse past sessions from Claude Code and Codex with conversation history |
+| Multi-Agent | Full support for Claude Code, OpenAI Codex CLI, and Google Gemini CLI |
+| Session Browser | Browse past sessions from Claude Code, Codex, and Gemini with conversation history |
 | Session Resume | Resume any past session directly from the phone dashboard |
 | Auto-Discovery | Active sessions detected automatically via filesystem watching — no hooks required |
 | Live History Sync | Terminal/VS Code conversations synced to phone in real-time via JSONL watcher |
@@ -102,6 +105,8 @@ The dashboard shows active sessions, past session history, and lets you send pro
 | Cost Tracking | Per-turn API costs displayed inline |
 | Mobile-First UI | Dark OLED theme, touch-optimized, safe-area support, responsive layout |
 | Tunnel Access | Expose the hub over the internet with `--tunnel` (cloudflared, localtunnel, ngrok, SSH) |
+
+> **Note**: Polpo streaming is **near real-time**, not strictly real-time. Auto-discovery relies on filesystem events (`fs.watch`) which have inherent OS-level latency; JSONL/JSON watchers debounce file changes; agents using one-shot process invocation (Codex, Gemini) accumulate deltas before flushing; and when `fs.watch` is unavailable (e.g. inotify limit exhaustion), the system falls back to periodic polling. In practice, latency is typically under one second, but it is not zero.
 
 ## Security
 
@@ -195,6 +200,9 @@ node bin/polpo.js session --cwd /path/to/project --name "My Task"
 
 # OpenAI Codex
 node bin/polpo.js session --agent codex --cwd /path/to/project --name "Codex Task"
+
+# Google Gemini
+node bin/polpo.js session --agent gemini --cwd /path/to/project --name "Gemini Task"
 ```
 
 ### Tool Approval
@@ -226,24 +234,25 @@ node bin/polpo.js session --cwd /path/to/project --permissions bypass
 | `--name <name>` | Display name for this session |
 | `--cwd <dir>` | Project directory (default: current) |
 | `--resume <id>` | Resume an existing session |
-| `--model <model>` | Model to use (e.g. opus, sonnet for Claude; gpt-5-codex for Codex) |
+| `--model <model>` | Model to use (e.g. opus, sonnet for Claude; gpt-5-codex for Codex; flash, pro for Gemini) |
 | `--permissions <mode>` | `default` (phone approval via MCP) or `bypass` (skip all) |
-| `--agent <type>` | Agent type: `claude` (default) or `codex` |
+| `--agent <type>` | Agent type: `claude` (default), `codex`, or `gemini` |
 | `--server <url>` | Hub WebSocket URL (default: `ws://127.0.0.1:7890`) |
 | `--token <token>` | Auth token (or set `POLPO_TOKEN` env var) |
 
 ## Session Browser
 
-The dashboard automatically discovers past sessions from `~/.claude/projects/` (Claude Code) and `~/.codex/sessions/` (Codex) and displays them as cards with the session's first prompt as the title. Each card shows an agent type badge (Claude or Codex). Tap a session to view its full conversation history, or resume it to continue working from your phone.
+The dashboard automatically discovers past sessions from `~/.claude/projects/` (Claude Code), `~/.codex/sessions/` (Codex), and `~/.gemini/tmp/` (Gemini) and displays them as cards with the session's first prompt as the title. Each card shows an agent type badge (Claude, Codex, or Gemini). Tap a session to view its full conversation history, or resume it to continue working from your phone.
 
-Sessions are loaded from JSONL files and deduplicated to show clean conversation threads. Use the `?source=claude|codex|all` query parameter on the `/api/sessions` endpoint to filter by agent type.
+Sessions are loaded from JSONL/JSON files and deduplicated to show clean conversation threads. Use the `?source=claude|codex|gemini|all` query parameter on the `/api/sessions` endpoint to filter by agent type.
 
 ## Auto-Discovery
 
-The Polpo server automatically discovers active sessions from both Claude Code and Codex by watching their respective JSONL directories:
+The Polpo server automatically discovers active sessions from Claude Code, Codex, and Gemini by watching their respective session directories:
 
 - **Claude Code**: `~/.claude/projects/<project-slug>/*.jsonl`
 - **Codex CLI**: `~/.codex/sessions/*.jsonl`
+- **Gemini CLI**: `~/.gemini/tmp/<project-slug>/chats/session-*.json`
 
 This is event-driven using `fs.watch()` — no polling, no hooks, no setup.
 
@@ -252,7 +261,7 @@ When a session is detected:
 2. A JSONL watcher starts streaming the full conversation in real-time (using the correct adapter for each agent's JSONL format)
 3. Status (busy/idle) is derived from the JSONL content — user messages set busy, turn completions set idle
 
-Auto-discovery works with any interface that writes JSONL files (terminal CLI, VS Code extension, web).
+Auto-discovery works with any interface that writes JSONL/JSON session files (terminal CLI, VS Code extension, web).
 
 ## Codex CLI Support
 
@@ -271,6 +280,33 @@ Polpo supports OpenAI Codex CLI with full parity:
 - Permission handling uses `--full-auto` for bypass mode and `-a on-request` for default mode.
 - Images are attached via `--image <path>` flag; other files are referenced in the prompt text.
 - The dashboard shows a green "Codex" badge on Codex instances, and a purple "Claude" badge on Claude instances.
+
+## Gemini CLI Support
+
+Polpo supports Google Gemini CLI with full parity:
+
+- **Session spawning** — `polpo session --agent gemini` spawns `gemini -p "..." --output-format stream-json` processes
+- **Multi-turn** — each prompt spawns a new process using `gemini --resume <session-id> -p "..." --output-format stream-json`, keeping the conversation context
+- **Auto-discovery** — watches `~/.gemini/tmp/<project>/chats/` for active JSON session files
+- **Session browser** — lists past Gemini sessions alongside Claude Code and Codex sessions
+- **Takeover** — take over a terminal Gemini session from your phone
+- **Event translation** — Gemini's stream-json format (`init`, `message`, `tool_use`, `tool_result`, `error`, `result`) is translated to Polpo's uniform message format
+
+### Gemini-Specific Notes
+
+- Gemini uses one-shot process invocation (like Codex) rather than stdin streaming. Multi-turn requires killing and respawning with `--resume`, which adds ~1-2s between prompts.
+- Permission handling uses `--approval-mode=yolo` for bypass mode (Gemini does not support MCP).
+- Images and files are attached via `@<path>` syntax appended to the prompt text.
+- Session files are JSON (not JSONL) — the adapter re-reads the full JSON on file changes and diffs message counts.
+- The dashboard shows a blue "Gemini" badge on Gemini instances.
+
+### Requirements
+
+```bash
+npm install -g @google/gemini-cli
+```
+
+Gemini CLI must be authenticated (run `gemini` once to set up API key or Google account auth).
 
 ## Terminal Sync (Hooks)
 
@@ -292,13 +328,13 @@ Add the output to `~/.claude/settings.json`. The bridge daemon auto-discovers th
 
 ### Phone Takeover
 
-Auto-discovered and hook instances are read-only by default — you can see the conversation but can't send prompts. Tap **Take Over** to spawn a new agent that resumes the session, giving you full control from your phone.
+Auto-discovered and hook instances are **read-only** — they mirror conversations from session files on disk, but have no backing agent process to accept prompts. Tap **Take Over** to spawn a real agent process (`claude --resume`, `codex exec resume`, or `gemini --resume`) that resumes the session with full prompt capability. The existing conversation history is preserved in the new instance. This is the same resume mechanism used by the Claude Code VS Code extension when selecting a previous conversation — there is no long-lived process to reconnect to; the CLI replays context from transcript files on each resume.
 
 <p align="center">
   <img src="assets/codex-takeover.jpg" alt="Codex session with Take Over button" width="300">
 </p>
 
-When you return to your terminal, run `claude --continue` to reload the conversation. In VS Code, reload the window (`Ctrl+Shift+P` → "Reload Window") to pick up messages sent from Polpo — the VS Code extension caches conversations in memory and only re-reads JSONL on reload.
+When you return to your terminal, run `claude --continue` (Claude) or start a new session (Codex/Gemini) to reload the conversation. In VS Code, reload the window (`Ctrl+Shift+P` → "Reload Window") to pick up messages sent from Polpo — the VS Code extension caches conversations in memory and only re-reads session files on reload.
 
 ### Approval Mode
 
@@ -338,7 +374,7 @@ Tap the paperclip icon to attach files from your phone. Supported types:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/sessions` | List discovered sessions (`?source=claude\|codex\|all`) |
+| GET | `/api/sessions` | List discovered sessions (`?source=claude\|codex\|gemini\|all`) |
 | GET | `/api/sessions/:id/history` | Get conversation history from JSONL |
 | POST | `/api/sessions/:id/resume` | Resume a session (spawns wrapped agent) |
 | GET | `/api/instances` | List all active instances |
@@ -381,7 +417,7 @@ Connect to `ws://<host>:<port>?role=agent&instanceId=<id>` as an agent.
 npm test
 ```
 
-Runs unit tests with Node's built-in test runner. Tests cover authentication (token, PIN, TOTP, sessions, middleware), instance manager, tunnel provider logic, session JSONL parsing, JSONL file watcher (messages, status events, dedup), session scanner (Claude auto-discovery, idle detection, project watching), Codex agent (event translation, hub messages, multi-turn), Codex scanner (Codex session discovery), and agent factory (agent type routing).
+Runs unit tests with Node's built-in test runner. Tests cover authentication (token, PIN, TOTP, sessions, middleware), instance manager, tunnel provider logic, session JSONL/JSON parsing, JSONL/JSON file watcher (messages, status events, dedup), session scanner (Claude/Codex/Gemini auto-discovery, idle detection, project watching), Codex agent (event translation, hub messages, multi-turn), Gemini agent (stream-json event translation, delta accumulation, multi-turn), Codex scanner (Codex session discovery), Gemini scanner (Gemini session discovery), and agent factory (agent type routing).
 
 ## System Overview
 
@@ -394,14 +430,16 @@ graph TD
     Express + WebSocket"]
     Factory["Agent Factory"]
     Scanner["Session Scanner
-    (Claude + Codex)"]
+    (Claude + Codex + Gemini)"]
     Hooks["Hook Bridge
     (optional)"]
     Browser["Session Browser"]
     Claude["claude CLI
     (stream-json)"]
     Codex["codex exec --json"]
-    VSCode["Claude Code / Codex
+    Gemini["gemini -p ...
+    (stream-json)"]
+    VSCode["Claude Code / Codex / Gemini
     (VS Code / terminal)"]
     MCP["MCP Permission
     Server"]
@@ -409,6 +447,8 @@ graph TD
     JSONL files"]
     CodexJSONL["~/.codex/sessions/
     JSONL files"]
+    GeminiJSON["~/.gemini/tmp/
+    JSON files"]
 
     Phone -->|"cellular / internet"| Tunnel
     Phone -->|"VPN / LAN"| Hub
@@ -419,20 +459,31 @@ graph TD
     Hub --> Browser
     Factory -->|"claude agent"| Claude
     Factory -->|"codex agent"| Codex
+    Factory -->|"gemini agent"| Gemini
     Scanner -->|"auto-discover"| ClaudeJSONL
     Scanner -->|"auto-discover"| CodexJSONL
+    Scanner -->|"auto-discover"| GeminiJSON
     Hooks -->|"approvals + prompts"| VSCode
     VSCode -->|"writes"| ClaudeJSONL
     VSCode -->|"writes"| CodexJSONL
+    VSCode -->|"writes"| GeminiJSON
     Hub -->|"JSONL watcher"| ClaudeJSONL
     Hub -->|"Codex adapter"| CodexJSONL
+    Hub -->|"Gemini adapter"| GeminiJSON
     Claude --> MCP
     MCP -->|"phone approval"| Hub
     Browser -->|"reads"| ClaudeJSONL
     Browser -->|"reads"| CodexJSONL
+    Browser -->|"reads"| GeminiJSON
 ```
 
 See [docs/diagrams.md](docs/diagrams.md) for auth, tunnel, session, and hook flow diagrams.
+
+## Disclaimer
+
+THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS, COPYRIGHT HOLDERS, MARCO PENNELLI, OR PUGLIATECHS APS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+Use this software at your own risk. The author and the organization assume no responsibility for any damages, data loss, security incidents, or other consequences resulting from the use or misuse of this software.
 
 ## Author
 

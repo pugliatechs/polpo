@@ -301,7 +301,7 @@
             '</div>' +
             '<div class="card-meta">' +
               '<span>' + escapeHtml(inst.project || '') + '</span>' +
-              '<span class="agent-badge agent-' + (inst.agentType || 'claude') + '">' + (inst.agentType === 'codex' ? 'Codex' : 'Claude') + '</span>' +
+              '<span class="agent-badge agent-' + (inst.agentType || 'claude') + '">' + (inst.agentType === 'codex' ? 'Codex' : inst.agentType === 'gemini' ? 'Gemini' : 'Claude') + '</span>' +
             '</div>' +
             approvalHtml +
           '</div>'
@@ -397,7 +397,7 @@
       $detailStatus.textContent = inst.status;
     }
     $detailProject.textContent = '📁 ' + (inst.project || '');
-    $detailType.innerHTML = '<span class="agent-badge agent-' + (inst.agentType || 'claude') + '">' + (inst.agentType === 'codex' ? 'Codex' : 'Claude') + '</span>';
+    $detailType.innerHTML = '<span class="agent-badge agent-' + (inst.agentType || 'claude') + '">' + (inst.agentType === 'codex' ? 'Codex' : inst.agentType === 'gemini' ? 'Gemini' : 'Claude') + '</span>';
 
     // Takeover vs prompt input
     var canPrompt = inst.canReceivePrompts !== false;
@@ -1295,7 +1295,7 @@
           '</div>' +
           '<div class="card-meta">' +
             '<span>' + escapeHtml(s.project) + '</span>' +
-            '<span class="agent-badge agent-' + (s.agentType || 'claude') + '">' + (s.agentType === 'codex' ? 'Codex' : 'Claude') + '</span>' +
+            '<span class="agent-badge agent-' + (s.agentType || 'claude') + '">' + (s.agentType === 'codex' ? 'Codex' : s.agentType === 'gemini' ? 'Gemini' : 'Claude') + '</span>' +
           '</div>' +
         '</div>'
       );

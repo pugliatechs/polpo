@@ -23,11 +23,13 @@ class SessionScanner extends EventEmitter {
     this.projectsDir = options.projectsDir || path.join(os.homedir(), '.claude', 'projects');
     this.idleCheckInterval = options.idleCheckInterval || 30 * 1000;
     this.idleTimeout = options.idleTimeout || 10 * 60 * 1000;
+    this.scanInterval = options.scanInterval || 2000;
     this.sessions = new Map(); // sessionId -> { path, projectSlug, cwd, lastModified, registered }
     this.watchers = new Map(); // projectSlug -> fs.FSWatcher
     this.rootWatcher = null;
     this.creationWatcher = null;
     this.idleTimer = null;
+    this.scanTimer = null;
     this.closed = false;
   }
 
@@ -47,6 +49,10 @@ class SessionScanner extends EventEmitter {
     if (this.idleTimer) {
       clearInterval(this.idleTimer);
       this.idleTimer = null;
+    }
+    if (this.scanTimer) {
+      clearInterval(this.scanTimer);
+      this.scanTimer = null;
     }
     if (this.creationWatcher) {
       this.creationWatcher.close();
@@ -108,8 +114,11 @@ class SessionScanner extends EventEmitter {
         }
       });
       this.rootWatcher.on('error', () => {});
-    } catch {
-      // directory may have vanished
+    } catch (e) {
+      // fs.watch unavailable (ENOSPC) — fall back to periodic scanning
+      if (e.code === 'ENOSPC') {
+        this._startPolling();
+      }
     }
   }
 
@@ -154,8 +163,11 @@ class SessionScanner extends EventEmitter {
         this.watchers.delete(projectSlug);
       });
       this.watchers.set(projectSlug, watcher);
-    } catch {
-      // directory may not exist
+    } catch (e) {
+      // fs.watch unavailable (ENOSPC) — polling fallback is handled at root level
+      if (e.code === 'ENOSPC') {
+        this._startPolling();
+      }
     }
   }
 
@@ -200,6 +212,33 @@ class SessionScanner extends EventEmitter {
       projectName: this._extractProjectName(sessionInfo.cwd),
       firstPrompt: info.firstPrompt || null,
     });
+  }
+
+  /**
+   * Fall back to periodic scanning when fs.watch is unavailable (ENOSPC).
+   */
+  _startPolling() {
+    if (this.closed || this.scanTimer) return;
+    this.scanTimer = setInterval(() => {
+      if (this.closed) return;
+      this._scanAllProjects();
+    }, this.scanInterval);
+  }
+
+  /**
+   * Scan all project directories for active JSONL files.
+   */
+  _scanAllProjects() {
+    try {
+      const entries = fs.readdirSync(this.projectsDir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const projectDir = path.join(this.projectsDir, entry.name);
+        this._scanProjectDir(projectDir, entry.name);
+      }
+    } catch {
+      // projectsDir may have vanished
+    }
   }
 
   /**

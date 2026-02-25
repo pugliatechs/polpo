@@ -1,10 +1,11 @@
 /**
- * Session scanner — discovers sessions from Claude Code and Codex.
+ * Session scanner — discovers sessions from Claude Code, Codex, and Gemini.
  *
  * Claude sessions:  ~/.claude/projects/<slug>/<sessionId>.jsonl
  * Codex sessions:   ~/.codex/sessions/<threadId>.jsonl
+ * Gemini sessions:  ~/.gemini/tmp/<slug>/chats/session-*.json
  *
- * Scans JSONL files to extract metadata (session ID, first prompt,
+ * Scans JSONL/JSON files to extract metadata (session ID, first prompt,
  * timestamps, model). Only reads the first/last few lines for speed.
  */
 
@@ -15,13 +16,16 @@ const readline = require('readline');
 
 const CLAUDE_DIR = path.join(os.homedir(), '.claude', 'projects');
 const CODEX_DIR = path.join(os.homedir(), '.codex', 'sessions');
+const GEMINI_DIR = path.join(os.homedir(), '.gemini');
+const GEMINI_TMP_DIR = path.join(GEMINI_DIR, 'tmp');
+const GEMINI_PROJECTS_FILE = path.join(GEMINI_DIR, 'projects.json');
 
 /**
  * Scan sessions from Claude Code and/or Codex and return metadata.
  * @param {object} options
  * @param {number} options.maxAge - Max age in ms to include (default: 7 days)
  * @param {number} options.limit - Max sessions to return (default: 50)
- * @param {string} options.source - 'claude' | 'codex' | 'all' (default: 'all')
+ * @param {string} options.source - 'claude' | 'codex' | 'gemini' | 'all' (default: 'all')
  * @returns {Promise<Array>} sorted by lastActivity descending
  */
 async function scanSessions(options = {}) {
@@ -83,6 +87,60 @@ async function scanSessions(options = {}) {
         }
       } catch {
         continue;
+      }
+    }
+  }
+
+  // Scan Gemini sessions
+  if (source === 'all' || source === 'gemini') {
+    // Read projects.json for project slug → cwd mapping
+    let projectMap = {};
+    try {
+      const projectsData = JSON.parse(fs.readFileSync(GEMINI_PROJECTS_FILE, 'utf8'));
+      if (projectsData && projectsData.projects) {
+        // projects.json maps cwd → slug, we need slug → cwd
+        for (const [cwd, slug] of Object.entries(projectsData.projects)) {
+          projectMap[slug] = cwd;
+        }
+      }
+    } catch {
+      // No projects file or parse error
+    }
+
+    // Scan each project's chats/ directory
+    let slugDirs;
+    try {
+      slugDirs = fs.readdirSync(GEMINI_TMP_DIR, { withFileTypes: true })
+        .filter(d => d.isDirectory())
+        .map(d => d.name);
+    } catch {
+      slugDirs = [];
+    }
+
+    for (const slug of slugDirs) {
+      const chatsDir = path.join(GEMINI_TMP_DIR, slug, 'chats');
+      let files;
+      try {
+        files = fs.readdirSync(chatsDir)
+          .filter(f => f.startsWith('session-') && f.endsWith('.json'));
+      } catch {
+        continue;
+      }
+
+      for (const file of files) {
+        const filePath = path.join(chatsDir, file);
+        try {
+          const stat = fs.statSync(filePath);
+          if (stat.mtimeMs < cutoff) continue;
+
+          const meta = extractGeminiMetadata(filePath, projectMap[slug] || null);
+          if (meta) {
+            meta.agentType = 'gemini';
+            sessions.push(meta);
+          }
+        } catch {
+          continue;
+        }
       }
     }
   }
@@ -207,11 +265,16 @@ function readLines(filePath, n, mode) {
  * @returns {Promise<Array>} conversation messages
  */
 async function loadHistory(sessionId) {
-  // Find the JSONL file across all project directories
+  // Find the session file across all project directories
   const filePath = findSessionFile(sessionId);
   if (!filePath) return [];
 
-  // Detect format from the first line
+  // Gemini sessions are .json files (not .jsonl)
+  if (filePath.endsWith('.json')) {
+    return loadGeminiHistory(filePath);
+  }
+
+  // Detect JSONL format from the first line
   const firstLines = await readLines(filePath, 1, 'head');
   let isCodex = false;
   if (firstLines.length > 0) {
@@ -482,6 +545,91 @@ function loadCodexHistory(filePath) {
 }
 
 /**
+ * Load conversation history from a Gemini session JSON file.
+ * Gemini format: { sessionId, messages: [{ id, timestamp, type, content, model?, thoughts? }] }
+ */
+function loadGeminiHistory(filePath) {
+  try {
+    const raw = fs.readFileSync(filePath, 'utf8');
+    const data = JSON.parse(raw);
+    const messages = data.messages || [];
+    const result = [];
+
+    for (const msg of messages) {
+      const timestamp = msg.timestamp || null;
+
+      if (msg.type === 'user') {
+        const text = extractGeminiContent(msg.content);
+        if (text) {
+          result.push({
+            role: 'user',
+            content: text,
+            timestamp,
+          });
+        }
+        continue;
+      }
+
+      if (msg.type === 'gemini') {
+        const content = msg.content;
+        const displayContent = msg.displayContent;
+
+        // displayContent often has the rendered output; fallback to content
+        const text = extractGeminiContent(displayContent) || extractGeminiContent(content);
+        if (text) {
+          result.push({
+            role: 'assistant',
+            content: text,
+            contentType: 'text',
+            timestamp,
+          });
+        }
+
+        // Extract tool calls from content if it's an array of parts
+        if (Array.isArray(content)) {
+          for (const part of content) {
+            if (part && part.functionCall) {
+              result.push({
+                role: 'assistant',
+                content: JSON.stringify({
+                  type: 'tool_use',
+                  name: part.functionCall.name || 'unknown',
+                  input: part.functionCall.args || {},
+                  id: part.functionCall.id || msg.id,
+                }),
+                contentType: 'tool_use',
+                timestamp,
+              });
+            }
+            if (part && part.functionResponse) {
+              const output = typeof part.functionResponse.response === 'string'
+                ? part.functionResponse.response
+                : JSON.stringify(part.functionResponse.response || '');
+              const truncated = output.length > 2000
+                ? output.slice(0, 2000) + '\n... (' + output.length + ' chars)'
+                : output;
+              result.push({
+                role: 'tool',
+                content: truncated,
+                contentType: 'tool_result',
+                toolUseId: part.functionResponse.id || msg.id,
+                isError: false,
+                timestamp,
+              });
+            }
+          }
+        }
+        continue;
+      }
+    }
+
+    return result;
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Recursively find all .jsonl files in a directory tree.
  * Used for Codex sessions which may be in YYYY/MM/DD subdirs.
  * @param {string} dirPath - Root directory to scan
@@ -585,7 +733,63 @@ async function extractCodexMetadata(filePath) {
 }
 
 /**
- * Find the JSONL file for a session ID across Claude and Codex directories.
+ * Extract metadata from a Gemini session JSON file.
+ * Gemini format: { sessionId, projectHash, startTime, lastUpdated, messages: [...], summary? }
+ * Message format: { id, timestamp, type: 'user'|'gemini', content, model?, thoughts? }
+ */
+function extractGeminiMetadata(filePath, cwd) {
+  try {
+    const raw = fs.readFileSync(filePath, 'utf8');
+    const data = JSON.parse(raw);
+
+    const sessionId = data.sessionId || path.basename(filePath, '.json');
+    const messages = data.messages || [];
+
+    let firstPrompt = null;
+    let model = null;
+
+    for (const msg of messages) {
+      if (msg.type === 'user' && !firstPrompt) {
+        const text = extractGeminiContent(msg.content);
+        if (text) firstPrompt = text.slice(0, 120);
+      }
+      if (msg.type === 'gemini' && msg.model && !model) {
+        model = msg.model;
+      }
+      if (firstPrompt && model) break;
+    }
+
+    return {
+      sessionId,
+      slug: null,
+      cwd: cwd || null,
+      project: cwd ? path.basename(cwd) : 'gemini',
+      firstPrompt: firstPrompt || data.summary || null,
+      model: model || null,
+      firstActivity: data.startTime || null,
+      lastActivity: data.lastUpdated || data.startTime || null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Extract text content from a Gemini message content field.
+ * Content can be a string, or an array of parts (PartListUnion).
+ */
+function extractGeminiContent(content) {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    for (const part of content) {
+      if (part && typeof part.text === 'string') return part.text;
+    }
+  }
+  return null;
+}
+
+/**
+ * Find the JSONL/JSON file for a session ID across Claude, Codex, and Gemini directories.
  */
 function findSessionFile(sessionId) {
   // Check Claude projects
@@ -611,6 +815,45 @@ function findSessionFile(sessionId) {
   const nested = findJsonlRecursive(CODEX_DIR, 0);
   for (const fp of nested) {
     if (path.basename(fp, '.jsonl') === sessionId) return fp;
+  }
+
+  // Check Gemini sessions
+  let slugDirs;
+  try {
+    slugDirs = fs.readdirSync(GEMINI_TMP_DIR, { withFileTypes: true })
+      .filter(d => d.isDirectory())
+      .map(d => d.name);
+  } catch {
+    slugDirs = [];
+  }
+
+  for (const slug of slugDirs) {
+    const chatsDir = path.join(GEMINI_TMP_DIR, slug, 'chats');
+    let files;
+    try {
+      files = fs.readdirSync(chatsDir)
+        .filter(f => f.startsWith('session-') && f.endsWith('.json'));
+    } catch {
+      continue;
+    }
+
+    // Direct filename match (scanner derives sessionId from filename stem)
+    const directMatch = `session-${sessionId}.json`;
+    if (files.includes(directMatch)) {
+      return path.join(chatsDir, directMatch);
+    }
+
+    // Match by JSON sessionId field (UUID inside the file)
+    for (const file of files) {
+      const filePath = path.join(chatsDir, file);
+      try {
+        const raw = fs.readFileSync(filePath, 'utf8');
+        const data = JSON.parse(raw);
+        if (data.sessionId === sessionId) return filePath;
+      } catch {
+        continue;
+      }
+    }
   }
 
   return null;

@@ -3,8 +3,10 @@ const url = require('url');
 const { validateWsAuth } = require('./auth');
 const { JsonlWatcher } = require('./jsonl-watcher');
 const { CodexJsonlAdapter } = require('./codex-jsonl-adapter');
+const { GeminiJsonAdapter } = require('./gemini-json-adapter');
 const { SessionScanner } = require('./session-scanner');
 const { CodexScanner } = require('./codex-scanner');
+const { GeminiScanner } = require('./gemini-scanner');
 
 function setupWebSocket(server, instanceManager, getAuthState) {
   const wss = new WebSocket.Server({ server });
@@ -87,15 +89,17 @@ function setupWebSocket(server, instanceManager, getAuthState) {
   });
 
   /**
-   * Start a JSONL watcher for an instance (shared by hook-bridge and auto-discovery).
-   * Uses CodexJsonlAdapter for Codex sessions, JsonlWatcher for Claude sessions.
+   * Start a file watcher for an instance (shared by hook-bridge and auto-discovery).
+   * Uses CodexJsonlAdapter for Codex, GeminiJsonAdapter for Gemini, JsonlWatcher for Claude.
    */
   function startWatcherForInstance(instanceId, transcriptPath, agentType) {
     if (!transcriptPath || activeWatchers.has(instanceId)) return;
 
     const watcher = agentType === 'codex'
       ? new CodexJsonlAdapter(transcriptPath)
-      : new JsonlWatcher(transcriptPath);
+      : agentType === 'gemini'
+        ? new GeminiJsonAdapter(transcriptPath)
+        : new JsonlWatcher(transcriptPath);
     activeWatchers.set(instanceId, watcher);
 
     watcher.on('message', (msg) => {
@@ -116,8 +120,12 @@ function setupWebSocket(server, instanceManager, getAuthState) {
 
     watcher.on('error', () => {});
 
-    // Skip to end — phone loads history via API when opening the instance
-    watcher.start({ catchUp: false });
+    // Gemini sessions are short-lived (one-shot) — the JSON file may already
+    // contain the full conversation by the time the watcher starts.
+    // For Claude/Codex, catchUp is false because the phone loads history via
+    // the session history API and JSONL files can be very large.
+    const shouldCatchUp = agentType === 'gemini';
+    watcher.start({ catchUp: shouldCatchUp });
   }
 
   // --- Auto-discovery: scan for active JSONL sessions ---
@@ -195,6 +203,43 @@ function setupWebSocket(server, instanceManager, getAuthState) {
 
   codexScanner.start();
 
+  // --- Gemini auto-discovery: scan for active Gemini sessions ---
+  const geminiScanner = new GeminiScanner();
+
+  geminiScanner.on('session:discovered', (data) => {
+    const { sessionId, transcriptPath, cwd, projectName, firstPrompt } = data;
+
+    if (sessionToInstance.has(sessionId)) return;
+
+    const instance = instanceManager.register({
+      name: firstPrompt || projectName || 'Gemini',
+      type: 'terminal',
+      project: projectName || 'gemini',
+      cwd,
+      sessionId,
+      transcriptPath,
+      firstPrompt: firstPrompt || null,
+      canReceivePrompts: false,
+      agentType: 'gemini',
+    });
+
+    sessionToInstance.set(sessionId, instance.id);
+    instanceManager.updateStatus(instance.id, 'busy');
+
+    startWatcherForInstance(instance.id, transcriptPath, 'gemini');
+  });
+
+  geminiScanner.on('session:inactive', (data) => {
+    const instanceId = sessionToInstance.get(data.sessionId);
+    if (instanceId) {
+      instanceManager.updateStatus(instanceId, 'disconnected');
+      instanceManager.unregister(instanceId);
+      sessionToInstance.delete(data.sessionId);
+    }
+  });
+
+  geminiScanner.start();
+
   wss.on('connection', (ws, req) => {
     const authState = typeof getAuthState === 'function' ? getAuthState() : getAuthState;
     if (!validateWsAuth(authState, req)) {
@@ -256,6 +301,7 @@ function setupWebSocket(server, instanceManager, getAuthState) {
   // Expose scanners for cleanup
   wss.scanner = scanner;
   wss.codexScanner = codexScanner;
+  wss.geminiScanner = geminiScanner;
 
   return wss;
 }

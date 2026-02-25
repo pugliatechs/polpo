@@ -16,10 +16,12 @@ class JsonlWatcher extends EventEmitter {
     this.filePath = filePath;
     this.offset = 0;
     this.watcher = null;
+    this.pollTimer = null;
     this.lineBuffer = '';
     this.closed = false;
     this.debounceTimer = null;
     this.debounceMs = options.debounceMs || 100;
+    this.pollMs = options.pollMs || 500;
     this.seenUuids = new Set();
     this.assistantMessageIds = new Set();
   }
@@ -58,14 +60,30 @@ class JsonlWatcher extends EventEmitter {
         if (this.closed) return;
         if (filename === basename && fs.existsSync(this.filePath)) {
           this.watcher.close();
+          this.watcher = null;
           // Read any content written during creation before starting the watcher
           this._readFromOffset(0).then(() => this._startWatching());
         }
       });
       this.watcher.on('error', () => {});
-    } catch {
-      // Directory may not exist
+    } catch (e) {
+      // fs.watch unavailable (ENOSPC) — fall back to polling for file creation
+      if (e.code === 'ENOSPC') {
+        this._pollForCreation();
+      }
     }
+  }
+
+  _pollForCreation() {
+    if (this.closed) return;
+    this.pollTimer = setInterval(() => {
+      if (this.closed) return;
+      if (fs.existsSync(this.filePath)) {
+        clearInterval(this.pollTimer);
+        this.pollTimer = null;
+        this._readFromOffset(0).then(() => this._startWatching());
+      }
+    }, this.pollMs);
   }
 
   _startWatching() {
@@ -77,8 +95,21 @@ class JsonlWatcher extends EventEmitter {
       });
       this.watcher.on('error', (err) => this.emit('error', err));
     } catch (e) {
-      this.emit('error', e);
+      // fs.watch unavailable (ENOSPC) — fall back to polling
+      if (e.code === 'ENOSPC') {
+        this._startPolling();
+      } else {
+        this.emit('error', e);
+      }
     }
+  }
+
+  _startPolling() {
+    if (this.closed) return;
+    this.pollTimer = setInterval(() => {
+      if (this.closed) return;
+      this._onFileChange();
+    }, this.pollMs);
   }
 
   _onFileChange() {
@@ -241,6 +272,10 @@ class JsonlWatcher extends EventEmitter {
   close() {
     this.closed = true;
     clearTimeout(this.debounceTimer);
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
     if (this.watcher) {
       this.watcher.close();
       this.watcher = null;

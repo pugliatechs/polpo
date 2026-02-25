@@ -52,6 +52,7 @@ describe('CodexScanner', () => {
       sessionsDir,
       idleCheckInterval: 100,
       idleTimeout: 5000,
+      scanInterval: 500,
     });
   });
 
@@ -214,14 +215,16 @@ describe('CodexScanner', () => {
     scanner.start();
     await new Promise((r) => setTimeout(r, 200));
 
-    // Create nested dir after scanner is running
+    // Create nested dirs and a JSONL file — recursive fs.watch picks it up,
+    // or polling fallback finds it on ENOSPC systems
     const nestedDir = path.join(sessionsDir, '2026', '02', '22');
     fs.mkdirSync(nestedDir, { recursive: true });
-    await new Promise((r) => setTimeout(r, 200));
 
     const sessionId = 'rollout-' + crypto.randomUUID();
     createCodexJsonl(nestedDir, sessionId, { cwd: '/tmp/dynamic' });
-    await new Promise((r) => setTimeout(r, 500));
+
+    // Wait enough for either fs.watch recursive or polling fallback (scanInterval=500ms)
+    await new Promise((r) => setTimeout(r, 1500));
 
     assert.ok(discovered.some(d => d.sessionId === sessionId), 'Should discover session in dynamically created subdir');
   });

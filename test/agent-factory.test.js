@@ -41,4 +41,22 @@ describe('AgentFactory', () => {
     assert.equal(agent.model, 'gpt-5-codex');
     assert.equal(agent.permissionMode, 'bypass');
   });
+
+  it('returns GeminiAgent for gemini type', () => {
+    const agent = createAgent('gemini', { cwd: '/tmp' });
+    assert.equal(agent.constructor.name, 'GeminiAgent');
+  });
+
+  it('passes options through to GeminiAgent', () => {
+    const agent = createAgent('gemini', {
+      name: 'Gemini Task',
+      cwd: '/home/user/project',
+      model: 'flash',
+      permissionMode: 'bypass',
+    });
+    assert.equal(agent.name, 'Gemini Task');
+    assert.equal(agent.cwd, '/home/user/project');
+    assert.equal(agent.model, 'flash');
+    assert.equal(agent.permissionMode, 'bypass');
+  });
 });

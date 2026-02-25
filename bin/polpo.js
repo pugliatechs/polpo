@@ -63,9 +63,9 @@ function printHelp() {
     --name <name>       Display name for this session
     --cwd <dir>         Project directory to work in (default: current)
     --resume <id>       Resume an existing session
-    --model <model>     Model to use (e.g. opus, sonnet for Claude; gpt-5-codex for Codex)
+    --model <model>     Model to use (e.g. opus, sonnet for Claude; flash, pro for Gemini)
     --permissions <m>   Permission mode: default | bypass (default: default)
-    --agent <type>      Agent type: claude | codex (default: claude)
+    --agent <type>      Agent type: claude | codex | gemini (default: claude)
     --server <url>      Polpo server WebSocket URL (default: ws://127.0.0.1:7890)
     --token <tok>       Auth token (or set POLPO_TOKEN env var)
 
@@ -95,6 +95,9 @@ function printHelp() {
 
     # Start a Codex session
     polpo session --agent codex --cwd /path/to/project --name "Codex task"
+
+    # Start a Gemini session
+    polpo session --agent gemini --cwd /path/to/project --name "Gemini task"
 
     # Resume an existing session from your phone
     polpo session --resume <session-id>

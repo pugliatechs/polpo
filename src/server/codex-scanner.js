@@ -28,9 +28,11 @@ class CodexScanner extends EventEmitter {
     this.sessionsDir = options.sessionsDir || path.join(os.homedir(), '.codex', 'sessions');
     this.idleCheckInterval = options.idleCheckInterval || 30 * 1000;
     this.idleTimeout = options.idleTimeout || 10 * 60 * 1000;
+    this.scanInterval = options.scanInterval || 2000;
     this.sessions = new Map(); // sessionId -> { path, lastModified, registered }
     this.watchers = new Map(); // dirPath -> fs.FSWatcher
     this.idleTimer = null;
+    this.scanTimer = null;
     this.closed = false;
   }
 
@@ -40,7 +42,7 @@ class CodexScanner extends EventEmitter {
       return;
     }
 
-    this._watchDir(this.sessionsDir);
+    this._watchRecursive();
     this._scanRecursive(this.sessionsDir);
     this._startIdleCheck();
   }
@@ -50,6 +52,10 @@ class CodexScanner extends EventEmitter {
     if (this.idleTimer) {
       clearInterval(this.idleTimer);
       this.idleTimer = null;
+    }
+    if (this.scanTimer) {
+      clearInterval(this.scanTimer);
+      this.scanTimer = null;
     }
     for (const w of this.watchers.values()) {
       w.close();
@@ -72,7 +78,7 @@ class CodexScanner extends EventEmitter {
           if (filename === path.basename(parent) && fs.existsSync(this.sessionsDir)) {
             w.close();
             this.watchers.delete('__creation__');
-            this._watchDir(this.sessionsDir);
+            this._watchRecursive();
             this._scanRecursive(this.sessionsDir);
             this._startIdleCheck();
           } else if (filename === path.basename(parent) && fs.existsSync(parent)) {
@@ -91,7 +97,7 @@ class CodexScanner extends EventEmitter {
         if (filename === basename && fs.existsSync(this.sessionsDir)) {
           w.close();
           this.watchers.delete('__creation__');
-          this._watchDir(this.sessionsDir);
+          this._watchRecursive();
           this._scanRecursive(this.sessionsDir);
           this._startIdleCheck();
         }
@@ -104,41 +110,46 @@ class CodexScanner extends EventEmitter {
   }
 
   /**
-   * Watch a directory. If a subdirectory appears, start watching it too.
-   * If a JSONL file appears or changes, handle it.
+   * Watch the sessions directory recursively for JSONL file changes.
+   * Uses fs.watch({ recursive: true }) to detect changes in all subdirectories
+   * without needing to cascade watchers manually.
    */
-  _watchDir(dirPath) {
-    if (this.closed || this.watchers.has(dirPath)) return;
+  _watchRecursive() {
+    if (this.closed || this.watchers.has(this.sessionsDir)) return;
 
     try {
-      const watcher = fs.watch(dirPath, (eventType, filename) => {
+      const watcher = fs.watch(this.sessionsDir, { recursive: true }, (eventType, filename) => {
         if (this.closed || !filename) return;
 
-        const fullPath = path.join(dirPath, filename);
-
         if (filename.endsWith('.jsonl')) {
+          const fullPath = path.join(this.sessionsDir, filename);
           const sessionId = this._deriveSessionId(fullPath);
           this._handleJsonlChange(sessionId, fullPath);
-          return;
-        }
-
-        // Check if a new subdirectory appeared (YYYY, MM, DD)
-        try {
-          if (fs.statSync(fullPath).isDirectory() && !this.watchers.has(fullPath)) {
-            this._watchDir(fullPath);
-            this._scanRecursive(fullPath);
-          }
-        } catch {
-          // file/dir disappeared
         }
       });
-      watcher.on('error', () => {
-        this.watchers.delete(dirPath);
+      watcher.on('error', (err) => {
+        if (err && err.code === 'ENOSPC') {
+          // Recursive watch hit inotify limit for new subdirs — fall back to polling
+          watcher.close();
+          this.watchers.delete(this.sessionsDir);
+          this._startPolling();
+        }
       });
-      this.watchers.set(dirPath, watcher);
-    } catch {
-      // directory may not exist
+      this.watchers.set(this.sessionsDir, watcher);
+    } catch (e) {
+      // fs.watch unavailable (ENOSPC) — fall back to periodic scanning
+      if (e.code === 'ENOSPC') {
+        this._startPolling();
+      }
     }
+  }
+
+  _startPolling() {
+    if (this.closed || this.scanTimer) return;
+    this.scanTimer = setInterval(() => {
+      if (this.closed) return;
+      this._scanRecursive(this.sessionsDir);
+    }, this.scanInterval);
   }
 
   /**
@@ -160,8 +171,6 @@ class CodexScanner extends EventEmitter {
       const fullPath = path.join(dirPath, entry.name);
 
       if (entry.isDirectory()) {
-        // Recurse into subdirectory and watch it
-        this._watchDir(fullPath);
         this._scanRecursive(fullPath);
         continue;
       }
