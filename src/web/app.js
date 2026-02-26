@@ -660,6 +660,16 @@
     } else if (name === 'Task' || name === 'TodoWrite') {
       description = tool.input && tool.input.description || '';
       inputSummary = '';
+    } else if (name === 'ExitPlanMode') {
+      description = 'Plan ready for review';
+      inputSummary = '';
+    } else if (name === 'EnterPlanMode') {
+      description = 'Entering plan mode';
+      inputSummary = '';
+    } else if (name === 'AskUserQuestion') {
+      var qs = tool.input && tool.input.questions || [];
+      description = qs.length === 1 ? qs[0].question : qs.length + ' questions';
+      inputSummary = '';
     } else {
       var rawInput = JSON.stringify(tool.input || {});
       if (rawInput.length > 150) rawInput = rawInput.slice(0, 150) + '...';

@@ -292,17 +292,33 @@ function createApiRouter(instanceManager, getAuthState) {
       approvalType = 'plan';
       description = toolName === 'ExitPlanMode' ? 'Plan ready for review' : 'Entering plan mode';
       // Read plan file content if available (restrict to ~/.claude/plans/)
+      const claudePlansDir = path.join(os.homedir(), '.claude', 'plans');
       if (toolInput && toolInput.planFile) {
-        const claudePlansDir = path.join(os.homedir(), '.claude', 'plans');
         const resolvedPlan = path.resolve(toolInput.planFile);
         if (resolvedPlan.startsWith(claudePlansDir + path.sep)) {
           planFile = resolvedPlan;
           try {
-            const planContent = fs.readFileSync(resolvedPlan, 'utf8');
-            command = planContent;
+            command = fs.readFileSync(resolvedPlan, 'utf8');
           } catch (e) {
             command = '';
           }
+        }
+      }
+      // ExitPlanMode doesn't include planFile in its input — the plan was
+      // written to ~/.claude/plans/ by a preceding Write tool call.
+      // Fall back to the most recently modified .md file in that directory.
+      if (!command && toolName === 'ExitPlanMode') {
+        try {
+          const files = fs.readdirSync(claudePlansDir)
+            .filter(f => f.endsWith('.md'))
+            .map(f => ({ name: f, mtime: fs.statSync(path.join(claudePlansDir, f)).mtimeMs }))
+            .sort((a, b) => b.mtime - a.mtime);
+          if (files.length > 0) {
+            planFile = path.join(claudePlansDir, files[0].name);
+            command = fs.readFileSync(planFile, 'utf8');
+          }
+        } catch (e) {
+          // ignore — plan content will show fallback text
         }
       }
     } else if (isQuestion) {
