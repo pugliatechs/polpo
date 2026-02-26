@@ -306,19 +306,24 @@ function createApiRouter(instanceManager, getAuthState) {
       }
       // ExitPlanMode doesn't include planFile in its input — the plan was
       // written to ~/.claude/plans/ by a preceding Write tool call.
-      // Fall back to the most recently modified .md file in that directory.
-      if (!command && toolName === 'ExitPlanMode') {
-        try {
-          const files = fs.readdirSync(claudePlansDir)
-            .filter(f => f.endsWith('.md'))
-            .map(f => ({ name: f, mtime: fs.statSync(path.join(claudePlansDir, f)).mtimeMs }))
-            .sort((a, b) => b.mtime - a.mtime);
-          if (files.length > 0) {
-            planFile = path.join(claudePlansDir, files[0].name);
-            command = fs.readFileSync(planFile, 'utf8');
-          }
-        } catch (e) {
-          // ignore — plan content will show fallback text
+      // Look backwards through this instance's conversation for the Write
+      // that targeted ~/.claude/plans/ to find the correct plan file.
+      if (!command && toolName === 'ExitPlanMode' && inst) {
+        const planPrefix = claudePlansDir + path.sep;
+        for (let i = inst.conversation.length - 1; i >= 0; i--) {
+          const m = inst.conversation[i];
+          if (m.contentType !== 'tool_use') continue;
+          try {
+            const tool = JSON.parse(m.content);
+            if (tool.name === 'Write' && tool.input && tool.input.file_path) {
+              const resolved = path.resolve(tool.input.file_path);
+              if (resolved.startsWith(planPrefix)) {
+                planFile = resolved;
+                command = fs.readFileSync(resolved, 'utf8');
+                break;
+              }
+            }
+          } catch (e) { continue; }
         }
       }
     } else if (isQuestion) {
