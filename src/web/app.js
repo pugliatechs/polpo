@@ -1039,7 +1039,7 @@
         '</label>'
       );
       return (
-        '<div class="question-item" data-qi="' + qi + '" data-multi="' + (q.multiSelect ? '1' : '0') + '">' +
+        '<div class="question-item" data-qi="' + qi + '" data-multi="' + (q.multiSelect ? '1' : '0') + '" data-question="' + escapeHtml(q.question) + '">' +
           (q.header ? '<div class="question-tag">' + escapeHtml(q.header) + '</div>' : '') +
           '<div class="question-text">' + escapeHtml(q.question) + '</div>' +
           '<div class="question-options">' + optionsHtml + '</div>' +
@@ -1069,7 +1069,7 @@
     var answers = {};
     var items = $questionList.querySelectorAll('.question-item');
     for (var i = 0; i < items.length; i++) {
-      var qi = items[i].getAttribute('data-qi');
+      var questionText = items[i].getAttribute('data-question') || items[i].getAttribute('data-qi');
       var isMulti = items[i].getAttribute('data-multi') === '1';
       var checked = items[i].querySelectorAll('input:checked');
       var values = [];
@@ -1081,7 +1081,7 @@
         }
         if (val) values.push(val);
       }
-      answers[qi] = isMulti ? values : (values[0] || '');
+      answers[questionText] = isMulti ? values.join(', ') : (values[0] || '');
     }
     return answers;
   }
