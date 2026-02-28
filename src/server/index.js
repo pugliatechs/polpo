@@ -63,6 +63,26 @@ function createServer(options = {}) {
 
   app.use(express.json({ limit: '15mb' }));
 
+  // CSRF protection: block cross-origin requests to API endpoints.
+  // Browsers send Origin or Referer headers on cross-origin requests.
+  // A malicious page at evil.com fetching http://localhost:7890/api/* will
+  // be blocked because its Origin won't match the Host header.
+  app.use('/api', (req, res, next) => {
+    const origin = req.headers['origin'];
+    if (origin) {
+      const host = req.headers['host'];
+      try {
+        const originHost = new URL(origin).host;
+        if (originHost !== host) {
+          return res.status(403).json({ error: 'Cross-origin request blocked' });
+        }
+      } catch {
+        return res.status(403).json({ error: 'Invalid origin' });
+      }
+    }
+    next();
+  });
+
   // --- Public routes (before auth) ---
 
   // Health check

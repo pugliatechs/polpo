@@ -326,6 +326,26 @@ function setupWebSocket(server, instanceManager, getAuthState) {
   piScanner.start();
 
   wss.on('connection', (ws, req) => {
+    // CSRF protection: validate Origin header for browser connections.
+    // Browsers always send Origin on WebSocket upgrades. A malicious page
+    // at https://evil.com opening ws://localhost:7890 will have Origin
+    // "https://evil.com" which won't match Host "localhost:7890".
+    // Non-browser clients (agents) don't send Origin, so they pass through.
+    const origin = req.headers['origin'];
+    if (origin) {
+      const host = req.headers['host'];
+      try {
+        const originHost = new URL(origin).host;
+        if (originHost !== host) {
+          ws.close(4003, 'Origin not allowed');
+          return;
+        }
+      } catch {
+        ws.close(4003, 'Invalid origin');
+        return;
+      }
+    }
+
     const authState = typeof getAuthState === 'function' ? getAuthState() : getAuthState;
     if (!validateWsAuth(authState, req)) {
       ws.close(4001, 'Unauthorized');

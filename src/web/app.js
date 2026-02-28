@@ -541,7 +541,8 @@
   function appendMessage(msg) {
     // For tool_result: try to merge into the preceding tool_use block
     if (msg.contentType === 'tool_result' && msg.toolUseId) {
-      var toolBlock = $conversation.querySelector('[data-tool-id="' + msg.toolUseId + '"]');
+      var safeId = CSS.escape(msg.toolUseId);
+      var toolBlock = $conversation.querySelector('[data-tool-id="' + safeId + '"]');
       if (toolBlock) {
         var output = msg.content || '';
         output = output.replace(/<\/?tool_use_error>/g, '');

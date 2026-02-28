@@ -142,7 +142,7 @@ function createApiRouter(instanceManager, getAuthState) {
     }
     // Prevent stored XSS: only serve images inline, force-download everything else
     const ext = path.extname(filePath).toLowerCase();
-    const safeImageExts = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg'];
+    const safeImageExts = ['.jpg', '.jpeg', '.png', '.gif', '.webp'];
     if (!safeImageExts.includes(ext)) {
       res.set('Content-Disposition', 'attachment');
     }
