@@ -82,6 +82,8 @@ Navigate to `http://<your-computer-ip>:7890` on your phone's browser.
 
 The dashboard shows active sessions, past session history, and lets you send prompts, watch tool calls, approve or reject actions, and abort tasks.
 
+> **Security**: Running on localhost alone does not protect you. Use `--tunnel` with auth for internet access, or connect via VPN for private access. Read the [Security](#security) section before exposing Polpo to any network.
+
 ## Features
 
 <p align="center">
@@ -117,7 +119,37 @@ The dashboard shows active sessions, past session history, and lets you send pro
 
 ## Security
 
-When exposing Polpo over a tunnel or untrusted network, authentication prevents unauthorized access. Auth is **auto-enabled** for tunnels and can be manually enabled for any deployment.
+Polpo gives your phone full control over coding agents running on your machine: sending prompts, approving tool calls, reading conversation output. Securing this access is critical.
+
+### Recommended Setup
+
+**Option A: Tunnel + Auth (internet access from anywhere)**
+
+Use `--tunnel` with an auth mode. This exposes Polpo via a public URL with authentication enabled. Best when you need access from cellular, a different network, or when you don't control the network.
+
+```bash
+# Token-only (single-use URL, auto-generated)
+polpo server --tunnel
+
+# Token + 4-digit PIN (displayed in terminal)
+polpo server --tunnel --auth pin
+
+# Token + TOTP via authenticator app (highest security)
+polpo server --tunnel --auth paranoid
+```
+
+**Option B: VPN to your machine (no public exposure)**
+
+Connect your phone to the same network as your machine via a VPN (WireGuard, Tailscale, ZeroTier, etc.), then access Polpo directly at `http://<machine-ip>:7890`. No tunnel, no public URL. The connection stays private within your VPN.
+
+```bash
+# Start without tunnel - accessible only on local/VPN network
+polpo server
+```
+
+### Why Localhost Is Not Enough
+
+Running on `localhost` does not make Polpo safe. A malicious webpage you visit in your browser can open a WebSocket to `ws://localhost:7890` and read all session data (tool calls, file contents, API keys) via a CSRF attack. Polpo mitigates this with **Origin header validation** on both WebSocket and API connections: the server rejects any request whose Origin doesn't match its own host. This blocks cross-origin attacks from malicious pages while allowing legitimate connections from the Polpo dashboard and agents.
 
 ### Auth Modes
 
@@ -127,17 +159,28 @@ When exposing Polpo over a tunnel or untrusted network, authentication prevents 
 | **pin** | `--auth pin` | URL token + 4-digit PIN | Yes | Shared networks, added protection |
 | **paranoid** | `--auth paranoid` | URL token + TOTP (6-digit) | Yes | Long-lived tunnels, highest security |
 
+Auth is **auto-enabled** when using `--tunnel`. For LAN or VPN deployments, you can enable it manually with `--auth <mode>`.
+
 ### How It Works
 
 <p align="center">
   <img src="assets/auth.jpeg" alt="TOTP authentication page" width="300">
 </p>
 
-- **Token**: A `crypto.randomBytes(32)` base64url token is baked into the QR code URL. It is single-use - after the first scan, it is burned and cannot be reused.
+- **Token**: A `crypto.randomBytes(32)` base64url token is baked into the QR code URL. It is single-use — after the first scan, it is burned and cannot be reused.
 - **PIN**: A 4-digit PIN is displayed in the terminal. After scanning the QR code, the phone must enter the PIN. After 3 failed attempts, a new PIN is generated.
 - **TOTP**: Uses RFC 6238 TOTP with a persistent secret stored in `~/.config/polpo/totp.json`. On first run, the secret and `otpauth://` URI are displayed. Add it to any authenticator app.
 - **Sessions**: After authentication, a session cookie (`polpo_session`, HttpOnly, SameSite) is set. Subsequent requests use the cookie.
-- **Agents**: Agents and hooks use the raw token via `Authorization: Bearer <token>` header - the token is not burned for agent connections.
+- **Agents**: Agents and hooks use the raw token via `Authorization: Bearer <token>` header — the token is not burned for agent connections.
+
+### Built-in Protections
+
+- **CSRF (Cross-Site Request Forgery)**: Origin header validation on WebSocket and API endpoints. Cross-origin requests from malicious pages are rejected.
+- **Command injection**: All CLI invocations use `execFile` (not `exec`). Arguments are passed as arrays, never shell-concatenated.
+- **Path traversal**: File access endpoints validate resolved paths stay within expected directories.
+- **XSS (Cross-Site Scripting)**: All user and agent content is escaped via `escapeHtml()` before rendering. SVG uploads are force-downloaded, not served inline.
+- **Rate limiting**: Auth verification (10/min), session creation (10/min), and file uploads (30/min) are rate-limited per IP.
+- **Timing-safe comparison**: Token and TOTP verification use `crypto.timingSafeEqual` to prevent timing attacks.
 
 ### Usage
 
@@ -151,7 +194,7 @@ polpo server --tunnel --auth pin
 # Tunnel with TOTP
 polpo server --tunnel --auth paranoid
 
-# LAN with manual auth
+# LAN/VPN with manual auth
 polpo server --auth token
 
 # Agents pass the token
