@@ -59,4 +59,36 @@ describe('AgentFactory', () => {
     assert.equal(agent.model, 'flash');
     assert.equal(agent.permissionMode, 'bypass');
   });
+
+  it('returns OpencodeAgent for opencode type', () => {
+    const agent = createAgent('opencode', { cwd: '/tmp' });
+    assert.equal(agent.constructor.name, 'OpencodeAgent');
+  });
+
+  it('passes options through to OpencodeAgent', () => {
+    const agent = createAgent('opencode', {
+      name: 'OpenCode Task',
+      cwd: '/home/user/project',
+      model: 'ollama/llama3',
+    });
+    assert.equal(agent.name, 'OpenCode Task');
+    assert.equal(agent.cwd, '/home/user/project');
+    assert.equal(agent.model, 'ollama/llama3');
+  });
+
+  it('returns PiAgent for pi type', () => {
+    const agent = createAgent('pi', { cwd: '/tmp' });
+    assert.equal(agent.constructor.name, 'PiAgent');
+  });
+
+  it('passes options through to PiAgent', () => {
+    const agent = createAgent('pi', {
+      name: 'Pi Task',
+      cwd: '/home/user/project',
+      model: 'openai/gpt-4o',
+    });
+    assert.equal(agent.name, 'Pi Task');
+    assert.equal(agent.cwd, '/home/user/project');
+    assert.equal(agent.model, 'openai/gpt-4o');
+  });
 });

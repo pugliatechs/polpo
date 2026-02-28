@@ -4,29 +4,31 @@
   <img src="assets/logo.png" alt="Polpo" width="240" height="240">
 </p>
 
-<p align="center"><strong>Work on Claude Code, Codex, and Gemini from your phone.</strong></p>
+<p align="center"><strong>Work on Claude Code, Codex, Gemini, OpenCode, and Pi from your phone.</strong></p>
 
-Polpo lets developers send prompts, see responses, and control Claude Code, OpenAI Codex CLI, and Google Gemini CLI sessions from any mobile device over VPN, Wi-Fi, LAN, or a public tunnel.
+Polpo lets developers send prompts, see responses, and control Claude Code, OpenAI Codex CLI, Google Gemini CLI, OpenCode, and Pi coding agent sessions from any mobile device over VPN, Wi-Fi, LAN, or a public tunnel.
+
+> **Help us test!** Claude Code support is stable and battle-tested. Support for **Codex**, **Gemini**, **OpenCode**, and **Pi** is functional but still being stabilized — edge cases in multi-turn, auto-discovery, and session resume may exist. If you use any of these agents, we'd love your feedback: open an issue with reproduction steps and we'll fix it fast.
 
 ## Why
 
 AI coding sessions can run for minutes while reading files, writing code, and running tests. During that time, developers are tethered to their terminal waiting to approve tool calls, review output, or send the next prompt.
 
-Polpo frees you from the keyboard. Grab a coffee, kick off a refactor while waiting for a train, or review tool calls from an airport lounge - your phone becomes a full remote control for Claude Code, Codex, and Gemini. You see every tool call as it happens, approve or reject actions with a tap, send follow-up prompts, and abort tasks when something goes wrong. All in real time, from any network.
+Polpo frees you from the keyboard. Grab a coffee, kick off a refactor while waiting for a train, or review tool calls from an airport lounge - your phone becomes a full remote control for Claude Code, Codex, Gemini, OpenCode, and Pi. You see every tool call as it happens, approve or reject actions with a tap, send follow-up prompts, and abort tasks when something goes wrong. All in real time, from any network.
 
 ## Architecture
 
-Four integration modes, supporting **Claude Code**, **OpenAI Codex CLI**, and **Google Gemini CLI**:
+Four integration modes, supporting **Claude Code**, **OpenAI Codex CLI**, **Google Gemini CLI**, **OpenCode**, and **Pi**:
 
-- **Session** - spawns `claude`, `codex exec --json`, or `gemini --output-format stream-json` with full bidirectional control from phone, including MCP-based tool approval
-- **Auto-Discovery** - watches `~/.claude/projects/`, `~/.codex/sessions/`, and `~/.gemini/tmp/` for active session files using `fs.watch()`, auto-registers sessions on the dashboard with real-time conversation sync — no setup needed
+- **Session** - spawns `claude`, `codex exec --json`, `gemini --output-format stream-json`, `opencode run --format json`, or `pi --mode rpc` with full bidirectional control from phone, including MCP-based tool approval
+- **Auto-Discovery** - watches `~/.claude/projects/`, `~/.codex/sessions/`, `~/.gemini/tmp/`, `~/.local/share/opencode/opencode.db`, and `~/.pi/agent/sessions/` for active sessions, auto-registers them on the dashboard — no setup needed
 - **Hooks** - taps into existing terminal sessions via Claude Code hooks for terminal prompt forwarding and phone-based tool approval
-- **Session Browser** - discovers and displays past sessions from Claude Code, Codex, and Gemini session files, with the ability to resume them
+- **Session Browser** - discovers and displays past sessions from Claude Code, Codex, Gemini, OpenCode, and Pi, with the ability to resume them
 
 ## Requirements
 
 - **Node.js** 18+ (for built-in test runner; 16+ works for everything else)
-- **Claude Code** CLI installed and authenticated, **and/or** **Codex CLI** installed and authenticated, **and/or** **Gemini CLI** installed and authenticated
+- **Claude Code** CLI installed and authenticated, **and/or** **Codex CLI** installed and authenticated, **and/or** **Gemini CLI** installed and authenticated, **and/or** **OpenCode** installed and configured, **and/or** **Pi** installed and configured
 - **macOS** or **Linux** (Windows is not currently supported)
 
 ### macOS Notes
@@ -67,6 +69,9 @@ node bin/polpo.js session --agent codex --cwd /path/to/project --name "Codex Tas
 # New Gemini session
 node bin/polpo.js session --agent gemini --cwd /path/to/project --name "Gemini Task"
 
+# New Pi session
+node bin/polpo.js session --agent pi --cwd /path/to/project --name "Pi Task"
+
 # Resume an existing session
 node bin/polpo.js session --resume <session-id>
 ```
@@ -92,8 +97,8 @@ The dashboard shows active sessions, past session history, and lets you send pro
 | Question Answers | Answer multi-choice questions from your phone when Claude asks |
 | Auto-approve | Tap "Approve All" to auto-approve tool calls (plans and questions always require review) |
 | File Attachments | Send any file from your phone - images, PDFs, code, documents, etc. |
-| Multi-Agent | Full support for Claude Code, OpenAI Codex CLI, and Google Gemini CLI |
-| Session Browser | Browse past sessions from Claude Code, Codex, and Gemini with conversation history |
+| Multi-Agent | Full support for Claude Code, OpenAI Codex CLI, Google Gemini CLI, OpenCode, and Pi |
+| Session Browser | Browse past sessions from Claude Code, Codex, Gemini, OpenCode, and Pi with conversation history |
 | Session Resume | Resume any past session directly from the phone dashboard |
 | Auto-Discovery | Active sessions detected automatically via filesystem watching — no hooks required |
 | Live History Sync | Terminal/VS Code conversations synced to phone in real-time via JSONL watcher |
@@ -103,6 +108,8 @@ The dashboard shows active sessions, past session history, and lets you send pro
 | Abort | Stop any running task with a tap |
 | Multi-Instance | Run and monitor unlimited parallel sessions |
 | Cost Tracking | Per-turn API costs displayed inline |
+| New Session from Phone | Create fresh sessions of any agent type directly from the dashboard |
+| Skills Management | Browse, search, install, and remove [skills.sh](https://skills.sh) skills from your phone |
 | Mobile-First UI | Dark OLED theme, touch-optimized, safe-area support, responsive layout |
 | Tunnel Access | Expose the hub over the internet with `--tunnel` (cloudflared, localtunnel, ngrok, SSH) |
 
@@ -203,6 +210,9 @@ node bin/polpo.js session --agent codex --cwd /path/to/project --name "Codex Tas
 
 # Google Gemini
 node bin/polpo.js session --agent gemini --cwd /path/to/project --name "Gemini Task"
+
+# Pi (75+ model providers)
+node bin/polpo.js session --agent pi --cwd /path/to/project --name "Pi Task"
 ```
 
 ### Tool Approval
@@ -234,27 +244,29 @@ node bin/polpo.js session --cwd /path/to/project --permissions bypass
 | `--name <name>` | Display name for this session |
 | `--cwd <dir>` | Project directory (default: current) |
 | `--resume <id>` | Resume an existing session |
-| `--model <model>` | Model to use (e.g. opus, sonnet for Claude; gpt-5-codex for Codex; flash, pro for Gemini) |
+| `--model <model>` | Model to use (e.g. opus, sonnet for Claude; gpt-5-codex for Codex; flash, pro for Gemini; any provider model for OpenCode/Pi) |
 | `--permissions <mode>` | `default` (phone approval via MCP) or `bypass` (skip all) |
-| `--agent <type>` | Agent type: `claude` (default), `codex`, or `gemini` |
+| `--agent <type>` | Agent type: `claude` (default), `codex`, `gemini`, `opencode`, or `pi` |
 | `--server <url>` | Hub WebSocket URL (default: `ws://127.0.0.1:7890`) |
 | `--token <token>` | Auth token (or set `POLPO_TOKEN` env var) |
 
 ## Session Browser
 
-The dashboard automatically discovers past sessions from `~/.claude/projects/` (Claude Code), `~/.codex/sessions/` (Codex), and `~/.gemini/tmp/` (Gemini) and displays them as cards with the session's first prompt as the title. Each card shows an agent type badge (Claude, Codex, or Gemini). Tap a session to view its full conversation history, or resume it to continue working from your phone.
+The dashboard automatically discovers past sessions from `~/.claude/projects/` (Claude Code), `~/.codex/sessions/` (Codex), `~/.gemini/tmp/` (Gemini), `~/.local/share/opencode/opencode.db` (OpenCode), and `~/.pi/agent/sessions/` (Pi) and displays them as cards with the session's first prompt as the title. Each card shows an agent type badge (Claude, Codex, Gemini, OpenCode, or Pi). Tap a session to view its full conversation history, or resume it to continue working from your phone.
 
-Sessions are loaded from JSONL/JSON files and deduplicated to show clean conversation threads. Use the `?source=claude|codex|gemini|all` query parameter on the `/api/sessions` endpoint to filter by agent type.
+Sessions are loaded from JSONL/JSON files (or SQLite for OpenCode) and deduplicated to show clean conversation threads. Use the `?source=claude|codex|gemini|opencode|pi|all` query parameter on the `/api/sessions` endpoint to filter by agent type.
 
 ## Auto-Discovery
 
-The Polpo server automatically discovers active sessions from Claude Code, Codex, and Gemini by watching their respective session directories:
+The Polpo server automatically discovers active sessions from Claude Code, Codex, Gemini, OpenCode, and Pi by watching their respective session directories:
 
 - **Claude Code**: `~/.claude/projects/<project-slug>/*.jsonl`
 - **Codex CLI**: `~/.codex/sessions/*.jsonl`
 - **Gemini CLI**: `~/.gemini/tmp/<project-slug>/chats/session-*.json`
+- **OpenCode**: `~/.local/share/opencode/opencode.db` (SQLite, polled every 5s)
+- **Pi**: `~/.pi/agent/sessions/--<cwd-dashes>--/*.jsonl`
 
-This is event-driven using `fs.watch()` — no polling, no hooks, no setup.
+Claude, Codex, Gemini, and Pi use event-driven `fs.watch()`. OpenCode uses SQLite polling via `sqlite3` CLI (requires `sqlite3` to be installed).
 
 When a session is detected:
 1. An instance appears on the phone dashboard with the appropriate agent type badge
@@ -283,6 +295,8 @@ Polpo supports OpenAI Codex CLI with full parity:
 
 ## Gemini CLI Support
 
+
+
 Polpo supports Google Gemini CLI with full parity:
 
 - **Session spawning** — `polpo session --agent gemini` spawns `gemini -p "..." --output-format stream-json` processes
@@ -308,6 +322,63 @@ npm install -g @google/gemini-cli
 
 Gemini CLI must be authenticated (run `gemini` once to set up API key or Google account auth).
 
+## OpenCode Support
+
+Polpo supports [OpenCode](https://github.com/opencode-ai/opencode), a Go-based open-source coding agent with 75+ model providers (including Ollama for local models):
+
+- **Session spawning** — `polpo session --agent opencode` spawns `opencode run -p "..." --format json -q` processes
+- **Multi-turn** — each prompt spawns a new process using `opencode run --session <session-id> -p "..." --format json -q`
+- **Auto-discovery** — polls `~/.local/share/opencode/opencode.db` for active sessions via `sqlite3` CLI
+- **Session browser** — lists past OpenCode sessions alongside other agent types
+- **Takeover** — take over a terminal OpenCode session from your phone
+- **Model selection** — pass any provider model via `--model` (e.g. `ollama/llama3`, `openai/gpt-4o`, `anthropic/claude-sonnet`)
+
+### OpenCode-Specific Notes
+
+- OpenCode uses one-shot process invocation (like Codex/Gemini). Multi-turn requires `--session` flag.
+- No MCP support — OpenCode does not use permission prompts.
+- Sessions are stored in SQLite (not JSONL files) — auto-discovery polls the DB every 5 seconds.
+- File attachments use `--file <path>` flag.
+- The dashboard shows an orange "OpenCode" badge on OpenCode instances.
+
+### Requirements
+
+```bash
+go install github.com/opencode-ai/opencode@latest
+```
+
+OpenCode must be configured with at least one provider (run `opencode` once to set up).
+
+Auto-discovery requires `sqlite3` CLI (`apt install sqlite3` / `brew install sqlite3`).
+
+## Pi Support
+
+Polpo supports [Pi](https://github.com/mariozechner/pi-coding-agent), a coding agent with 75+ model providers that uses a long-running RPC mode:
+
+- **Session spawning** — `polpo session --agent pi` spawns `pi --mode rpc` with persistent stdin/stdout JSON streaming (same pattern as Claude Code)
+- **Multi-turn** — the Pi process stays alive across prompts (no respawning needed)
+- **Auto-discovery** — watches `~/.pi/agent/sessions/` for active JSONL files
+- **Session browser** — lists past Pi sessions alongside other agent types
+- **Takeover** — take over a terminal Pi session from your phone
+- **Model selection** — pass any provider model via `--model` (e.g. `openai/gpt-4o`, `anthropic/claude-sonnet`, `ollama/llama3`)
+
+### Pi-Specific Notes
+
+- Pi uses long-running RPC mode (`pi --mode rpc`) — the process stays alive and accepts prompts via stdin JSON, similar to Claude Code's stream-json mode.
+- Abort sends `{"type":"abort"}` via stdin first, then escalates to SIGINT/SIGKILL.
+- No MCP support — Pi handles permissions internally.
+- Images are attached via the `images` array in the prompt JSON; files use `@<path>` syntax.
+- Session files use a tree structure (entries have `id`/`parentId` fields) at `~/.pi/agent/sessions/--<cwd-dashes>--/<timestamp>_<uuid>.jsonl`.
+- The dashboard shows a pink "Pi" badge on Pi instances.
+
+### Requirements
+
+```bash
+npm install -g @mariozechner/pi-coding-agent
+```
+
+Pi must be configured with at least one provider (run `pi` once to set up).
+
 ## Terminal Sync (Hooks)
 
 Hooks are **optional** — auto-discovery handles session detection and conversation sync without them. Hooks add two capabilities:
@@ -328,7 +399,7 @@ Add the output to `~/.claude/settings.json`. The bridge daemon auto-discovers th
 
 ### Phone Takeover
 
-Auto-discovered and hook instances are **read-only** — they mirror conversations from session files on disk, but have no backing agent process to accept prompts. Tap **Take Over** to spawn a real agent process (`claude --resume`, `codex exec resume`, or `gemini --resume`) that resumes the session with full prompt capability. The existing conversation history is preserved in the new instance. This is the same resume mechanism used by the Claude Code VS Code extension when selecting a previous conversation — there is no long-lived process to reconnect to; the CLI replays context from transcript files on each resume.
+Auto-discovered and hook instances are **read-only** — they mirror conversations from session files on disk, but have no backing agent process to accept prompts. Tap **Take Over** to spawn a real agent process (`claude --resume`, `codex exec resume`, `gemini --resume`, or `pi --session`) that resumes the session with full prompt capability. The existing conversation history is preserved in the new instance. This is the same resume mechanism used by the Claude Code VS Code extension when selecting a previous conversation — there is no long-lived process to reconnect to; the CLI replays context from transcript files on each resume.
 
 <p align="center">
   <img src="assets/codex-takeover.jpg" alt="Codex session with Take Over button" width="300">
@@ -356,6 +427,28 @@ Tap the paperclip icon to attach files from your phone. Supported types:
 - **Text/code files** - small files (up to 100KB) are inlined directly in the prompt; larger files are saved to disk and Claude reads them with the Read tool
 - **Any other file** - saved to disk and referenced by path for Claude to read
 
+## Skills Management
+
+The dashboard integrates with the [skills.sh](https://skills.sh) ecosystem, letting you manage agent skills directly from your phone.
+
+- **Browse installed** — see all installed skills with name, description, tags, and rule file counts
+- **Search registry** — search the skills.sh catalog with debounced live results
+- **Install** — install any skill with a tap (runs `npx skills add <package> -g -y` on the server)
+- **Remove** — remove installed skills with confirmation
+- **Detail view** — tap any installed skill to see its full SKILL.md content rendered as markdown
+
+Skills are stored at `~/.agents/skills/` and symlinked into `~/.claude/skills/` for use by coding agents.
+
+### API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/skills` | List installed skills (parsed from SKILL.md frontmatter) |
+| GET | `/api/skills/search?q=<query>` | Search skills.sh registry (60s cache) |
+| POST | `/api/skills/install` | Install a skill (`{ "package": "owner/repo@skill" }`) |
+| DELETE | `/api/skills/:name` | Remove an installed skill |
+| GET | `/api/skills/:name/content` | Get SKILL.md content for detail view |
+
 ## Mobile UI
 
 - Dark theme optimized for OLED screens
@@ -374,9 +467,10 @@ Tap the paperclip icon to attach files from your phone. Supported types:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/sessions` | List discovered sessions (`?source=claude\|codex\|gemini\|all`) |
+| GET | `/api/sessions` | List discovered sessions (`?source=claude\|codex\|gemini\|opencode\|pi\|all`) |
 | GET | `/api/sessions/:id/history` | Get conversation history from JSONL |
 | POST | `/api/sessions/:id/resume` | Resume a session (spawns wrapped agent) |
+| POST | `/api/sessions/new` | Create a new session (`{ agentType, cwd, name?, model? }`) |
 | GET | `/api/instances` | List all active instances |
 | GET | `/api/instances/:id` | Get instance details |
 | GET | `/api/instances/:id/conversation` | Get conversation history |
@@ -391,6 +485,11 @@ Tap the paperclip icon to attach files from your phone. Supported types:
 | POST | `/api/instances/:id/abort` | Abort current task |
 | POST | `/api/upload` | Upload a file attachment (base64) |
 | POST | `/api/permission-request` | MCP permission server long-poll |
+| GET | `/api/skills` | List installed skills |
+| GET | `/api/skills/search?q=` | Search skills.sh registry |
+| POST | `/api/skills/install` | Install a skill |
+| DELETE | `/api/skills/:name` | Remove a skill |
+| GET | `/api/skills/:name/content` | Get skill SKILL.md content |
 | GET | `/health` | Health check |
 
 ### WebSocket
@@ -417,7 +516,7 @@ Connect to `ws://<host>:<port>?role=agent&instanceId=<id>` as an agent.
 npm test
 ```
 
-Runs unit tests with Node's built-in test runner. Tests cover authentication (token, PIN, TOTP, sessions, middleware), instance manager, tunnel provider logic, session JSONL/JSON parsing, JSONL/JSON file watcher (messages, status events, dedup), session scanner (Claude/Codex/Gemini auto-discovery, idle detection, project watching), Codex agent (event translation, hub messages, multi-turn), Gemini agent (stream-json event translation, delta accumulation, multi-turn), Codex scanner (Codex session discovery), Gemini scanner (Gemini session discovery), and agent factory (agent type routing).
+Runs unit tests with Node's built-in test runner. Tests cover authentication (token, PIN, TOTP, sessions, middleware), instance manager, tunnel provider logic, session JSONL/JSON parsing, JSONL/JSON file watcher (messages, status events, dedup), session scanner (Claude/Codex/Gemini/Pi auto-discovery, idle detection, project watching), Codex agent (event translation, hub messages, multi-turn), OpenCode agent (event translation, delta accumulation), Pi agent (RPC event handling, delta accumulation, tool call streaming), Codex scanner (Codex session discovery), Pi scanner (Pi session discovery, slug parsing), agent factory (agent type routing), and skills API (frontmatter parsing, search output parsing, input validation).
 
 ## System Overview
 
@@ -430,7 +529,7 @@ graph TD
     Express + WebSocket"]
     Factory["Agent Factory"]
     Scanner["Session Scanner
-    (Claude + Codex + Gemini)"]
+    (Claude + Codex + Gemini + Pi)"]
     Hooks["Hook Bridge
     (optional)"]
     Browser["Session Browser"]
@@ -439,7 +538,9 @@ graph TD
     Codex["codex exec --json"]
     Gemini["gemini -p ...
     (stream-json)"]
-    VSCode["Claude Code / Codex / Gemini
+    Pi["pi --mode rpc
+    (stdin/stdout JSON)"]
+    VSCode["Claude Code / Codex / Gemini / Pi
     (VS Code / terminal)"]
     MCP["MCP Permission
     Server"]
@@ -449,6 +550,8 @@ graph TD
     JSONL files"]
     GeminiJSON["~/.gemini/tmp/
     JSON files"]
+    PiJSONL["~/.pi/agent/sessions/
+    JSONL files"]
 
     Phone -->|"cellular / internet"| Tunnel
     Phone -->|"VPN / LAN"| Hub
@@ -460,21 +563,26 @@ graph TD
     Factory -->|"claude agent"| Claude
     Factory -->|"codex agent"| Codex
     Factory -->|"gemini agent"| Gemini
+    Factory -->|"pi agent"| Pi
     Scanner -->|"auto-discover"| ClaudeJSONL
     Scanner -->|"auto-discover"| CodexJSONL
     Scanner -->|"auto-discover"| GeminiJSON
+    Scanner -->|"auto-discover"| PiJSONL
     Hooks -->|"approvals + prompts"| VSCode
     VSCode -->|"writes"| ClaudeJSONL
     VSCode -->|"writes"| CodexJSONL
     VSCode -->|"writes"| GeminiJSON
+    VSCode -->|"writes"| PiJSONL
     Hub -->|"JSONL watcher"| ClaudeJSONL
     Hub -->|"Codex adapter"| CodexJSONL
     Hub -->|"Gemini adapter"| GeminiJSON
+    Hub -->|"Pi adapter"| PiJSONL
     Claude --> MCP
     MCP -->|"phone approval"| Hub
     Browser -->|"reads"| ClaudeJSONL
     Browser -->|"reads"| CodexJSONL
     Browser -->|"reads"| GeminiJSON
+    Browser -->|"reads"| PiJSONL
 ```
 
 See [docs/diagrams.md](docs/diagrams.md) for auth, tunnel, session, auto-discovery, takeover, and hook flow diagrams.

@@ -204,7 +204,7 @@ class CodexAgent {
         },
       };
       const mcpConfigPath = path.join(os.tmpdir(), `polpo-codex-mcp-${this.instanceId}.json`);
-      fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfigObj, null, 2));
+      fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfigObj, null, 2), { mode: 0o600 });
       this._log(`MCP config written to ${mcpConfigPath}`);
       // Codex doesn't support --permission-prompt-tool yet, but the MCP server
       // will still be available for tool-based approval if/when Codex adds support.

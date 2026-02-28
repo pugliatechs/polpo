@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+const { version } = require('../package.json');
 const args = process.argv.slice(2);
 const command = args[0];
 
@@ -24,18 +25,19 @@ const flags = parseFlags(args);
 
 function printHelp() {
   console.log(`
-  🐙 Polpo — Claude Code Mobile Controller
+  🐙 Polpo v${version} — Coding Agent Mobile Controller
 
   USAGE
     polpo <command> [options]
 
   COMMANDS
     server      Start the Polpo hub server
-    session     Start a Claude Code session controllable from your phone
+    session     Start a coding agent session controllable from your phone
     agent       Start a lightweight stdin/stdout agent (legacy)
-    bridge      Start a hook bridge daemon for Claude Code integration
-    hooks       Print Claude Code hook configuration JSON
+    bridge      Start a hook bridge daemon for integration
+    hooks       Print hook configuration JSON
     help        Show this help message
+    --version   Print version and exit
 
   SERVER OPTIONS
     --port <n>      Port to listen on (default: 7890)
@@ -63,9 +65,10 @@ function printHelp() {
     --name <name>       Display name for this session
     --cwd <dir>         Project directory to work in (default: current)
     --resume <id>       Resume an existing session
-    --model <model>     Model to use (e.g. opus, sonnet for Claude; flash, pro for Gemini)
+    --model <model>     Model to use (e.g. opus, sonnet for Claude; flash, pro for Gemini;
+                        any provider model for OpenCode/Pi)
     --permissions <m>   Permission mode: default | bypass (default: default)
-    --agent <type>      Agent type: claude | codex | gemini (default: claude)
+    --agent <type>      Agent type: claude | codex | gemini | opencode | pi (default: claude)
     --server <url>      Polpo server WebSocket URL (default: ws://127.0.0.1:7890)
     --token <tok>       Auth token (or set POLPO_TOKEN env var)
 
@@ -98,6 +101,12 @@ function printHelp() {
 
     # Start a Gemini session
     polpo session --agent gemini --cwd /path/to/project --name "Gemini task"
+
+    # Start an OpenCode session (supports Ollama, OpenAI, Anthropic, etc.)
+    polpo session --agent opencode --cwd /path/to/project --name "OpenCode task"
+
+    # Start a Pi session (75+ model providers)
+    polpo session --agent pi --cwd /path/to/project --name "Pi task"
 
     # Resume an existing session from your phone
     polpo session --resume <session-id>
@@ -451,6 +460,11 @@ switch (command) {
 
   case 'hooks':
     printHooks();
+    break;
+
+  case '--version':
+  case '-v':
+    console.log(`polpo v${version}`);
     break;
 
   case 'help':

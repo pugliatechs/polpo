@@ -7,6 +7,9 @@ const { GeminiJsonAdapter } = require('./gemini-json-adapter');
 const { SessionScanner } = require('./session-scanner');
 const { CodexScanner } = require('./codex-scanner');
 const { GeminiScanner } = require('./gemini-scanner');
+const { OpencodeScanner } = require('./opencode-scanner');
+const { PiScanner } = require('./pi-scanner');
+const { PiJsonlAdapter } = require('./pi-jsonl-adapter');
 
 function setupWebSocket(server, instanceManager, getAuthState) {
   const wss = new WebSocket.Server({ server });
@@ -82,6 +85,12 @@ function setupWebSocket(server, instanceManager, getAuthState) {
   instanceManager.on('instance:session_info', (data) => {
     broadcastToDashboards({ type: 'instance:session_info', ...data });
 
+    // Record in sessionToInstance so the auto-discovery scanner
+    // won't register a duplicate instance for the same session
+    if (data.sessionId) {
+      sessionToInstance.set(data.sessionId, data.id);
+    }
+
     // Start watching the JSONL file for this instance
     const inst = instanceManager.get(data.id);
     const agentType = inst ? inst.agentType : 'claude';
@@ -93,13 +102,16 @@ function setupWebSocket(server, instanceManager, getAuthState) {
    * Uses CodexJsonlAdapter for Codex, GeminiJsonAdapter for Gemini, JsonlWatcher for Claude.
    */
   function startWatcherForInstance(instanceId, transcriptPath, agentType) {
-    if (!transcriptPath || activeWatchers.has(instanceId)) return;
+    // OpenCode has no transcript file — data comes from SQLite or the spawned process
+    if (!transcriptPath || activeWatchers.has(instanceId) || agentType === 'opencode') return;
 
     const watcher = agentType === 'codex'
       ? new CodexJsonlAdapter(transcriptPath)
       : agentType === 'gemini'
         ? new GeminiJsonAdapter(transcriptPath)
-        : new JsonlWatcher(transcriptPath);
+        : agentType === 'pi'
+          ? new PiJsonlAdapter(transcriptPath)
+          : new JsonlWatcher(transcriptPath);
     activeWatchers.set(instanceId, watcher);
 
     watcher.on('message', (msg) => {
@@ -240,6 +252,79 @@ function setupWebSocket(server, instanceManager, getAuthState) {
 
   geminiScanner.start();
 
+  // --- OpenCode auto-discovery: poll SQLite for active sessions ---
+  const opencodeScanner = new OpencodeScanner();
+
+  opencodeScanner.on('session:discovered', (data) => {
+    const { sessionId, cwd, projectName, firstPrompt } = data;
+
+    if (sessionToInstance.has(sessionId)) return;
+
+    const instance = instanceManager.register({
+      name: firstPrompt || projectName || 'OpenCode',
+      type: 'terminal',
+      project: projectName || 'opencode',
+      cwd,
+      sessionId,
+      transcriptPath: null,
+      firstPrompt: firstPrompt || null,
+      canReceivePrompts: false,
+      agentType: 'opencode',
+    });
+
+    sessionToInstance.set(sessionId, instance.id);
+    instanceManager.updateStatus(instance.id, 'busy');
+    // No file watcher — OpenCode sessions are in SQLite, not transcript files
+  });
+
+  opencodeScanner.on('session:inactive', (data) => {
+    const instanceId = sessionToInstance.get(data.sessionId);
+    if (instanceId) {
+      instanceManager.updateStatus(instanceId, 'disconnected');
+      instanceManager.unregister(instanceId);
+      sessionToInstance.delete(data.sessionId);
+    }
+  });
+
+  opencodeScanner.start();
+
+  // --- Pi auto-discovery: scan for active Pi sessions ---
+  const piScanner = new PiScanner();
+
+  piScanner.on('session:discovered', (data) => {
+    const { sessionId, transcriptPath, cwd, projectName, firstPrompt } = data;
+
+    if (sessionToInstance.has(sessionId)) return;
+
+    const instance = instanceManager.register({
+      name: firstPrompt || projectName || 'Pi',
+      type: 'terminal',
+      project: projectName || 'pi',
+      cwd,
+      sessionId,
+      transcriptPath,
+      firstPrompt: firstPrompt || null,
+      canReceivePrompts: false,
+      agentType: 'pi',
+    });
+
+    sessionToInstance.set(sessionId, instance.id);
+    instanceManager.updateStatus(instance.id, 'busy');
+
+    startWatcherForInstance(instance.id, transcriptPath, 'pi');
+  });
+
+  piScanner.on('session:inactive', (data) => {
+    const instanceId = sessionToInstance.get(data.sessionId);
+    if (instanceId) {
+      instanceManager.updateStatus(instanceId, 'disconnected');
+      instanceManager.unregister(instanceId);
+      sessionToInstance.delete(data.sessionId);
+    }
+  });
+
+  piScanner.start();
+
   wss.on('connection', (ws, req) => {
     const authState = typeof getAuthState === 'function' ? getAuthState() : getAuthState;
     if (!validateWsAuth(authState, req)) {
@@ -302,6 +387,8 @@ function setupWebSocket(server, instanceManager, getAuthState) {
   wss.scanner = scanner;
   wss.codexScanner = codexScanner;
   wss.geminiScanner = geminiScanner;
+  wss.opencodeScanner = opencodeScanner;
+  wss.piScanner = piScanner;
 
   return wss;
 }

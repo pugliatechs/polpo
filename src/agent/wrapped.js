@@ -44,6 +44,7 @@ class WrappedAgent {
     this.instanceId = null;
     this.ws = null;
     this.reconnectTimer = null;
+    this.stopping = false;
 
     // Claude process state
     this.claude = null;
@@ -135,6 +136,7 @@ class WrappedAgent {
     });
 
     this.ws.on('close', () => {
+      if (this.stopping) return;
       this._log('Disconnected from hub, reconnecting...');
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = setTimeout(() => this.connectToHub(), 3000);
@@ -207,7 +209,7 @@ class WrappedAgent {
         },
       };
       const mcpConfigPath = path.join(os.tmpdir(), `polpo-mcp-${this.instanceId}.json`);
-      fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfigObj, null, 2));
+      fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfigObj, null, 2), { mode: 0o600 });
       this._log(`MCP config written to ${mcpConfigPath}`);
       args.push('--permission-prompt-tool', 'mcp__polpo__polpo_approve');
       args.push('--mcp-config', mcpConfigPath);
@@ -263,6 +265,12 @@ class WrappedAgent {
         content: `[session ended — code ${code}]`,
         contentType: 'text',
       });
+
+      // Clean exit with no active prompts — stop the agent entirely
+      if (code === 0 && !this.busy) {
+        this._log('Claude exited cleanly, shutting down agent');
+        this.stop();
+      }
     });
 
     this.claude.on('error', (err) => {
@@ -283,6 +291,13 @@ class WrappedAgent {
         if (msg.subtype === 'init') {
           this.claudeSessionId = msg.session_id;
           this._log(`Session: ${msg.session_id} (model: ${msg.model})`);
+
+          // Bridge session_info to the hub so the dashboard can dedup
+          this._sendToHub({
+            type: 'session_info',
+            sessionId: msg.session_id,
+          });
+
           this._sendToHub({
             type: 'message',
             message: {
@@ -559,6 +574,8 @@ class WrappedAgent {
    * Stop the agent.
    */
   stop() {
+    if (this.stopping) return;
+    this.stopping = true;
     clearTimeout(this.reconnectTimer);
     if (this.claude) this.claude.kill('SIGTERM');
     if (this.ws) this.ws.close();
@@ -588,15 +605,16 @@ async function runWrapped(options = {}) {
     console.error('[wrapped-agent] Local stdin active — type prompts here or use phone');
   }
 
-  process.on('SIGINT', () => {
+  let shuttingDown = false;
+  function shutdown() {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.error('  Shutting down...');
     agent.stop();
     process.exit(0);
-  });
-
-  process.on('SIGTERM', () => {
-    agent.stop();
-    process.exit(0);
-  });
+  }
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
 
   return agent;
 }

@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const os = require('os');
+const { execFile } = require('child_process');
 const { scanSessions, loadHistory } = require('./sessions');
 const { createAgent } = require('../agent/agent-factory');
 
@@ -46,6 +47,45 @@ function isValidSessionId(id) {
   // (2026-02-25T15-00-<hex>), and other alphanumeric session identifiers.
   // Block path traversal and injection characters.
   return /^[a-zA-Z0-9._-]+$/.test(id);
+}
+
+function parseSkillFrontmatter(content) {
+  const result = { name: '', description: '', tags: [] };
+  const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+  if (!fmMatch) return result;
+  const fm = fmMatch[1];
+  const nameMatch = fm.match(/^name:\s*(.+)$/m);
+  const descMatch = fm.match(/^description:\s*(.+)$/m);
+  if (nameMatch) result.name = nameMatch[1].trim();
+  if (descMatch) result.description = descMatch[1].trim();
+  const tagsMatch = fm.match(/^(?:tags|metadata\.tags):\s*(.+)$/m);
+  if (tagsMatch) {
+    const raw = tagsMatch[1].replace(/^\[|\]$/g, '');
+    result.tags = raw.split(',').map(t => t.trim().replace(/['"]/g, '')).filter(Boolean);
+  }
+  return result;
+}
+
+function parseSkillsSearchOutput(stdout) {
+  const clean = stdout.replace(/\x1b\[[0-9;]*m/g, '');
+  const results = [];
+  const lines = clean.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const match = lines[i].match(/^\s*(\S+\/\S+@\S+)\s+([\d.]+K?)\s+installs?/);
+    if (match) {
+      const pkg = match[1].trim();
+      const installs = match[2].trim();
+      let url = '';
+      if (i + 1 < lines.length) {
+        const urlMatch = lines[i + 1].match(/(https:\/\/skills\.sh\/\S+)/);
+        if (urlMatch) url = urlMatch[1];
+      }
+      const atIdx = pkg.lastIndexOf('@');
+      const skillName = atIdx > 0 ? pkg.slice(atIdx + 1) : pkg;
+      results.push({ package: pkg, name: skillName, installs, url });
+    }
+  }
+  return results;
 }
 
 function createApiRouter(instanceManager, getAuthState) {
@@ -100,6 +140,12 @@ function createApiRouter(instanceManager, getAuthState) {
     if (!fs.existsSync(filePath)) {
       return res.status(404).json({ error: 'File not found' });
     }
+    // Prevent stored XSS: only serve images inline, force-download everything else
+    const ext = path.extname(filePath).toLowerCase();
+    const safeImageExts = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg'];
+    if (!safeImageExts.includes(ext)) {
+      res.set('Content-Disposition', 'attachment');
+    }
     res.sendFile(filePath);
   });
 
@@ -108,7 +154,7 @@ function createApiRouter(instanceManager, getAuthState) {
     try {
       const maxDays = Math.min(parseInt(req.query.days) || 7, 365);
       const limit = Math.min(parseInt(req.query.limit) || 50, 500);
-      const source = req.query.source || 'all'; // 'claude' | 'codex' | 'gemini' | 'all'
+      const source = req.query.source || 'all'; // 'claude' | 'codex' | 'gemini' | 'opencode' | 'pi' | 'all'
       const sessions = await scanSessions({
         maxAge: maxDays * 24 * 60 * 60 * 1000,
         limit,
@@ -116,7 +162,8 @@ function createApiRouter(instanceManager, getAuthState) {
       });
       res.json(sessions);
     } catch (err) {
-      res.status(500).json({ error: err.message });
+      console.error('[api]', err);
+      res.status(500).json({ error: 'Internal server error' });
     }
   });
 
@@ -129,7 +176,8 @@ function createApiRouter(instanceManager, getAuthState) {
       const history = await loadHistory(req.params.sessionId);
       res.json(history);
     } catch (err) {
-      res.status(500).json({ error: err.message });
+      console.error('[api]', err);
+      res.status(500).json({ error: 'Internal server error' });
     }
   });
 
@@ -179,13 +227,63 @@ function createApiRouter(instanceManager, getAuthState) {
       await agent.start();
       wrappedAgents.set(sessionId, agent);
 
+      // Set sessionId on the instance immediately so the dashboard can dedup
+      instanceManager.setSessionInfo(agent.instanceId, resumeId, null);
+
       // Clean up when agent disconnects
       const cleanup = () => wrappedAgents.delete(sessionId);
       if (agent.ws) agent.ws.on('close', cleanup);
 
       res.json({ instanceId: agent.instanceId });
     } catch (err) {
-      res.status(500).json({ error: err.message });
+      console.error('[api]', err);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  // Create a brand-new session (no resume)
+  router.post('/sessions/new', async (req, res) => {
+    const { agentType, cwd, name, model } = req.body;
+    const type = agentType || 'claude';
+
+    const validTypes = ['claude', 'codex', 'gemini', 'opencode', 'pi'];
+    if (!validTypes.includes(type)) {
+      return res.status(400).json({ error: `Invalid agentType. Must be one of: ${validTypes.join(', ')}` });
+    }
+
+    if (!cwd || typeof cwd !== 'string' || !path.isAbsolute(cwd)) {
+      return res.status(400).json({ error: 'cwd is required and must be an absolute path' });
+    }
+    try {
+      if (!fs.statSync(cwd).isDirectory()) {
+        return res.status(400).json({ error: 'cwd is not a directory' });
+      }
+    } catch {
+      return res.status(400).json({ error: 'cwd does not exist' });
+    }
+
+    const authState = typeof getAuthState === 'function' ? getAuthState() : null;
+    const authToken = authState && authState.enabled ? authState.token : undefined;
+
+    try {
+      const agent = createAgent(type, {
+        name: name || `Session (${path.basename(cwd)})`,
+        cwd,
+        model: model || undefined,
+        serverUrl: `ws://127.0.0.1:${req.socket.localPort}`,
+        token: authToken,
+      });
+
+      await agent.start();
+
+      wrappedAgents.set(agent.instanceId, agent);
+      const cleanup = () => wrappedAgents.delete(agent.instanceId);
+      if (agent.ws) agent.ws.on('close', cleanup);
+
+      res.json({ instanceId: agent.instanceId });
+    } catch (err) {
+      console.error('[api]', err);
+      res.status(500).json({ error: 'Internal server error' });
     }
   });
 
@@ -495,7 +593,8 @@ function createApiRouter(instanceManager, getAuthState) {
         warning: 'Session taken over. You can now send prompts from your phone.',
       });
     } catch (err) {
-      res.status(500).json({ error: err.message });
+      console.error('[api]', err);
+      res.status(500).json({ error: 'Internal server error' });
     }
   });
 
@@ -510,7 +609,123 @@ function createApiRouter(instanceManager, getAuthState) {
     }
   });
 
+  // ---- Skills Management ----
+
+  const SKILLS_DIR = path.join(os.homedir(), '.agents', 'skills');
+  const skillsSearchCache = new Map();
+  const SKILLS_CACHE_TTL = 60 * 1000;
+
+  // List installed skills
+  router.get('/skills', (req, res) => {
+    try {
+      if (!fs.existsSync(SKILLS_DIR)) return res.json([]);
+      const entries = fs.readdirSync(SKILLS_DIR, { withFileTypes: true })
+        .filter(d => d.isDirectory());
+      const skills = [];
+      for (const entry of entries) {
+        const skillMdPath = path.join(SKILLS_DIR, entry.name, 'SKILL.md');
+        const result = { name: entry.name, description: '', tags: [], ruleFiles: 0 };
+        try {
+          const content = fs.readFileSync(skillMdPath, 'utf8');
+          const fm = parseSkillFrontmatter(content);
+          if (fm.name) result.name = fm.name;
+          result.description = fm.description;
+          result.tags = fm.tags;
+          const files = fs.readdirSync(path.join(SKILLS_DIR, entry.name));
+          result.ruleFiles = files.filter(f => f !== 'SKILL.md').length;
+        } catch {}
+        skills.push(result);
+      }
+      res.json(skills);
+    } catch (err) {
+      console.error('[api:skills]', err);
+      res.status(500).json({ error: 'Failed to list skills' });
+    }
+  });
+
+  // Search skills.sh registry
+  router.get('/skills/search', (req, res) => {
+    const query = (req.query.q || '').trim();
+    if (!query || query.length > 100) {
+      return res.status(400).json({ error: 'Invalid query' });
+    }
+    if (!/^[a-zA-Z0-9\s._-]+$/.test(query)) {
+      return res.status(400).json({ error: 'Invalid characters in query' });
+    }
+    const cached = skillsSearchCache.get(query);
+    if (cached && Date.now() - cached.timestamp < SKILLS_CACHE_TTL) {
+      return res.json(cached.results);
+    }
+    execFile('npx', ['skills', 'find', query], {
+      timeout: 15000,
+      env: { ...process.env, FORCE_COLOR: '0' },
+    }, (err, stdout) => {
+      if (err) {
+        console.error('[api:skills:search]', err.message);
+        return res.status(500).json({ error: 'Search failed' });
+      }
+      const results = parseSkillsSearchOutput(stdout);
+      skillsSearchCache.set(query, { results, timestamp: Date.now() });
+      res.json(results);
+    });
+  });
+
+  // Install a skill
+  router.post('/skills/install', express.json(), (req, res) => {
+    const pkg = req.body && req.body.package;
+    if (!pkg || typeof pkg !== 'string') {
+      return res.status(400).json({ error: 'package is required' });
+    }
+    if (!/^[a-zA-Z0-9_-]+\/[a-zA-Z0-9_.-]+@[a-zA-Z0-9_:.-]+$/.test(pkg)) {
+      return res.status(400).json({ error: 'Invalid package identifier' });
+    }
+    execFile('npx', ['skills', 'add', pkg, '-g', '-y'], {
+      timeout: 30000,
+    }, (err, stdout, stderr) => {
+      if (err) {
+        console.error('[api:skills:install]', err.message);
+        return res.status(500).json({ error: 'Install failed: ' + (stderr || err.message) });
+      }
+      res.json({ ok: true });
+    });
+  });
+
+  // Get skill content
+  router.get('/skills/:name/content', (req, res) => {
+    const name = req.params.name;
+    if (!/^[a-zA-Z0-9_.-]+$/.test(name)) {
+      return res.status(400).json({ error: 'Invalid skill name' });
+    }
+    const resolved = path.resolve(path.join(SKILLS_DIR, name, 'SKILL.md'));
+    if (!resolved.startsWith(SKILLS_DIR + path.sep)) {
+      return res.status(400).json({ error: 'Invalid skill name' });
+    }
+    try {
+      const content = fs.readFileSync(resolved, 'utf8');
+      res.json({ content });
+    } catch {
+      res.status(404).json({ error: 'Skill not found' });
+    }
+  });
+
+  // Remove a skill
+  router.delete('/skills/:name', (req, res) => {
+    const name = req.params.name;
+    if (!/^[a-zA-Z0-9_.-]+$/.test(name)) {
+      return res.status(400).json({ error: 'Invalid skill name' });
+    }
+    execFile('npx', ['skills', 'remove', name, '-g', '-y'], {
+      timeout: 15000,
+    }, (err, stdout, stderr) => {
+      if (err) {
+        console.error('[api:skills:remove]', err.message);
+        return res.status(500).json({ error: 'Remove failed: ' + (stderr || err.message) });
+      }
+      res.json({ ok: true });
+    });
+  });
+
   return router;
 }
 
-module.exports = { createApiRouter };
+module.exports = { createApiRouter, parseSkillFrontmatter, parseSkillsSearchOutput };

@@ -15,6 +15,39 @@ const {
   verifyTotp,
 } = require('./auth');
 
+/**
+ * Simple in-memory rate limiter.
+ * @param {number} windowMs - Time window in milliseconds
+ * @param {number} max      - Max requests per window per IP
+ */
+function rateLimit(windowMs, max) {
+  const hits = new Map(); // ip -> { count, resetAt }
+  // Periodic cleanup to prevent memory leak
+  const cleanup = setInterval(() => {
+    const now = Date.now();
+    for (const [ip, entry] of hits) {
+      if (now > entry.resetAt) hits.delete(ip);
+    }
+  }, windowMs * 2);
+  cleanup.unref();
+
+  return (req, res, next) => {
+    const ip = req.ip || req.socket.remoteAddress;
+    const now = Date.now();
+    let entry = hits.get(ip);
+    if (!entry || now > entry.resetAt) {
+      entry = { count: 0, resetAt: now + windowMs };
+      hits.set(ip, entry);
+    }
+    entry.count++;
+    if (entry.count > max) {
+      res.set('Retry-After', Math.ceil((entry.resetAt - now) / 1000));
+      return res.status(429).json({ error: 'Too many requests' });
+    }
+    next();
+  };
+}
+
 function createServer(options = {}) {
   const port = options.port || process.env.POLPO_PORT || 7890;
   const host = options.host || process.env.POLPO_HOST || '0.0.0.0';
@@ -34,7 +67,8 @@ function createServer(options = {}) {
 
   // Health check
   app.get('/health', (req, res) => {
-    res.json({ status: 'ok', instances: instanceManager.getAll().length });
+    const { version: pkgVersion } = require('../../package.json');
+    res.json({ status: 'ok', version: pkgVersion, instances: instanceManager.getAll().length });
   });
 
   // Auth page and its assets (served to unauthenticated users)
@@ -51,8 +85,11 @@ function createServer(options = {}) {
     res.sendFile(path.join(__dirname, '..', 'web', 'favicon.png'));
   });
 
+  // Rate limit MFA verification: 10 attempts per minute
+  const mfaLimiter = rateLimit(60 * 1000, 10);
+
   // PIN verification
-  app.post('/api/auth/verify-pin', (req, res) => {
+  app.post('/api/auth/verify-pin', mfaLimiter, (req, res) => {
     if (!authState.mfaEnabled || authState.mode !== 'pin') {
       return res.status(400).json({ error: 'PIN auth not enabled' });
     }
@@ -76,7 +113,7 @@ function createServer(options = {}) {
   });
 
   // TOTP verification
-  app.post('/api/auth/verify-totp', (req, res) => {
+  app.post('/api/auth/verify-totp', mfaLimiter, (req, res) => {
     if (!authState.mfaEnabled || authState.mode !== 'paranoid') {
       return res.status(400).json({ error: 'TOTP auth not enabled' });
     }
@@ -103,6 +140,15 @@ function createServer(options = {}) {
 
   // API auth
   app.use('/api', createAuthMiddleware(getAuthState));
+
+  // Rate limit session creation/resume: 10 per minute
+  const sessionLimiter = rateLimit(60 * 1000, 10);
+  app.post('/api/sessions/new', sessionLimiter);
+  app.post('/api/sessions/:sessionId/resume', sessionLimiter);
+  app.post('/api/instances/:id/takeover', sessionLimiter);
+
+  // Rate limit uploads: 30 per minute
+  app.post('/api/upload', rateLimit(60 * 1000, 30));
 
   // API routes
   app.use('/api', createApiRouter(instanceManager, getAuthState));
@@ -134,7 +180,8 @@ function createServer(options = {}) {
       return new Promise((resolve) => {
         server.listen(port, host, () => {
           const addr = server.address();
-          console.log(`\n  🐙 Polpo server running on http://${host}:${addr.port}`);
+          const { version: pkgVersion } = require('../../package.json');
+          console.log(`\n  🐙 Polpo v${pkgVersion} running on http://${host}:${addr.port}`);
           console.log(`     Open this URL on your phone (same network)\n`);
           resolve(addr);
         });
@@ -144,6 +191,8 @@ function createServer(options = {}) {
       return new Promise((resolve) => {
         if (wss.scanner) wss.scanner.stop();
         if (wss.geminiScanner) wss.geminiScanner.stop();
+        if (wss.opencodeScanner) wss.opencodeScanner.stop();
+        if (wss.piScanner) wss.piScanner.stop();
         for (const client of wss.clients) {
           client.terminate();
         }

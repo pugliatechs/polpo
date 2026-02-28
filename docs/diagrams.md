@@ -66,21 +66,21 @@ sequenceDiagram
     MCP->>CLI: allow / deny
 ```
 
-## Session Flow (Codex / Gemini)
+## Session Flow (Codex / Gemini / OpenCode)
 
-Codex and Gemini use one-shot process invocation instead of long-running stdin streaming. Each prompt spawns a new process; multi-turn uses resume flags.
+Codex, Gemini, and OpenCode use one-shot process invocation instead of long-running stdin streaming. Each prompt spawns a new process; multi-turn uses resume flags.
 
 ```mermaid
 sequenceDiagram
     participant Phone
     participant Hub as Polpo Hub
     participant Agent as Session Agent
-    participant CLI as codex / gemini CLI
+    participant CLI as codex / gemini / opencode CLI
 
     Agent->>Hub: Register + WebSocket connect
     Phone->>Hub: Send prompt
     Hub->>Agent: Forward prompt
-    Agent->>CLI: Spawn process (codex exec --json / gemini -p ... --output-format stream-json)
+    Agent->>CLI: Spawn process (codex exec / gemini -p / opencode run -p)
     CLI->>Agent: Streaming JSONL events (init, message deltas, tool_use, result)
     Agent->>Hub: Relay messages
     Hub->>Phone: Real-time updates
@@ -89,7 +89,36 @@ sequenceDiagram
     Note over Phone,CLI: Follow-up prompt (multi-turn)
     Phone->>Hub: Send next prompt
     Hub->>Agent: Forward prompt
-    Agent->>CLI: Spawn new process with resume flag (codex exec resume / gemini --resume)
+    Agent->>CLI: Spawn new process with resume flag (--resume / --session)
+    CLI->>Agent: Streaming response
+    Agent->>Hub: Relay messages
+    Hub->>Phone: Real-time updates
+```
+
+## Session Flow (Pi)
+
+Pi uses a long-running RPC mode (`pi --mode rpc`) — persistent stdin/stdout JSON, same pattern as Claude Code. The process stays alive across prompts.
+
+```mermaid
+sequenceDiagram
+    participant Phone
+    participant Hub as Polpo Hub
+    participant Agent as Pi Agent
+    participant CLI as pi --mode rpc
+
+    Agent->>Hub: Register + WebSocket connect
+    Phone->>Hub: Send prompt
+    Hub->>Agent: Forward prompt
+    Agent->>CLI: Spawn pi --mode rpc
+    Agent->>CLI: Write {"type":"prompt","message":"..."} to stdin
+    CLI->>Agent: Streaming events (agent_start, message_update, tool_execution_*, agent_end)
+    Agent->>Hub: Relay messages
+    Hub->>Phone: Real-time updates
+
+    Note over Phone,CLI: Follow-up prompt (same process)
+    Phone->>Hub: Send next prompt
+    Hub->>Agent: Forward prompt
+    Agent->>CLI: Write prompt to stdin (process still running)
     CLI->>Agent: Streaming response
     Agent->>Hub: Relay messages
     Hub->>Phone: Real-time updates
@@ -105,7 +134,7 @@ sequenceDiagram
     participant Hub as Polpo Hub
     participant Phone
     participant Agent as Takeover Agent
-    participant CLI as CLI (claude / codex / gemini)
+    participant CLI as CLI (claude / codex / gemini / opencode / pi)
 
     Dev->>FS: Run CLI (writes session files)
     Scanner->>FS: fs.watch() detects new/changed files

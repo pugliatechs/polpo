@@ -25,6 +25,11 @@
   let activeInstanceId = null;
   let reconnectDelay = 1000;
   let pendingAttachments = [];
+  let selectedAgentType = 'claude';
+  let installedSkills = [];
+  let skillSearchResults = [];
+  let skillSearchTimeout = null;
+  let currentSkillDetail = null;
 
   // ---- DOM refs ----
   const $connectionStatus = document.getElementById('connection-status');
@@ -69,6 +74,26 @@
   const $questionList = document.getElementById('question-list');
   const $btnQuestionSubmit = document.getElementById('btn-question-submit');
   const $btnQuestionReject = document.getElementById('btn-question-reject');
+  const $btnNewSession = document.getElementById('btn-new-session');
+  const $newSessionModal = document.getElementById('new-session-modal');
+  const $btnCloseModal = document.getElementById('btn-close-modal');
+  const $newAgentType = document.getElementById('new-agent-type');
+  const $newCwd = document.getElementById('new-cwd');
+  const $cwdSuggestions = document.getElementById('cwd-suggestions');
+  const $newName = document.getElementById('new-name');
+  const $newModel = document.getElementById('new-model');
+  const $btnCreateSession = document.getElementById('btn-create-session');
+  const $newSessionError = document.getElementById('new-session-error');
+  const $skillsSection = document.getElementById('skills-section');
+  const $skillsSearchInput = document.getElementById('skills-search-input');
+  const $skillsSearchResults = document.getElementById('skills-search-results');
+  const $installedSkillsList = document.getElementById('installed-skills-list');
+  const $btnRefreshSkills = document.getElementById('btn-refresh-skills');
+  const $skillDetailModal = document.getElementById('skill-detail-modal');
+  const $skillDetailName = document.getElementById('skill-detail-name');
+  const $skillDetailContent = document.getElementById('skill-detail-content');
+  const $btnCloseSkillDetail = document.getElementById('btn-close-skill-detail');
+  const $btnSkillAction = document.getElementById('btn-skill-action');
 
   // ---- Auth-aware fetch wrapper ----
   function authFetch(url, options) {
@@ -155,6 +180,7 @@
       case 'instance:disconnected':
         if (instances.has(msg.instanceId)) {
           instances.get(msg.instanceId).status = 'disconnected';
+          instances.get(msg.instanceId)._disconnectedAt = Date.now();
         }
         renderList();
         if (activeInstanceId === msg.instanceId) renderDetail();
@@ -255,11 +281,17 @@
       return i.status !== 'disconnected';
     });
 
-    // Also show recently disconnected (last 30s)
-    var disconnected = Array.from(instances.values()).filter(function (i) {
-      return i.status === 'disconnected';
+    // Also show recently disconnected (last 30s), then purge stale ones
+    var now = Date.now();
+    Array.from(instances.entries()).forEach(function (entry) {
+      var id = entry[0], i = entry[1];
+      if (i.status !== 'disconnected') return;
+      if (now - (i._disconnectedAt || 0) < 30000) {
+        arr.push(i);
+      } else {
+        instances.delete(id);
+      }
     });
-    arr = arr.concat(disconnected);
 
     $instanceCount.textContent = arr.length + ' instance' + (arr.length !== 1 ? 's' : '');
 
@@ -301,7 +333,7 @@
             '</div>' +
             '<div class="card-meta">' +
               '<span>' + escapeHtml(inst.project || '') + '</span>' +
-              '<span class="agent-badge agent-' + (inst.agentType || 'claude') + '">' + (inst.agentType === 'codex' ? 'Codex' : inst.agentType === 'gemini' ? 'Gemini' : 'Claude') + '</span>' +
+              '<span class="agent-badge agent-' + (inst.agentType || 'claude') + '">' + (inst.agentType === 'codex' ? 'Codex' : inst.agentType === 'gemini' ? 'Gemini' : inst.agentType === 'opencode' ? 'OpenCode' : inst.agentType === 'pi' ? 'Pi' : 'Claude') + '</span>' +
             '</div>' +
             approvalHtml +
           '</div>'
@@ -397,7 +429,7 @@
       $detailStatus.textContent = inst.status;
     }
     $detailProject.textContent = '📁 ' + (inst.project || '');
-    $detailType.innerHTML = '<span class="agent-badge agent-' + (inst.agentType || 'claude') + '">' + (inst.agentType === 'codex' ? 'Codex' : inst.agentType === 'gemini' ? 'Gemini' : 'Claude') + '</span>';
+    $detailType.innerHTML = '<span class="agent-badge agent-' + (inst.agentType || 'claude') + '">' + (inst.agentType === 'codex' ? 'Codex' : inst.agentType === 'gemini' ? 'Gemini' : inst.agentType === 'opencode' ? 'OpenCode' : inst.agentType === 'pi' ? 'Pi' : 'Claude') + '</span>';
 
     // Takeover vs prompt input
     var canPrompt = inst.canReceivePrompts !== false;
@@ -1224,9 +1256,10 @@
     // 10. Strikethrough
     escaped = escaped.replace(/~~([^~]+)~~/g, '<del>$1</del>');
 
-    // 11. Links [text](url) — unescape &amp; back to & in href
+    // 11. Links [text](url) — unescape &amp; back to & in href; block unsafe protocols
     escaped = escaped.replace(/\[([^\]]+)\]\(([^)]+)\)/g, function (match, text, url) {
       var href = url.replace(/&amp;/g, '&');
+      if (!/^https?:\/\/|^mailto:/i.test(href)) return text;
       return '<a href="' + href + '" target="_blank" rel="noopener" class="md-link">' + text + '</a>';
     });
 
@@ -1277,12 +1310,19 @@
   function renderSessions() {
     // Filter out sessions that are already active as instances
     var activeSessionIds = new Set();
+    var activeCwdPrompts = new Set();
     instances.forEach(function (inst) {
       if (inst.sessionId) activeSessionIds.add(inst.sessionId);
+      // Secondary dedup: match by cwd + firstPrompt (catches pre-sessionId window)
+      if (inst.cwd && inst._firstPrompt) {
+        activeCwdPrompts.add(inst.cwd + '\0' + inst._firstPrompt);
+      }
     });
 
     var filtered = pastSessions.filter(function (s) {
-      return !activeSessionIds.has(s.sessionId);
+      if (activeSessionIds.has(s.sessionId)) return false;
+      if (s.cwd && s.firstPrompt && activeCwdPrompts.has(s.cwd + '\0' + s.firstPrompt)) return false;
+      return true;
     });
 
     if (filtered.length === 0) {
@@ -1305,7 +1345,7 @@
           '</div>' +
           '<div class="card-meta">' +
             '<span>' + escapeHtml(s.project) + '</span>' +
-            '<span class="agent-badge agent-' + (s.agentType || 'claude') + '">' + (s.agentType === 'codex' ? 'Codex' : s.agentType === 'gemini' ? 'Gemini' : 'Claude') + '</span>' +
+            '<span class="agent-badge agent-' + (s.agentType || 'claude') + '">' + (s.agentType === 'codex' ? 'Codex' : s.agentType === 'gemini' ? 'Gemini' : s.agentType === 'opencode' ? 'OpenCode' : s.agentType === 'pi' ? 'Pi' : 'Claude') + '</span>' +
           '</div>' +
         '</div>'
       );
@@ -1402,7 +1442,471 @@
     window.visualViewport.addEventListener('scroll', onViewportResize);
   }
 
+  // ---- New Session Modal ----
+  function openNewSessionModal() {
+    $newSessionModal.classList.remove('hidden');
+    // Trigger reflow so the transition starts from the initial state
+    void $newSessionModal.offsetHeight;
+    $newSessionModal.classList.add('visible');
+    $newSessionError.classList.add('hidden');
+    $newCwd.value = '';
+    $newCwd.classList.remove('error');
+    $newName.value = '';
+    $newModel.value = '';
+    selectedAgentType = 'claude';
+    updateAgentTypeSelection();
+    $btnCreateSession.disabled = false;
+    $btnCreateSession.innerHTML = 'Create Session';
+    populateCwdSuggestions();
+    // Prevent background scroll
+    document.body.style.overflow = 'hidden';
+    // Focus CWD input after animation
+    setTimeout(function () { $newCwd.focus(); }, 350);
+  }
+
+  function closeNewSessionModal() {
+    $newSessionModal.classList.remove('visible');
+    $cwdSuggestions.classList.add('hidden');
+    document.body.style.overflow = '';
+    // Wait for slide-out animation then hide
+    setTimeout(function () {
+      $newSessionModal.classList.add('hidden');
+    }, 300);
+  }
+
+  function updateAgentTypeSelection() {
+    var btns = $newAgentType.querySelectorAll('.agent-type-btn');
+    for (var i = 0; i < btns.length; i++) {
+      if (btns[i].getAttribute('data-type') === selectedAgentType) {
+        btns[i].classList.add('selected');
+      } else {
+        btns[i].classList.remove('selected');
+      }
+    }
+  }
+
+  $newAgentType.addEventListener('click', function (e) {
+    var btn = e.target.closest('.agent-type-btn');
+    if (!btn) return;
+    selectedAgentType = btn.getAttribute('data-type');
+    updateAgentTypeSelection();
+  });
+
+  $btnNewSession.addEventListener('click', openNewSessionModal);
+
+  $btnCloseModal.addEventListener('click', closeNewSessionModal);
+
+  $newSessionModal.addEventListener('click', function (e) {
+    if (e.target === $newSessionModal) closeNewSessionModal();
+  });
+
+  // Keyboard: Escape to close, Enter to submit
+  document.addEventListener('keydown', function (e) {
+    if (!$newSessionModal.classList.contains('visible')) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeNewSessionModal();
+    }
+    if (e.key === 'Enter' && !$btnCreateSession.disabled) {
+      // Don't submit if focused on suggestions
+      if (document.activeElement && document.activeElement.closest('.cwd-suggestions')) return;
+      e.preventDefault();
+      $btnCreateSession.click();
+    }
+  });
+
+  // CWD autocomplete from past sessions
+  var cwdMap = {};
+  function populateCwdSuggestions() {
+    cwdMap = {};
+    pastSessions.forEach(function (s) {
+      if (s.cwd && !cwdMap[s.cwd]) {
+        cwdMap[s.cwd] = s.project || s.cwd.split('/').pop() || s.cwd;
+      }
+    });
+  }
+
+  function filterCwdSuggestions() {
+    var cwds = Object.keys(cwdMap);
+    if (cwds.length === 0) { $cwdSuggestions.classList.add('hidden'); return; }
+    var val = $newCwd.value.toLowerCase();
+    var matches = cwds.filter(function (c) {
+      return c.toLowerCase().includes(val);
+    }).slice(0, 8);
+
+    if (matches.length === 0) { $cwdSuggestions.classList.add('hidden'); return; }
+
+    $cwdSuggestions.classList.remove('hidden');
+    $cwdSuggestions.innerHTML = matches.map(function (c) {
+      return '<div class="cwd-suggestion" data-cwd="' + escapeHtml(c) + '">' +
+        '<span class="cwd-project-name">' + escapeHtml(cwdMap[c]) + '</span>' +
+        '<span class="cwd-path">' + escapeHtml(c) + '</span></div>';
+    }).join('');
+  }
+
+  $newCwd.addEventListener('input', filterCwdSuggestions);
+  $newCwd.addEventListener('focus', filterCwdSuggestions);
+
+  $cwdSuggestions.addEventListener('click', function (e) {
+    var item = e.target.closest('.cwd-suggestion');
+    if (!item) return;
+    var cwd = item.getAttribute('data-cwd');
+    $newCwd.value = cwd;
+    $cwdSuggestions.classList.add('hidden');
+    if (!$newName.value && cwdMap[cwd]) {
+      $newName.value = cwdMap[cwd];
+    }
+  });
+
+  document.addEventListener('click', function (e) {
+    if (!e.target.closest('#new-cwd') && !e.target.closest('#cwd-suggestions')) {
+      $cwdSuggestions.classList.add('hidden');
+    }
+  });
+
+  $btnCreateSession.addEventListener('click', function () {
+    var cwd = $newCwd.value.trim();
+    $newCwd.classList.remove('error');
+    if (!cwd) {
+      showNewSessionError('Working directory is required.');
+      $newCwd.classList.add('error');
+      $newCwd.focus();
+      return;
+    }
+    if (!cwd.startsWith('/')) {
+      showNewSessionError('Path must be absolute (start with /).');
+      $newCwd.classList.add('error');
+      $newCwd.focus();
+      return;
+    }
+
+    $btnCreateSession.disabled = true;
+    $btnCreateSession.innerHTML = '<span class="spinner"></span> Creating\u2026';
+    $newSessionError.classList.add('hidden');
+    $cwdSuggestions.classList.add('hidden');
+
+    authFetch('/api/sessions/new', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        agentType: selectedAgentType,
+        cwd: cwd,
+        name: $newName.value.trim() || undefined,
+        model: $newModel.value.trim() || undefined,
+      }),
+    })
+    .then(function (r) {
+      if (!r.ok) {
+        return r.text().then(function (body) {
+          var msg = 'Failed to create session (status ' + r.status + ')';
+          try { msg = JSON.parse(body).error || msg; } catch (e) {}
+          throw new Error(msg);
+        });
+      }
+      return r.json();
+    })
+    .then(function (result) {
+      closeNewSessionModal();
+      // Wait for instance to appear via WebSocket, then open it
+      var tryOpen = function (attempts) {
+        if (instances.has(result.instanceId)) {
+          openDetail(result.instanceId);
+        } else if (attempts > 0) {
+          setTimeout(function () { tryOpen(attempts - 1); }, 500);
+        }
+      };
+      tryOpen(10);
+    })
+    .catch(function (err) {
+      showNewSessionError(err.message || 'Failed to create session.');
+      $btnCreateSession.disabled = false;
+      $btnCreateSession.innerHTML = 'Create Session';
+    });
+  });
+
+  function showNewSessionError(msg) {
+    $newSessionError.textContent = msg;
+    $newSessionError.classList.remove('hidden');
+    // Re-trigger shake animation
+    $newSessionError.style.animation = 'none';
+    void $newSessionError.offsetHeight;
+    $newSessionError.style.animation = '';
+  }
+
+  // ---- Skills ----
+
+  function loadSkills() {
+    authFetch('/api/skills')
+      .then(function (r) { return r.json(); })
+      .then(function (skills) {
+        installedSkills = skills;
+        renderInstalledSkills();
+      })
+      .catch(function () {});
+  }
+
+  function truncateText(str, max) {
+    if (!str || str.length <= max) return str || '';
+    return str.slice(0, max) + '...';
+  }
+
+  function renderInstalledSkills() {
+    if (installedSkills.length === 0) {
+      $installedSkillsList.innerHTML = '<div class="skills-empty">No skills installed. Search above to find skills.</div>';
+      return;
+    }
+    $installedSkillsList.innerHTML = installedSkills.map(function (skill) {
+      var tagsHtml = (skill.tags || []).slice(0, 5).map(function (tag) {
+        return '<span class="skill-tag">' + escapeHtml(tag) + '</span>';
+      }).join('');
+      var extraInfo = skill.ruleFiles
+        ? '<span>' + skill.ruleFiles + ' extra file' + (skill.ruleFiles !== 1 ? 's' : '') + '</span>'
+        : '';
+      return (
+        '<div class="instance-card skill-card" data-skill-name="' + escapeHtml(skill.name) + '">' +
+          '<div class="card-top">' +
+            '<span class="card-name">' + escapeHtml(skill.name) + '</span>' +
+            '<button class="btn-skill-remove btn-icon btn-danger" data-skill-name="' + escapeHtml(skill.name) + '" title="Remove">&#10005;</button>' +
+          '</div>' +
+          (skill.description ? '<div class="card-meta"><span>' + escapeHtml(truncateText(skill.description, 80)) + '</span></div>' : '') +
+          (tagsHtml || extraInfo ? '<div class="skill-tags">' + tagsHtml + extraInfo + '</div>' : '') +
+        '</div>'
+      );
+    }).join('');
+
+    var cards = $installedSkillsList.querySelectorAll('.skill-card');
+    for (var i = 0; i < cards.length; i++) {
+      cards[i].addEventListener('click', onInstalledSkillClick);
+    }
+    var removeBtns = $installedSkillsList.querySelectorAll('.btn-skill-remove');
+    for (var j = 0; j < removeBtns.length; j++) {
+      removeBtns[j].addEventListener('click', onSkillRemoveClick);
+    }
+  }
+
+  function onInstalledSkillClick(e) {
+    if (e.target.closest('.btn-skill-remove')) return;
+    var name = e.currentTarget.getAttribute('data-skill-name');
+    openSkillDetail(name, true);
+  }
+
+  function onSkillRemoveClick(e) {
+    e.stopPropagation();
+    var name = e.currentTarget.getAttribute('data-skill-name');
+    if (!confirm('Remove skill "' + name + '"?')) return;
+    var card = e.currentTarget.closest('.skill-card');
+    if (card) card.style.opacity = '0.4';
+
+    authFetch('/api/skills/' + encodeURIComponent(name), { method: 'DELETE' })
+      .then(function (r) {
+        if (!r.ok) throw new Error();
+        return r.json();
+      })
+      .then(function () { loadSkills(); })
+      .catch(function () {
+        if (card) card.style.opacity = '';
+        alert('Failed to remove skill.');
+      });
+  }
+
+  function searchSkills(query) {
+    if (!query) {
+      skillSearchResults = [];
+      $skillsSearchResults.classList.add('hidden');
+      return;
+    }
+    $skillsSearchResults.classList.remove('hidden');
+    $skillsSearchResults.innerHTML = '<div class="skills-loading">Searching...</div>';
+
+    authFetch('/api/skills/search?q=' + encodeURIComponent(query))
+      .then(function (r) { return r.json(); })
+      .then(function (results) {
+        skillSearchResults = results;
+        renderSearchResults();
+      })
+      .catch(function () {
+        $skillsSearchResults.innerHTML = '<div class="skills-empty">Search failed.</div>';
+      });
+  }
+
+  function renderSearchResults() {
+    if (skillSearchResults.length === 0) {
+      $skillsSearchResults.innerHTML = '<div class="skills-empty">No results found.</div>';
+      return;
+    }
+    var installedNames = new Set(installedSkills.map(function (s) { return s.name; }));
+
+    $skillsSearchResults.innerHTML = skillSearchResults.map(function (result) {
+      var isInstalled = installedNames.has(result.name);
+      return (
+        '<div class="instance-card skill-search-card" data-package="' + escapeHtml(result.package) + '">' +
+          '<div class="card-top">' +
+            '<span class="card-name">' + escapeHtml(result.name) + '</span>' +
+            '<span class="badge badge-session">' + escapeHtml(result.installs) + '</span>' +
+          '</div>' +
+          '<div class="card-meta"><span>' + escapeHtml(result.package) + '</span></div>' +
+          '<div class="skill-actions">' +
+            (isInstalled
+              ? '<span class="skill-installed-label">Installed</span>'
+              : '<button class="btn btn-skill-install" data-package="' + escapeHtml(result.package) + '">Install</button>'
+            ) +
+          '</div>' +
+        '</div>'
+      );
+    }).join('');
+
+    var installBtns = $skillsSearchResults.querySelectorAll('.btn-skill-install');
+    for (var i = 0; i < installBtns.length; i++) {
+      installBtns[i].addEventListener('click', onSkillInstallClick);
+    }
+  }
+
+  function onSkillInstallClick(e) {
+    e.stopPropagation();
+    var pkg = e.currentTarget.getAttribute('data-package');
+    var btn = e.currentTarget;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>';
+
+    authFetch('/api/skills/install', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ package: pkg }),
+    })
+    .then(function (r) {
+      if (!r.ok) throw new Error('Install failed');
+      return r.json();
+    })
+    .then(function () {
+      btn.textContent = 'Installed';
+      btn.classList.add('btn-skill-installed');
+      loadSkills();
+    })
+    .catch(function () {
+      btn.textContent = 'Failed';
+      btn.disabled = false;
+      setTimeout(function () { btn.textContent = 'Install'; }, 2000);
+    });
+  }
+
+  function openSkillDetail(name, isInstalled) {
+    currentSkillDetail = { name: name, installed: isInstalled };
+    $skillDetailName.textContent = name;
+    $skillDetailContent.innerHTML = '<div class="skills-loading">Loading...</div>';
+
+    if (isInstalled) {
+      $btnSkillAction.textContent = 'Remove Skill';
+      $btnSkillAction.className = 'btn btn-reject btn-create-session';
+    } else {
+      $btnSkillAction.textContent = 'Install Skill';
+      $btnSkillAction.className = 'btn btn-approve btn-create-session';
+    }
+    $btnSkillAction.disabled = false;
+
+    $skillDetailModal.classList.remove('hidden');
+    void $skillDetailModal.offsetHeight;
+    $skillDetailModal.classList.add('visible');
+    document.body.style.overflow = 'hidden';
+
+    if (isInstalled) {
+      authFetch('/api/skills/' + encodeURIComponent(name) + '/content')
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          var content = data.content || '';
+          content = content.replace(/^---[\s\S]*?---\s*\n/, '');
+          $skillDetailContent.innerHTML = renderPlanMarkdown(content);
+        })
+        .catch(function () {
+          $skillDetailContent.innerHTML = '<div class="skills-empty">Failed to load content.</div>';
+        });
+    } else {
+      $skillDetailContent.innerHTML = '<div class="skills-empty">Install this skill to see its full content.</div>';
+    }
+  }
+
+  function closeSkillDetail() {
+    $skillDetailModal.classList.remove('visible');
+    document.body.style.overflow = '';
+    setTimeout(function () {
+      $skillDetailModal.classList.add('hidden');
+    }, 300);
+    currentSkillDetail = null;
+  }
+
+  // Skills event listeners
+  $btnRefreshSkills.addEventListener('click', loadSkills);
+
+  $skillsSearchInput.addEventListener('input', function () {
+    clearTimeout(skillSearchTimeout);
+    var query = this.value.trim();
+    skillSearchTimeout = setTimeout(function () {
+      searchSkills(query);
+    }, 500);
+  });
+
+  $btnCloseSkillDetail.addEventListener('click', closeSkillDetail);
+
+  $skillDetailModal.addEventListener('click', function (e) {
+    if (e.target === $skillDetailModal) closeSkillDetail();
+  });
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !$skillDetailModal.classList.contains('hidden')) {
+      closeSkillDetail();
+    }
+  });
+
+  $btnSkillAction.addEventListener('click', function () {
+    if (!currentSkillDetail) return;
+    if (currentSkillDetail.installed) {
+      if (!confirm('Remove "' + currentSkillDetail.name + '"?')) return;
+      $btnSkillAction.disabled = true;
+      $btnSkillAction.innerHTML = '<span class="spinner"></span> Removing...';
+      authFetch('/api/skills/' + encodeURIComponent(currentSkillDetail.name), { method: 'DELETE' })
+        .then(function (r) {
+          if (!r.ok) throw new Error();
+          return r.json();
+        })
+        .then(function () {
+          closeSkillDetail();
+          loadSkills();
+        })
+        .catch(function () {
+          $btnSkillAction.disabled = false;
+          $btnSkillAction.textContent = 'Remove Failed';
+        });
+    } else {
+      $btnSkillAction.disabled = true;
+      $btnSkillAction.innerHTML = '<span class="spinner"></span> Installing...';
+      authFetch('/api/skills/install', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ package: currentSkillDetail.name }),
+      })
+      .then(function (r) {
+        if (!r.ok) throw new Error();
+        return r.json();
+      })
+      .then(function () {
+        closeSkillDetail();
+        loadSkills();
+      })
+      .catch(function () {
+        $btnSkillAction.disabled = false;
+        $btnSkillAction.textContent = 'Install Failed';
+      });
+    }
+  });
+
   // ---- Init ----
   connect();
   loadSessions();
+  loadSkills();
+
+  // Fetch version from health endpoint
+  fetch('/health').then(function (r) { return r.json(); }).then(function (data) {
+    if (data.version) {
+      document.getElementById('app-version').textContent = 'v' + data.version;
+    }
+  }).catch(function () {});
 })();

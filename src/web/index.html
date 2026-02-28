@@ -15,6 +15,7 @@
     <div class="header-left">
       <img class="logo" src="logo-96.png" alt="Polpo" width="28" height="28">
       <h1>Polpo</h1>
+      <span id="app-version" class="app-version"></span>
     </div>
     <div class="header-right">
       <span id="connection-status" class="status-dot disconnected" title="Disconnected"></span>
@@ -30,6 +31,9 @@
       <p>Start a session or resume a past one from the list below.</p>
       <pre class="code-hint">polpo session --cwd /path/to/project</pre>
     </div>
+    <div id="new-session-bar" class="new-session-bar">
+      <button id="btn-new-session" class="btn btn-new-session">+ New Session</button>
+    </div>
     <div id="instance-list" class="instance-list"></div>
 
     <!-- Past Sessions -->
@@ -39,6 +43,20 @@
         <button id="btn-refresh-sessions" class="btn-icon" title="Refresh">&#8635;</button>
       </div>
       <div id="sessions-list" class="instance-list"></div>
+    </div>
+
+    <!-- Skills Management -->
+    <div id="skills-section" class="sessions-section">
+      <div class="section-header">
+        <h3>Skills</h3>
+        <button id="btn-refresh-skills" class="btn-icon" title="Refresh">&#8635;</button>
+      </div>
+      <div id="skills-search-bar" class="skills-search-bar">
+        <input type="text" id="skills-search-input" class="modal-input skills-search-input"
+               placeholder="Search skills.sh..." autocomplete="off" spellcheck="false">
+      </div>
+      <div id="skills-search-results" class="instance-list hidden"></div>
+      <div id="installed-skills-list" class="instance-list"></div>
     </div>
   </main>
 
@@ -126,6 +144,60 @@
       <input type="file" id="file-input" multiple hidden>
     </div>
   </main>
+
+  <!-- New Session Modal -->
+  <div id="new-session-modal" class="modal-overlay hidden">
+    <div class="modal-content">
+      <div class="modal-handle"><div class="modal-handle-bar"></div></div>
+      <div class="modal-header">
+        <h3>New Session</h3>
+        <button id="btn-close-modal" class="btn-icon" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <label class="modal-label">Agent</label>
+        <div id="new-agent-type" class="agent-type-selector">
+          <button class="agent-type-btn selected" data-type="claude">Claude</button>
+          <button class="agent-type-btn" data-type="codex">Codex</button>
+          <button class="agent-type-btn" data-type="gemini">Gemini</button>
+          <button class="agent-type-btn" data-type="opencode">OpenCode</button>
+          <button class="agent-type-btn" data-type="pi">Pi</button>
+        </div>
+
+        <label class="modal-label" for="new-cwd">Working Directory</label>
+        <div class="cwd-input-wrap">
+          <input type="text" id="new-cwd" class="modal-input" placeholder="/path/to/project" autocomplete="off" spellcheck="false">
+          <div id="cwd-suggestions" class="cwd-suggestions hidden"></div>
+        </div>
+
+        <label class="modal-label" for="new-name">Name <span class="modal-optional">(optional)</span></label>
+        <input type="text" id="new-name" class="modal-input" placeholder="e.g., Backend refactor">
+
+        <label class="modal-label" for="new-model">Model <span class="modal-optional">(optional)</span></label>
+        <input type="text" id="new-model" class="modal-input" placeholder="e.g., opus, sonnet, flash">
+      </div>
+      <div class="modal-footer">
+        <div id="new-session-error" class="modal-error hidden"></div>
+        <button id="btn-create-session" class="btn btn-approve btn-create-session">Create Session</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Skill Detail Modal -->
+  <div id="skill-detail-modal" class="modal-overlay hidden">
+    <div class="modal-content">
+      <div class="modal-handle"><div class="modal-handle-bar"></div></div>
+      <div class="modal-header">
+        <h3 id="skill-detail-name">Skill</h3>
+        <button id="btn-close-skill-detail" class="btn-icon" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body skill-detail-body">
+        <div id="skill-detail-content" class="skill-detail-content"></div>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-skill-action" class="btn btn-approve btn-create-session">Install</button>
+      </div>
+    </div>
+  </div>
 
   <script src="app.js"></script>
 </body>
