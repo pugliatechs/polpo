@@ -104,6 +104,29 @@ function createServer(options = {}) {
   app.get('/favicon.png', (req, res) => {
     res.sendFile(path.join(__dirname, '..', 'web', 'favicon.png'));
   });
+  // PWA assets — must be served before auth middleware
+  app.get('/manifest.json', (req, res) => {
+    res.sendFile(path.join(__dirname, '..', 'web', 'manifest.json'));
+  });
+  app.get('/sw.js', (req, res) => {
+    const { version } = require('../../package.json');
+    const swPath = path.join(__dirname, '..', 'web', 'sw.js');
+    const swContent = require('fs').readFileSync(swPath, 'utf8')
+      .replace('__POLPO_VERSION__', version);
+    res.setHeader('Service-Worker-Allowed', '/');
+    res.setHeader('Content-Type', 'application/javascript');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.send(swContent);
+  });
+  app.get('/icon-192.png', (req, res) => {
+    res.sendFile(path.join(__dirname, '..', 'web', 'icon-192.png'));
+  });
+  app.get('/icon-512.png', (req, res) => {
+    res.sendFile(path.join(__dirname, '..', 'web', 'icon-512.png'));
+  });
+  app.get('/apple-touch-icon.png', (req, res) => {
+    res.sendFile(path.join(__dirname, '..', 'web', 'apple-touch-icon.png'));
+  });
 
   // Rate limit MFA verification: 10 attempts per minute
   const mfaLimiter = rateLimit(60 * 1000, 10);

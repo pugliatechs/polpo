@@ -177,9 +177,10 @@ class JsonlWatcher extends EventEmitter {
       this._emitUserMessage(obj);
     } else if (obj.type === 'assistant') {
       this._emitAssistantMessage(obj);
-      // Detect turn completion: non-null stop_reason means model finished
+      // Detect turn completion: only 'end_turn' means the model is truly idle.
+      // 'tool_use' means the agent stopped to call a tool and will continue.
       const stopReason = obj.message && obj.message.stop_reason;
-      if (stopReason) {
+      if (stopReason === 'end_turn') {
         this.emit('status', 'idle');
       }
     }
@@ -201,6 +202,8 @@ class JsonlWatcher extends EventEmitter {
           source: 'jsonl',
         });
       } else if (block.type === 'tool_result') {
+        // Tool result means agent is still working (tool_use → tool_result → assistant)
+        this.emit('status', 'busy');
         const resultText = typeof block.content === 'string'
           ? block.content
           : JSON.stringify(block.content || '');

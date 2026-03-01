@@ -27,7 +27,7 @@ Four integration modes, supporting **Claude Code**, **OpenAI Codex CLI**, **Goog
 
 ## Requirements
 
-- **Node.js** 18+ (for built-in test runner; 16+ works for everything else)
+- **Node.js** 22+
 - **Claude Code** CLI installed and authenticated, **and/or** **Codex CLI** installed and authenticated, **and/or** **Gemini CLI** installed and authenticated, **and/or** **OpenCode** installed and configured, **and/or** **Pi** installed and configured
 - **macOS** or **Linux** (Windows is not currently supported)
 
@@ -111,7 +111,8 @@ The dashboard shows active sessions, past session history, and lets you send pro
 | Multi-Instance | Run and monitor unlimited parallel sessions |
 | Cost Tracking | Per-turn API costs displayed inline |
 | New Session from Phone | Create fresh sessions of any agent type directly from the dashboard |
-| Skills Management | Browse, search, install, and remove [skills.sh](https://skills.sh) skills from your phone |
+| Conversation Search | Search past conversations across all agents (Claude, Codex, Gemini, Pi) with clickable results |
+| Skills Management | Browse, search, install, and remove [skills.sh](https://skills.sh) skills from Claude instance detail view |
 | Mobile-First UI | Dark OLED theme, touch-optimized, safe-area support, responsive layout |
 | Tunnel Access | Expose the hub over the internet with `--tunnel` (cloudflared, localtunnel, ngrok, SSH) |
 
@@ -177,9 +178,9 @@ Auth is **auto-enabled** when using `--tunnel`. For LAN or VPN deployments, you 
 
 - **CSRF (Cross-Site Request Forgery)**: Origin header validation on WebSocket and API endpoints. Cross-origin requests from malicious pages are rejected.
 - **Command injection**: All CLI invocations use `execFile` (not `exec`). Arguments are passed as arrays, never shell-concatenated.
-- **Path traversal**: File access endpoints validate resolved paths stay within expected directories.
+- **Path traversal**: File access endpoints validate resolved paths stay within expected directories. Search skips symbolic links and validates `realpath` against expected base directories.
 - **XSS (Cross-Site Scripting)**: All user and agent content is escaped via `escapeHtml()` before rendering. SVG uploads are force-downloaded, not served inline.
-- **Rate limiting**: Auth verification (10/min), session creation (10/min), and file uploads (30/min) are rate-limited per IP.
+- **Rate limiting**: Auth verification (10/min), session creation (10/min), file uploads (30/min), and conversation search (1 concurrent) are rate-limited.
 - **Timing-safe comparison**: Token and TOTP verification use `crypto.timingSafeEqual` to prevent timing attacks.
 
 ### Usage
@@ -470,17 +471,32 @@ Tap the paperclip icon to attach files from your phone. Supported types:
 - **Text/code files** - small files (up to 100KB) are inlined directly in the prompt; larger files are saved to disk and Claude reads them with the Read tool
 - **Any other file** - saved to disk and referenced by path for Claude to read
 
+## Conversation Search
+
+Search past conversations across all supported agents directly from the dashboard. Type a query and tap the search button (or press Enter) to find matching messages.
+
+- **Multi-agent** — searches Claude (`~/.claude/projects/`), Codex (`~/.codex/sessions/`), Gemini (`~/.gemini/tmp/`), and Pi (`~/.pi/agent/sessions/`) session files
+- **Clickable results** — tap a result to navigate to the active instance, resume a past session, or fetch and resume from history
+- **Performance** — subagent directories are skipped and files are sorted by modification time (newest first) to return results quickly even with large session histories
+- **Security** — symbolic links are skipped and file paths are validated via `realpath` to prevent path traversal; concurrent searches are rate-limited
+
+### API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/search?q=<query>` | Search conversations across all agents (max 50 results, 10s deadline) |
+
 ## Skills Management
 
-The dashboard integrates with the [skills.sh](https://skills.sh) ecosystem, letting you manage agent skills directly from your phone.
+Skills are a Claude Code-specific feature. The skills manager is accessible from the detail view of any Claude instance — tap the gear icon in the header to open it.
 
 - **Browse installed** — see all installed skills with name, description, tags, and rule file counts
-- **Search registry** — search the skills.sh catalog with debounced live results
+- **Search registry** — search the skills.sh catalog from the [skills.sh](https://skills.sh) ecosystem
 - **Install** — install any skill with a tap (runs `npx skills add <package> -g -y` on the server)
 - **Remove** — remove installed skills with confirmation
-- **Detail view** — tap any installed skill to see its full SKILL.md content rendered as markdown
+- **Detail view** — tap any skill to see its full SKILL.md content rendered as markdown
 
-Skills are stored at `~/.agents/skills/` and symlinked into `~/.claude/skills/` for use by coding agents.
+Skills are stored at `~/.agents/skills/` and symlinked into `~/.claude/skills/` for use by Claude Code.
 
 ### API
 
@@ -527,6 +543,7 @@ Skills are stored at `~/.agents/skills/` and symlinked into `~/.claude/skills/` 
 | POST | `/api/instances/:id/takeover` | Take over a hook instance (spawns wrapped agent) |
 | POST | `/api/instances/:id/abort` | Abort current task |
 | POST | `/api/upload` | Upload a file attachment (base64) |
+| GET | `/api/search?q=<query>` | Search past conversations across all agents |
 | POST | `/api/permission-request` | MCP permission server long-poll |
 | GET | `/api/skills` | List installed skills |
 | GET | `/api/skills/search?q=` | Search skills.sh registry |

@@ -8,6 +8,8 @@
   <meta name="theme-color" content="#0f172a">
   <title>Polpo — Claude Code Controller</title>
   <link rel="icon" href="favicon.png" type="image/png">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -18,6 +20,9 @@
       <span id="app-version" class="app-version"></span>
     </div>
     <div class="header-right">
+      <button id="btn-notifications" class="btn-icon btn-notification" title="Notifications">
+        &#128276;<span id="notification-badge" class="notification-badge hidden"></span>
+      </button>
       <span id="connection-status" class="status-dot disconnected" title="Disconnected"></span>
       <span id="instance-count">0 instances</span>
     </div>
@@ -25,6 +30,13 @@
 
   <!-- Instance List View -->
   <main id="view-list">
+    <!-- Conversation Search -->
+    <div id="search-bar" class="search-bar">
+      <input type="text" id="search-input" class="search-input" placeholder="Search past conversations..." autocomplete="off" spellcheck="false">
+      <button id="btn-search" class="btn btn-search hidden" title="Search">&#128269;</button>
+    </div>
+    <div id="search-results" class="search-results hidden"></div>
+
     <div id="empty-state" class="empty-state">
       <img class="empty-icon" src="logo-96.png" alt="Polpo" width="64" height="64">
       <h2>No active sessions</h2>
@@ -45,19 +57,33 @@
       <div id="sessions-list" class="instance-list"></div>
     </div>
 
-    <!-- Skills Management -->
-    <div id="skills-section" class="sessions-section">
+    <!-- Cost Dashboard -->
+    <div id="cost-section" class="sessions-section hidden">
       <div class="section-header">
-        <h3>Skills</h3>
-        <button id="btn-refresh-skills" class="btn-icon" title="Refresh">&#8635;</button>
+        <h3>Costs</h3>
+        <button id="btn-refresh-costs" class="btn-icon" title="Refresh">&#8635;</button>
       </div>
-      <div id="skills-search-bar" class="skills-search-bar">
-        <input type="text" id="skills-search-input" class="modal-input skills-search-input"
-               placeholder="Search skills.sh..." autocomplete="off" spellcheck="false">
+      <div class="cost-cards">
+        <div class="cost-card">
+          <div class="cost-card-value" id="cost-today">$0</div>
+          <div class="cost-card-label">Today</div>
+        </div>
+        <div class="cost-card">
+          <div class="cost-card-value" id="cost-week">$0</div>
+          <div class="cost-card-label">This Week</div>
+        </div>
+        <div class="cost-card">
+          <div class="cost-card-value" id="cost-month">$0</div>
+          <div class="cost-card-label">This Month</div>
+        </div>
+        <div class="cost-card">
+          <div class="cost-card-value" id="cost-total">$0</div>
+          <div class="cost-card-label">Total</div>
+        </div>
       </div>
-      <div id="skills-search-results" class="instance-list hidden"></div>
-      <div id="installed-skills-list" class="instance-list"></div>
+      <div id="cost-chart" class="cost-chart"></div>
     </div>
+
   </main>
 
   <!-- Instance Detail View -->
@@ -69,6 +95,7 @@
         <span id="detail-status" class="badge">idle</span>
       </div>
       <div class="detail-actions">
+        <button id="btn-skills" class="btn-icon btn-skills hidden" title="Skills">&#9881;</button>
         <button id="btn-abort" class="btn-icon btn-danger" title="Abort">&#10005;</button>
       </div>
     </div>
@@ -182,6 +209,25 @@
     </div>
   </div>
 
+  <!-- Skills Manager Modal -->
+  <div id="skills-manager-modal" class="modal-overlay hidden">
+    <div class="modal-content">
+      <div class="modal-handle"><div class="modal-handle-bar"></div></div>
+      <div class="modal-header">
+        <h3>Skills</h3>
+        <button id="btn-close-skills-manager" class="btn-icon" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="skills-search-bar" class="skills-search-bar">
+          <input type="text" id="skills-search-input" class="modal-input skills-search-input"
+                 placeholder="Search skills.sh..." autocomplete="off" spellcheck="false">
+        </div>
+        <div id="skills-search-results" class="instance-list hidden"></div>
+        <div id="installed-skills-list" class="instance-list"></div>
+      </div>
+    </div>
+  </div>
+
   <!-- Skill Detail Modal -->
   <div id="skill-detail-modal" class="modal-overlay hidden">
     <div class="modal-content">
@@ -200,5 +246,10 @@
   </div>
 
   <script src="app.js"></script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js');
+    }
+  </script>
 </body>
 </html>

@@ -30,6 +30,8 @@
   let skillSearchResults = [];
   let skillSearchTimeout = null;
   let currentSkillDetail = null;
+  let notificationsEnabled = localStorage.getItem('polpo_notifications') === 'true';
+  let pendingApprovalCount = 0;
 
   // ---- DOM refs ----
   const $connectionStatus = document.getElementById('connection-status');
@@ -84,16 +86,28 @@
   const $newModel = document.getElementById('new-model');
   const $btnCreateSession = document.getElementById('btn-create-session');
   const $newSessionError = document.getElementById('new-session-error');
-  const $skillsSection = document.getElementById('skills-section');
+  const $btnSkills = document.getElementById('btn-skills');
+  const $skillsManagerModal = document.getElementById('skills-manager-modal');
+  const $btnCloseSkillsManager = document.getElementById('btn-close-skills-manager');
   const $skillsSearchInput = document.getElementById('skills-search-input');
   const $skillsSearchResults = document.getElementById('skills-search-results');
   const $installedSkillsList = document.getElementById('installed-skills-list');
-  const $btnRefreshSkills = document.getElementById('btn-refresh-skills');
   const $skillDetailModal = document.getElementById('skill-detail-modal');
   const $skillDetailName = document.getElementById('skill-detail-name');
   const $skillDetailContent = document.getElementById('skill-detail-content');
   const $btnCloseSkillDetail = document.getElementById('btn-close-skill-detail');
   const $btnSkillAction = document.getElementById('btn-skill-action');
+  const $btnNotifications = document.getElementById('btn-notifications');
+  const $notificationBadge = document.getElementById('notification-badge');
+  const $costSection = document.getElementById('cost-section');
+  const $costToday = document.getElementById('cost-today');
+  const $costWeek = document.getElementById('cost-week');
+  const $costMonth = document.getElementById('cost-month');
+  const $costTotal = document.getElementById('cost-total');
+  const $costChart = document.getElementById('cost-chart');
+  const $btnRefreshCosts = document.getElementById('btn-refresh-costs');
+  const $searchInput = document.getElementById('search-input');
+  const $searchResults = document.getElementById('search-results');
 
   // ---- Auth-aware fetch wrapper ----
   function authFetch(url, options) {
@@ -188,7 +202,12 @@
 
       case 'instance:status':
         if (instances.has(msg.id)) {
+          var prevStatus = instances.get(msg.id).status;
           instances.get(msg.id).status = msg.status;
+          if (msg.status === 'idle' && prevStatus === 'busy') {
+            var doneInstName = instances.get(msg.id).name || instances.get(msg.id)._firstPrompt || 'Agent';
+            sendNotification('Task Complete', doneInstName + ' finished.', 'done-' + msg.id);
+          }
         }
         renderList();
         if (activeInstanceId === msg.id) renderDetail();
@@ -233,10 +252,14 @@
           instances.get(msg.id).pendingApproval = msg.approval;
           if (msg.approval) {
             instances.get(msg.id).status = 'waiting';
+            var instName = instances.get(msg.id).name || instances.get(msg.id)._firstPrompt || 'Agent';
+            var toolName = msg.approval.tool || 'action';
+            sendNotification('Approval Required', instName + ' needs approval for ' + toolName, 'approval-' + msg.id);
           } else {
             instances.get(msg.id).status = 'busy';
           }
         }
+        updateNotificationBadge();
         renderList();
         if (activeInstanceId === msg.id) renderDetail();
         break;
@@ -254,6 +277,11 @@
           instances.get(msg.id).transcriptPath = msg.transcriptPath;
         }
         renderList();
+        break;
+
+      case 'instance:cost':
+        // Refresh cost dashboard on new cost data
+        loadCosts();
         break;
     }
   }
@@ -430,6 +458,14 @@
     }
     $detailProject.textContent = '📁 ' + (inst.project || '');
     $detailType.innerHTML = '<span class="agent-badge agent-' + (inst.agentType || 'claude') + '">' + (inst.agentType === 'codex' ? 'Codex' : inst.agentType === 'gemini' ? 'Gemini' : inst.agentType === 'opencode' ? 'OpenCode' : inst.agentType === 'pi' ? 'Pi' : 'Claude') + '</span>';
+
+    // Skills button — only for Claude instances
+    var isClaude = !inst.agentType || inst.agentType === 'claude';
+    if (isClaude) {
+      $btnSkills.classList.remove('hidden');
+    } else {
+      $btnSkills.classList.add('hidden');
+    }
 
     // Takeover vs prompt input
     var canPrompt = inst.canReceivePrompts !== false;
@@ -668,12 +704,22 @@
     var name = tool.name || 'Tool';
     var description = '';
     var inputSummary = '';
+    var isDiff = false;
+    var isFileCreate = false;
 
     if (name === 'Bash' || name === 'bash') {
       description = tool.input && tool.input.description || '';
       inputSummary = tool.input && tool.input.command || '';
     } else if (name === 'Read') {
       inputSummary = tool.input && tool.input.file_path || '';
+    } else if (name === 'Edit' && tool.input && tool.input.old_string && tool.input.new_string) {
+      inputSummary = '';
+      description = tool.input.file_path || 'file';
+      isDiff = true;
+    } else if (name === 'Write' && tool.input && tool.input.content) {
+      inputSummary = '';
+      description = tool.input.file_path || 'file';
+      isFileCreate = true;
     } else if (name === 'Edit' || name === 'Write') {
       inputSummary = tool.input && tool.input.file_path || '';
       if (tool.input && tool.input.old_string) {
@@ -726,6 +772,28 @@
         '</div>';
     }
 
+    // Diff view for Edit tool
+    var diffHtml = '';
+    if (isDiff) {
+      diffHtml = renderDiffView(tool.input.old_string, tool.input.new_string);
+    } else if (isFileCreate) {
+      var content = tool.input.content || '';
+      var lines = content.split('\n');
+      var maxLines = 20;
+      var truncated = lines.length > maxLines;
+      var shown = truncated ? lines.slice(0, maxLines) : lines;
+      diffHtml =
+        '<div class="diff-block">' +
+          '<div class="diff-header">' + escapeHtml(tool.input.file_path || 'new file') + '</div>' +
+          '<pre class="diff-body">' +
+            shown.map(function (line, i) {
+              return '<span class="diff-line-add"><span class="diff-gutter">' + (i + 1) + '</span>' + escapeHtml(line) + '</span>';
+            }).join('') +
+            (truncated ? '<span class="diff-line-ctx"><span class="diff-gutter">...</span> ' + (lines.length - maxLines) + ' more lines</span>' : '') +
+          '</pre>' +
+        '</div>';
+    }
+
     var toolId = tool.id || '';
 
     return (
@@ -740,10 +808,83 @@
               '<pre>' + escapeHtml(inputSummary) + '</pre>' +
             '</div>'
           : '') +
+        diffHtml +
         resultHtml +
         timeHtml +
       '</div>'
     );
+  }
+
+  /**
+   * Render a unified diff view from old_string and new_string.
+   */
+  function renderDiffView(oldStr, newStr) {
+    var oldLines = (oldStr || '').split('\n');
+    var newLines = (newStr || '').split('\n');
+
+    // Simple LCS-based diff
+    var diff = computeLineDiff(oldLines, newLines);
+    var addCount = 0, delCount = 0;
+    diff.forEach(function (d) {
+      if (d.type === 'add') addCount++;
+      else if (d.type === 'del') delCount++;
+    });
+
+    var linesHtml = diff.map(function (d) {
+      var prefix = d.type === 'add' ? '+' : d.type === 'del' ? '-' : ' ';
+      var cls = d.type === 'add' ? 'diff-line-add' : d.type === 'del' ? 'diff-line-del' : 'diff-line-ctx';
+      return '<span class="' + cls + '"><span class="diff-gutter">' + prefix + '</span>' + escapeHtml(d.text) + '</span>';
+    }).join('');
+
+    return (
+      '<div class="diff-block">' +
+        '<div class="diff-header">+' + addCount + ' -' + delCount + '</div>' +
+        '<pre class="diff-body">' + linesHtml + '</pre>' +
+      '</div>'
+    );
+  }
+
+  /**
+   * Simple line diff: produces array of {type: 'ctx'|'add'|'del', text}
+   */
+  function computeLineDiff(oldLines, newLines) {
+    // Use LCS for small inputs, fallback to simple replace for large
+    if (oldLines.length + newLines.length > 200) {
+      // Fast path: show all old as deleted, all new as added
+      var result = [];
+      oldLines.forEach(function (l) { result.push({ type: 'del', text: l }); });
+      newLines.forEach(function (l) { result.push({ type: 'add', text: l }); });
+      return result;
+    }
+
+    // LCS table
+    var m = oldLines.length, n = newLines.length;
+    var dp = [];
+    for (var i = 0; i <= m; i++) {
+      dp[i] = [];
+      for (var j = 0; j <= n; j++) {
+        if (i === 0 || j === 0) { dp[i][j] = 0; }
+        else if (oldLines[i - 1] === newLines[j - 1]) { dp[i][j] = dp[i - 1][j - 1] + 1; }
+        else { dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]); }
+      }
+    }
+
+    // Backtrack to build diff
+    var diff = [];
+    var oi = m, ni = n;
+    while (oi > 0 || ni > 0) {
+      if (oi > 0 && ni > 0 && oldLines[oi - 1] === newLines[ni - 1]) {
+        diff.unshift({ type: 'ctx', text: oldLines[oi - 1] });
+        oi--; ni--;
+      } else if (ni > 0 && (oi === 0 || dp[oi][ni - 1] >= dp[oi - 1][ni])) {
+        diff.unshift({ type: 'add', text: newLines[ni - 1] });
+        ni--;
+      } else {
+        diff.unshift({ type: 'del', text: oldLines[oi - 1] });
+        oi--;
+      }
+    }
+    return diff;
   }
 
   function scrollToBottom() {
@@ -1827,16 +1968,44 @@
 
   function closeSkillDetail() {
     $skillDetailModal.classList.remove('visible');
-    document.body.style.overflow = '';
+    // Only restore scroll if skills manager isn't open behind it
+    if ($skillsManagerModal.classList.contains('hidden')) {
+      document.body.style.overflow = '';
+    }
     setTimeout(function () {
       $skillDetailModal.classList.add('hidden');
     }, 300);
     currentSkillDetail = null;
   }
 
-  // Skills event listeners
-  $btnRefreshSkills.addEventListener('click', loadSkills);
+  // Skills Manager modal open/close
+  function openSkillsManager() {
+    loadSkills();
+    $skillsManagerModal.classList.remove('hidden');
+    void $skillsManagerModal.offsetHeight;
+    $skillsManagerModal.classList.add('visible');
+    document.body.style.overflow = 'hidden';
+  }
 
+  function closeSkillsManager() {
+    $skillsManagerModal.classList.remove('visible');
+    document.body.style.overflow = '';
+    setTimeout(function () {
+      $skillsManagerModal.classList.add('hidden');
+      // Clear search state on close
+      $skillsSearchInput.value = '';
+      skillSearchResults = [];
+      $skillsSearchResults.classList.add('hidden');
+    }, 300);
+  }
+
+  $btnSkills.addEventListener('click', openSkillsManager);
+  $btnCloseSkillsManager.addEventListener('click', closeSkillsManager);
+  $skillsManagerModal.addEventListener('click', function (e) {
+    if (e.target === $skillsManagerModal) closeSkillsManager();
+  });
+
+  // Skills event listeners
   $skillsSearchInput.addEventListener('input', function () {
     clearTimeout(skillSearchTimeout);
     var query = this.value.trim();
@@ -1852,8 +2021,13 @@
   });
 
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape' && !$skillDetailModal.classList.contains('hidden')) {
-      closeSkillDetail();
+    if (e.key === 'Escape') {
+      // Close skill detail first (it sits on top), then skills manager
+      if (!$skillDetailModal.classList.contains('hidden')) {
+        closeSkillDetail();
+      } else if (!$skillsManagerModal.classList.contains('hidden')) {
+        closeSkillsManager();
+      }
     }
   });
 
@@ -1899,10 +2073,228 @@
     }
   });
 
+  // ---- Conversation Search ----
+  var $btnSearch = document.getElementById('btn-search');
+
+  function triggerSearch() {
+    var q = $searchInput.value.trim();
+    if (q) searchConversations(q);
+  }
+
+  $searchInput.addEventListener('input', function () {
+    var q = $searchInput.value.trim();
+    if (q) {
+      $btnSearch.classList.remove('hidden');
+    } else {
+      $btnSearch.classList.add('hidden');
+      $searchResults.classList.add('hidden');
+      $searchResults.innerHTML = '';
+    }
+  });
+
+  $btnSearch.addEventListener('click', triggerSearch);
+
+  $searchInput.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      triggerSearch();
+    }
+  });
+
+  function searchConversations(query) {
+    $searchResults.classList.remove('hidden');
+    $searchResults.innerHTML = '<div class="search-empty">Searching...</div>';
+
+    authFetch('/api/search?q=' + encodeURIComponent(query) + '&limit=20')
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (!data.results || data.results.length === 0) {
+          $searchResults.innerHTML = '<div class="search-empty">No results found.</div>';
+          return;
+        }
+        $searchResults.innerHTML = data.results.map(function (r) {
+          // Escape each segment individually so highlight indices (computed
+          // against the raw snippet on the server) stay aligned.
+          var snippet;
+          if (r.matchIndex >= 0 && r.matchLength > 0) {
+            var raw = r.snippet;
+            var before = escapeHtml(raw.slice(0, r.matchIndex));
+            var match = escapeHtml(raw.slice(r.matchIndex, r.matchIndex + r.matchLength));
+            var after = escapeHtml(raw.slice(r.matchIndex + r.matchLength));
+            snippet = before + '<mark>' + match + '</mark>' + after;
+          } else {
+            snippet = escapeHtml(r.snippet);
+          }
+          var role = r.role === 'user' ? 'User' : r.role === 'assistant' ? 'Assistant' : r.role;
+          var time = r.timestamp ? new Date(r.timestamp).toLocaleDateString() : '';
+          return (
+            '<div class="search-result-item" data-session-id="' + escapeHtml(r.sessionId) + '">' +
+              '<div class="search-result-meta">' + escapeHtml(role) + (time ? ' &middot; ' + time : '') + ' &middot; ' + escapeHtml(r.sessionId.slice(0, 8)) + '</div>' +
+              '<div class="search-result-snippet">' + snippet + '</div>' +
+            '</div>'
+          );
+        }).join('');
+
+        // Attach click handlers to search results
+        var items = $searchResults.querySelectorAll('.search-result-item');
+        for (var i = 0; i < items.length; i++) {
+          items[i].addEventListener('click', onSearchResultClick);
+        }
+      })
+      .catch(function () {
+        $searchResults.innerHTML = '<div class="search-empty">Search failed.</div>';
+      });
+  }
+
+  function onSearchResultClick(e) {
+    var sessionId = e.currentTarget.getAttribute('data-session-id');
+    if (!sessionId) return;
+
+    // 1. Check if there's an active instance with this sessionId
+    var found = null;
+    instances.forEach(function (inst, id) {
+      if (inst.sessionId === sessionId) found = id;
+    });
+    if (found) {
+      openDetail(found);
+      return;
+    }
+
+    // 2. Look up in past sessions for cwd/project/agentType
+    var session = null;
+    for (var i = 0; i < pastSessions.length; i++) {
+      if (pastSessions[i].sessionId === sessionId) {
+        session = pastSessions[i];
+        break;
+      }
+    }
+    if (session) {
+      resumeSession(sessionId, session.cwd, session.project, session.agentType || 'claude');
+      return;
+    }
+
+    // 3. Fetch session metadata from API and resume
+    authFetch('/api/sessions/' + sessionId + '/history')
+      .then(function (r) { return r.json(); })
+      .then(function (history) {
+        // Extract cwd from history if possible
+        var cwd = '';
+        var project = sessionId.slice(0, 8);
+        if (history.length > 0 && history[0].cwd) {
+          cwd = history[0].cwd;
+          project = cwd.split('/').pop() || project;
+        }
+        resumeSession(sessionId, cwd, project, 'claude');
+      })
+      .catch(function () {});
+  }
+
+  // ---- Cost Dashboard ----
+  function formatCost(n) {
+    if (n >= 1) return '$' + n.toFixed(2);
+    if (n >= 0.01) return '$' + n.toFixed(3);
+    return '$' + n.toFixed(4);
+  }
+
+  function loadCosts() {
+    authFetch('/api/costs')
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        $costSection.classList.remove('hidden');
+        $costToday.textContent = formatCost(data.today || 0);
+        $costWeek.textContent = formatCost(data.thisWeek || 0);
+        $costMonth.textContent = formatCost(data.thisMonth || 0);
+        $costTotal.textContent = formatCost(data.total || 0);
+        renderCostChart(data.byDay || []);
+      })
+      .catch(function () {
+        // hide section if no data or error
+      });
+  }
+
+  function renderCostChart(byDay) {
+    if (!byDay.length) {
+      $costChart.innerHTML = '';
+      return;
+    }
+    var maxCost = 0;
+    byDay.forEach(function (d) { if (d.cost > maxCost) maxCost = d.cost; });
+    if (maxCost === 0) maxCost = 1;
+
+    $costChart.innerHTML = byDay.map(function (d) {
+      var pct = Math.max(2, (d.cost / maxCost) * 100);
+      return '<div class="cost-bar" style="height:' + pct + '%" title="' + escapeHtml(d.date) + ': ' + escapeHtml(formatCost(d.cost)) + '"></div>';
+    }).join('');
+  }
+
+  $btnRefreshCosts.addEventListener('click', loadCosts);
+
+  // ---- Notifications ----
+  function updateNotificationBell() {
+    if (notificationsEnabled) {
+      $btnNotifications.classList.add('active');
+    } else {
+      $btnNotifications.classList.remove('active');
+    }
+  }
+
+  function updateNotificationBadge() {
+    pendingApprovalCount = 0;
+    instances.forEach(function (inst) {
+      if (inst.pendingApproval) pendingApprovalCount++;
+    });
+    if (pendingApprovalCount > 0) {
+      $notificationBadge.textContent = pendingApprovalCount;
+      $notificationBadge.classList.remove('hidden');
+      $notificationBadge.classList.remove('pulse');
+      void $notificationBadge.offsetWidth;
+      $notificationBadge.classList.add('pulse');
+    } else {
+      $notificationBadge.classList.add('hidden');
+    }
+  }
+
+  function sendNotification(title, body, tag) {
+    if (!notificationsEnabled || !document.hidden) return;
+    if (Notification.permission !== 'granted') return;
+    try {
+      new Notification(title, {
+        body: body,
+        icon: '/icon-192.png',
+        tag: tag || undefined,
+        renotify: !!tag,
+      });
+    } catch (e) {
+      // Notification constructor may fail in some contexts
+    }
+  }
+
+  $btnNotifications.addEventListener('click', function () {
+    if (!notificationsEnabled) {
+      if (!('Notification' in window)) {
+        alert('Notifications not supported in this browser.');
+        return;
+      }
+      Notification.requestPermission().then(function (perm) {
+        if (perm === 'granted') {
+          notificationsEnabled = true;
+          localStorage.setItem('polpo_notifications', 'true');
+          updateNotificationBell();
+        }
+      });
+    } else {
+      notificationsEnabled = false;
+      localStorage.setItem('polpo_notifications', 'false');
+      updateNotificationBell();
+    }
+  });
+
+  updateNotificationBell();
+
   // ---- Init ----
   connect();
   loadSessions();
-  loadSkills();
+  loadCosts();
 
   // Fetch version from health endpoint
   fetch('/health').then(function (r) { return r.json(); }).then(function (data) {

@@ -6,6 +6,7 @@ const os = require('os');
 const { execFile } = require('child_process');
 const { scanSessions, loadHistory } = require('./sessions');
 const { createAgent } = require('../agent/agent-factory');
+const { CostTracker } = require('./cost-tracker');
 
 const UPLOAD_DIR = path.join(os.tmpdir(), 'polpo-uploads');
 const MAX_UPLOAD_SIZE = 10 * 1024 * 1024; // 10MB decoded
@@ -724,6 +725,252 @@ function createApiRouter(instanceManager, getAuthState) {
       res.json({ ok: true });
     });
   });
+
+  // ---- Cost Dashboard ----
+  const costTracker = new CostTracker();
+
+  router.get('/costs', async (req, res) => {
+    try {
+      const data = await costTracker.aggregate();
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to read costs' });
+    }
+  });
+
+  // ---- Conversation Search ----
+  const readline = require('readline');
+  const CLAUDE_PROJECTS = path.join(os.homedir(), '.claude', 'projects');
+  const CODEX_SESSIONS = path.join(os.homedir(), '.codex', 'sessions');
+  const GEMINI_TMP = path.join(os.homedir(), '.gemini', 'tmp');
+  const PI_SESSIONS = path.join(os.homedir(), '.pi', 'agent', 'sessions');
+
+  let searchInProgress = false;
+
+  router.get('/search', async (req, res) => {
+    const query = (req.query.q || '').trim();
+    if (!query || query.length > 200) {
+      return res.json({ results: [] });
+    }
+    if (searchInProgress) {
+      return res.status(429).json({ error: 'Search already in progress' });
+    }
+    searchInProgress = true;
+    const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
+    const lowerQuery = query.toLowerCase();
+
+    try {
+      const results = [];
+
+      // Gather searchable files from all agents
+      const files = [];
+      const sources = [
+        { dir: CLAUDE_PROJECTS, ext: '.jsonl', agent: 'claude', skip: ['subagents'] },
+        { dir: CODEX_SESSIONS, ext: '.jsonl', agent: 'codex' },
+        { dir: GEMINI_TMP, ext: '.json', agent: 'gemini' },
+        { dir: PI_SESSIONS, ext: '.jsonl', agent: 'pi' },
+      ];
+      for (const src of sources) {
+        let realBase;
+        try { realBase = fs.realpathSync(src.dir); } catch { continue; }
+        for (const f of await findSessionFiles(src.dir, src.ext, src.skip)) {
+          files.push({ path: f, agent: src.agent, realBase });
+        }
+      }
+
+      // Sort by modification time (newest first) so recent conversations are searched first
+      files.sort((a, b) => {
+        try {
+          return fs.statSync(b.path).mtimeMs - fs.statSync(a.path).mtimeMs;
+        } catch { return 0; }
+      });
+
+      const deadline = Date.now() + 10000; // 10s timeout
+
+      for (const file of files) {
+        if (Date.now() > deadline || results.length >= limit) break;
+
+        // Security: resolve symlinks and ensure file is inside its base directory
+        let resolved;
+        try { resolved = fs.realpathSync(file.path); } catch { continue; }
+        if (!resolved.startsWith(file.realBase + path.sep)) continue;
+
+        const remaining = limit - results.length;
+        if (file.agent === 'gemini') {
+          const matches = searchGeminiFile(file.path, lowerQuery, remaining);
+          results.push(...matches);
+        } else {
+          const extractor = file.agent === 'codex' ? extractCodexContent
+            : file.agent === 'pi' ? extractPiContent
+            : extractClaudeContent;
+          const matches = await searchJsonlFile(file.path, lowerQuery, remaining, deadline, extractor);
+          results.push(...matches);
+        }
+      }
+
+      searchInProgress = false;
+      res.json({ results: results.slice(0, limit), partial: Date.now() > deadline });
+    } catch (err) {
+      searchInProgress = false;
+      res.status(500).json({ error: 'Search failed' });
+    }
+  });
+
+  async function findSessionFiles(dir, ext, skipDirs) {
+    const files = [];
+    try {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (skipDirs && skipDirs.includes(entry.name)) continue;
+        // Skip symbolic links — prevents traversal outside intended directories
+        if (entry.isSymbolicLink()) continue;
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          files.push(...await findSessionFiles(full, ext, skipDirs));
+        } else if (entry.name.endsWith(ext)) {
+          files.push(full);
+        }
+      }
+    } catch {
+      // skip unreadable dirs
+    }
+    return files;
+  }
+
+  function searchJsonlFile(filePath, query, maxResults, deadline, extractContent) {
+    return new Promise((resolve) => {
+      const results = [];
+      const sessionId = path.basename(filePath, '.jsonl');
+      const stream = fs.createReadStream(filePath, { encoding: 'utf8' });
+      const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+
+      rl.on('line', (line) => {
+        if (results.length >= maxResults || Date.now() > deadline) {
+          rl.close();
+          stream.destroy();
+          return;
+        }
+        if (!line.trim()) return;
+        try {
+          const obj = JSON.parse(line);
+          const extracted = extractContent(obj);
+          if (!extracted) return;
+          const idx = extracted.content.toLowerCase().indexOf(query);
+          if (idx === -1) return;
+
+          const content = extracted.content;
+          const start = Math.max(0, idx - 80);
+          const end = Math.min(content.length, idx + query.length + 80);
+          const snippet = (start > 0 ? '...' : '') +
+            content.slice(start, end) +
+            (end < content.length ? '...' : '');
+
+          results.push({
+            sessionId,
+            role: extracted.role,
+            snippet,
+            matchIndex: idx - start + (start > 0 ? 3 : 0),
+            matchLength: query.length,
+            timestamp: obj.timestamp || null,
+          });
+        } catch {
+          // skip unparseable
+        }
+      });
+
+      rl.on('close', () => resolve(results));
+      rl.on('error', () => resolve(results));
+    });
+  }
+
+  // Search Gemini JSON files (not JSONL — entire file is one JSON object)
+  function searchGeminiFile(filePath, query, maxResults) {
+    const results = [];
+    try {
+      const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      const sessionId = data.sessionId || path.basename(filePath, '.json');
+      const messages = data.messages || [];
+
+      for (const msg of messages) {
+        if (results.length >= maxResults) break;
+        const text = extractGeminiText(msg.content);
+        if (!text) continue;
+        const idx = text.toLowerCase().indexOf(query);
+        if (idx === -1) continue;
+
+        const start = Math.max(0, idx - 80);
+        const end = Math.min(text.length, idx + query.length + 80);
+        const snippet = (start > 0 ? '...' : '') +
+          text.slice(start, end) +
+          (end < text.length ? '...' : '');
+
+        results.push({
+          sessionId,
+          role: msg.type === 'user' ? 'user' : 'assistant',
+          snippet,
+          matchIndex: idx - start + (start > 0 ? 3 : 0),
+          matchLength: query.length,
+          timestamp: msg.timestamp || null,
+        });
+      }
+    } catch {
+      // skip unparseable
+    }
+    return results;
+  }
+
+  function extractGeminiText(content) {
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) {
+      return content.filter(b => b.type === 'text' && b.text).map(b => b.text).join(' ') || null;
+    }
+    return null;
+  }
+
+  // Claude: { type: 'user'|'assistant', message: { content: string|[{type:'text',text}] } }
+  function extractClaudeContent(obj) {
+    const msg = obj.message;
+    if (!msg || !msg.content) return null;
+    if (typeof msg.content === 'string') {
+      return { content: msg.content, role: obj.type || 'unknown' };
+    }
+    if (Array.isArray(msg.content)) {
+      const text = msg.content.filter(b => b.type === 'text' && b.text).map(b => b.text).join(' ');
+      return text ? { content: text, role: obj.type || 'unknown' } : null;
+    }
+    return null;
+  }
+
+  // Codex: { type: 'event_msg', payload: { type: 'user_message', message: '...' } }
+  //    or: { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{type:'output_text',text}] } }
+  function extractCodexContent(obj) {
+    const payload = obj.payload || {};
+    if (obj.type === 'event_msg' && payload.type === 'user_message' && payload.message) {
+      return { content: payload.message, role: 'user' };
+    }
+    if (obj.type === 'response_item' && payload.type === 'message' && payload.role === 'assistant') {
+      const blocks = payload.content;
+      if (Array.isArray(blocks)) {
+        const text = blocks.filter(b => b.type === 'output_text' && b.text).map(b => b.text).join(' ');
+        if (text) return { content: text, role: 'assistant' };
+      }
+    }
+    return null;
+  }
+
+  // Pi: { type: 'message', role: 'user'|'assistant', content: string|[{type:'text',text}] }
+  function extractPiContent(obj) {
+    if (obj.type !== 'message') return null;
+    const content = obj.content;
+    if (typeof content === 'string') {
+      return { content, role: obj.role || 'unknown' };
+    }
+    if (Array.isArray(content)) {
+      const text = content.filter(b => b.type === 'text' && b.text).map(b => b.text).join(' ');
+      return text ? { content: text, role: obj.role || 'unknown' } : null;
+    }
+    return null;
+  }
 
   return router;
 }

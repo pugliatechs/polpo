@@ -401,6 +401,47 @@ describe('JsonlWatcher', () => {
     assert.ok(statuses.includes('idle'), 'Should emit idle on stop_reason');
   });
 
+  it('does not emit idle for assistant with stop_reason tool_use', async () => {
+    fs.writeFileSync(filePath, '');
+    watcher = new JsonlWatcher(filePath, { debounceMs: 20 });
+
+    const statuses = [];
+    watcher.on('status', (s) => statuses.push(s));
+    await watcher.start({ catchUp: false });
+
+    // Write an assistant message with stop_reason: tool_use (agent calling a tool)
+    const line = JSON.stringify({
+      type: 'assistant',
+      uuid: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      message: {
+        id: `msg_${crypto.randomUUID()}`,
+        role: 'assistant',
+        content: [{ type: 'tool_use', name: 'Read', input: { path: '/tmp/test' }, id: `toolu_${crypto.randomUUID()}` }],
+        stop_reason: 'tool_use',
+      },
+    });
+    fs.appendFileSync(filePath, line + '\n');
+    await wait(200);
+
+    const idleStatuses = statuses.filter((s) => s === 'idle');
+    assert.equal(idleStatuses.length, 0, 'Should not emit idle for stop_reason tool_use');
+  });
+
+  it('emits busy status on tool_result', async () => {
+    fs.writeFileSync(filePath, '');
+    watcher = new JsonlWatcher(filePath, { debounceMs: 20 });
+
+    const statuses = [];
+    watcher.on('status', (s) => statuses.push(s));
+    await watcher.start({ catchUp: false });
+
+    fs.appendFileSync(filePath, toolResultLine('toolu_123', 'file contents here') + '\n');
+    await wait(200);
+
+    assert.ok(statuses.includes('busy'), 'Should emit busy on tool_result');
+  });
+
   it('does not emit idle for assistant with null stop_reason', async () => {
     fs.writeFileSync(filePath, '');
     watcher = new JsonlWatcher(filePath, { debounceMs: 20 });

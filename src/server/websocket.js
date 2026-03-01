@@ -10,6 +10,7 @@ const { GeminiScanner } = require('./gemini-scanner');
 const { OpencodeScanner } = require('./opencode-scanner');
 const { PiScanner } = require('./pi-scanner');
 const { PiJsonlAdapter } = require('./pi-jsonl-adapter');
+const { CostTracker } = require('./cost-tracker');
 
 function setupWebSocket(server, instanceManager, getAuthState) {
   const wss = new WebSocket.Server({ server });
@@ -22,6 +23,9 @@ function setupWebSocket(server, instanceManager, getAuthState) {
 
   // Track session-to-instance mapping for auto-discovered sessions
   const sessionToInstance = new Map(); // sessionId -> instanceId
+
+  // Cost tracking
+  const costTracker = new CostTracker();
 
   function broadcastToDashboards(message) {
     const data = JSON.stringify(message);
@@ -72,6 +76,30 @@ function setupWebSocket(server, instanceManager, getAuthState) {
 
   instanceManager.on('instance:message', (data) => {
     broadcastToDashboards({ type: 'instance:message', ...data });
+
+    // Persist cost data from turn_complete messages
+    if (data.message && data.message.contentType === 'turn_complete') {
+      try {
+        const info = typeof data.message.content === 'string'
+          ? JSON.parse(data.message.content) : data.message.content;
+        if (info.cost_usd && info.cost_usd > 0) {
+          const inst = instanceManager.get(data.id);
+          costTracker.record({
+            cost: info.cost_usd,
+            model: info.model || null,
+            instance: data.id,
+            project: inst ? inst.project : null,
+          });
+          broadcastToDashboards({
+            type: 'instance:cost',
+            id: data.id,
+            cost: info.cost_usd,
+          });
+        }
+      } catch {
+        // ignore parse errors
+      }
+    }
   });
 
   instanceManager.on('instance:approval', (data) => {
@@ -409,6 +437,7 @@ function setupWebSocket(server, instanceManager, getAuthState) {
   wss.geminiScanner = geminiScanner;
   wss.opencodeScanner = opencodeScanner;
   wss.piScanner = piScanner;
+  wss.costTracker = costTracker;
 
   return wss;
 }
