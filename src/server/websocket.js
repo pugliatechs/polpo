@@ -12,7 +12,7 @@ const { PiScanner } = require('./pi-scanner');
 const { PiJsonlAdapter } = require('./pi-jsonl-adapter');
 const { CostTracker } = require('./cost-tracker');
 
-function setupWebSocket(server, instanceManager, getAuthState) {
+function setupWebSocket(server, instanceManager, getAuthState, pushManager) {
   const wss = new WebSocket.Server({ server });
 
   // Track mobile/browser clients
@@ -26,6 +26,21 @@ function setupWebSocket(server, instanceManager, getAuthState) {
 
   // Cost tracking
   const costTracker = new CostTracker();
+
+  // ---- Heartbeat: ping dashboard clients every 30s ----
+  const HEARTBEAT_INTERVAL = 30000;
+  const heartbeatTimer = setInterval(function () {
+    for (const client of dashboardClients) {
+      if (client._isAlive === false) {
+        dashboardClients.delete(client);
+        client.terminate();
+        continue;
+      }
+      client._isAlive = false;
+      client.ping();
+    }
+  }, HEARTBEAT_INTERVAL);
+  wss.on('close', function () { clearInterval(heartbeatTimer); });
 
   function broadcastToDashboards(message) {
     const data = JSON.stringify(message);
@@ -72,6 +87,12 @@ function setupWebSocket(server, instanceManager, getAuthState) {
 
   instanceManager.on('instance:status', (data) => {
     broadcastToDashboards({ type: 'instance:status', ...data });
+    // Push notification on task completion
+    if (pushManager && data.status === 'idle') {
+      const inst = instanceManager.get(data.id);
+      const name = inst ? (inst.name || 'Agent') : 'Agent';
+      pushManager.sendToAll('Task Complete', name + ' finished.', 'done-' + data.id);
+    }
   });
 
   instanceManager.on('instance:message', (data) => {
@@ -104,6 +125,13 @@ function setupWebSocket(server, instanceManager, getAuthState) {
 
   instanceManager.on('instance:approval', (data) => {
     broadcastToDashboards({ type: 'instance:approval', ...data });
+    // Push notification for approval requests
+    if (pushManager && data.approval) {
+      const inst = instanceManager.get(data.id);
+      const name = inst ? (inst.name || 'Agent') : 'Agent';
+      const tool = data.approval.tool || 'action';
+      pushManager.sendToAll('Approval Required', name + ' needs approval for ' + tool, 'approval-' + data.id);
+    }
   });
 
   instanceManager.on('instance:autoApprove', (data) => {
@@ -386,6 +414,8 @@ function setupWebSocket(server, instanceManager, getAuthState) {
 
     if (role === 'dashboard') {
       // Mobile/browser dashboard client
+      ws._isAlive = true;
+      ws.on('pong', function () { ws._isAlive = true; });
       dashboardClients.add(ws);
 
       ws.on('message', (raw) => {

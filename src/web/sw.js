@@ -55,3 +55,35 @@ self.addEventListener('fetch', (event) => {
     })
   );
 });
+
+// ---- Web Push Notifications ----
+self.addEventListener('push', (event) => {
+  if (!event.data) return;
+  let data;
+  try { data = event.data.json(); } catch { return; }
+  const title = data.title || 'Polpo';
+  const options = {
+    body: data.body || '',
+    icon: '/icon-192.png',
+    badge: '/logo-96.png',
+    tag: data.tag || undefined,
+    renotify: !!data.tag,
+    data: { url: '/' },
+  };
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const url = (event.notification.data && event.notification.data.url) || '/';
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((windowClients) => {
+      for (const client of windowClients) {
+        if (client.url.includes(self.location.origin) && 'focus' in client) {
+          return client.focus();
+        }
+      }
+      return self.clients.openWindow(url);
+    })
+  );
+});

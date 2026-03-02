@@ -14,6 +14,7 @@ const {
   verifyPin,
   verifyTotp,
 } = require('./auth');
+const { PushManager } = require('./push');
 
 /**
  * Simple in-memory rate limiter.
@@ -193,8 +194,11 @@ function createServer(options = {}) {
   // Rate limit uploads: 30 per minute
   app.post('/api/upload', rateLimit(60 * 1000, 30));
 
+  // Push notifications
+  const pushManager = new PushManager();
+
   // API routes
-  app.use('/api', createApiRouter(instanceManager, getAuthState));
+  app.use('/api', createApiRouter(instanceManager, getAuthState, pushManager));
 
   // SPA fallback — serve index.html for non-API routes
   app.get('*', (req, res) => {
@@ -204,7 +208,7 @@ function createServer(options = {}) {
   });
 
   // WebSocket
-  const wss = setupWebSocket(server, instanceManager, getAuthState);
+  const wss = setupWebSocket(server, instanceManager, getAuthState, pushManager);
 
   if (verbose) {
     instanceManager.on('instance:registered', (inst) => {

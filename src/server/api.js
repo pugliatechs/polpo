@@ -89,7 +89,7 @@ function parseSkillsSearchOutput(stdout) {
   return results;
 }
 
-function createApiRouter(instanceManager, getAuthState) {
+function createApiRouter(instanceManager, getAuthState, pushManager) {
   const router = express.Router();
 
   // Track spawned wrapped agents so we can clean them up
@@ -971,6 +971,42 @@ function createApiRouter(instanceManager, getAuthState) {
     }
     return null;
   }
+
+  // ---- Push Notifications ----
+  router.get('/push/vapid-key', (req, res) => {
+    if (!pushManager || !pushManager.available) {
+      return res.status(503).json({ error: 'Push notifications not available' });
+    }
+    res.json({ publicKey: pushManager.vapidPublicKey });
+  });
+
+  router.post('/push/subscribe', (req, res) => {
+    if (!pushManager || !pushManager.available) {
+      return res.status(503).json({ error: 'Push notifications not available' });
+    }
+    const sub = req.body;
+    if (!sub || typeof sub !== 'object' || !sub.endpoint || typeof sub.endpoint !== 'string') {
+      return res.status(400).json({ error: 'Invalid subscription' });
+    }
+    if (!sub.keys || !sub.keys.p256dh || !sub.keys.auth) {
+      return res.status(400).json({ error: 'Missing encryption keys' });
+    }
+    const added = pushManager.addSubscription(sub);
+    if (!added) return res.status(400).json({ error: 'Invalid subscription endpoint' });
+    res.json({ ok: true });
+  });
+
+  router.post('/push/unsubscribe', (req, res) => {
+    if (!pushManager || !pushManager.available) {
+      return res.status(503).json({ error: 'Push notifications not available' });
+    }
+    const { endpoint } = req.body || {};
+    if (!endpoint || typeof endpoint !== 'string') {
+      return res.status(400).json({ error: 'Missing endpoint' });
+    }
+    pushManager.removeSubscription(endpoint);
+    res.json({ ok: true });
+  });
 
   return router;
 }

@@ -30,6 +30,60 @@
   let skillSearchResults = [];
   let skillSearchTimeout = null;
   let currentSkillDetail = null;
+
+  // ---- Prompt Templates ----
+  var DEFAULT_TEMPLATES = [
+    { id: 'continue', label: 'Continue', text: 'continue', agents: ['claude', 'codex', 'gemini', 'opencode', 'pi'] },
+    { id: 'run-tests', label: 'Run tests', text: 'Run the test suite and fix any failures.', agents: ['claude', 'codex', 'gemini', 'opencode', 'pi'] },
+    { id: 'fix-lint', label: 'Fix lint', text: 'Fix all lint errors and warnings.', agents: ['claude', 'codex', 'gemini', 'opencode', 'pi'] },
+    { id: 'explain', label: 'Explain', text: 'Explain what you just did and why.', agents: ['claude', 'gemini', 'opencode', 'pi'] },
+    { id: 'commit', label: 'Commit', text: 'Create a git commit for the current changes with a descriptive message.', agents: ['claude', 'codex', 'opencode'] },
+    { id: 'review', label: 'Review', text: 'Review the changes you made. Check for bugs, security issues, and edge cases.', agents: ['claude', 'gemini', 'opencode', 'pi'] },
+  ];
+  var VALID_AGENT_TYPES = ['claude', 'codex', 'gemini', 'opencode', 'pi'];
+  var MAX_TEMPLATE_LENGTH = 500;
+  var MAX_CUSTOM_TEMPLATES = 20;
+  var customTemplates = loadCustomTemplates();
+
+  // ---- Session Pinning ----
+  var pinnedIds = loadPinnedIds();
+  function loadPinnedIds() {
+    try {
+      var raw = localStorage.getItem('polpo_pinned');
+      if (!raw) return [];
+      var parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter(function (id) { return typeof id === 'string'; }).slice(0, 10);
+    } catch (e) { return []; }
+  }
+  function savePinnedIds() {
+    try { localStorage.setItem('polpo_pinned', JSON.stringify(pinnedIds.slice(0, 10))); } catch (e) {}
+  }
+  function togglePin(instanceId) {
+    var idx = pinnedIds.indexOf(instanceId);
+    if (idx !== -1) { pinnedIds.splice(idx, 1); }
+    else if (pinnedIds.length < 10) { pinnedIds.push(instanceId); }
+    savePinnedIds();
+    renderList();
+  }
+
+  function loadCustomTemplates() {
+    try {
+      var raw = localStorage.getItem('polpo_templates');
+      if (!raw) return [];
+      var parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter(function (t) {
+        return t && typeof t.label === 'string' && t.label.length > 0 && t.label.length <= 40
+          && typeof t.text === 'string' && t.text.length > 0 && t.text.length <= MAX_TEMPLATE_LENGTH
+          && (!t.agents || Array.isArray(t.agents));
+      }).slice(0, MAX_CUSTOM_TEMPLATES);
+    } catch (e) { return []; }
+  }
+
+  function saveCustomTemplates(templates) {
+    try { localStorage.setItem('polpo_templates', JSON.stringify(templates.slice(0, MAX_CUSTOM_TEMPLATES))); } catch (e) {}
+  }
   let notificationsEnabled = localStorage.getItem('polpo_notifications') === 'true';
   let pendingApprovalCount = 0;
 
@@ -134,19 +188,37 @@
     }
   }
 
+  var heartbeatCheckTimer = null;
+  var HEARTBEAT_STALE_MS = 45000;
+
+  function startHeartbeatCheck() {
+    clearInterval(heartbeatCheckTimer);
+    var lastMessageTime = Date.now();
+    heartbeatCheckTimer = setInterval(function () {
+      if (Date.now() - lastMessageTime > HEARTBEAT_STALE_MS && ws && ws.readyState === WebSocket.OPEN) {
+        ws.close();
+      }
+    }, 10000);
+    return function () { lastMessageTime = Date.now(); };
+  }
+
   function connect() {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const url = `${proto}//${location.host}?role=dashboard`;
     if (wasConnected) setConnectionState('reconnecting');
     ws = new WebSocket(url);
 
+    var markAlive = null;
+
     ws.onopen = function () {
       setConnectionState('connected');
       wasConnected = true;
       reconnectDelay = 1000;
+      markAlive = startHeartbeatCheck();
     };
 
     ws.onclose = function (evt) {
+      clearInterval(heartbeatCheckTimer);
       if (evt.code === 4001) {
         location.href = '/auth.html';
         return;
@@ -157,6 +229,7 @@
     };
 
     ws.onmessage = function (evt) {
+      if (markAlive) markAlive();
       try {
         var msg = JSON.parse(evt.data);
         handleMessage(msg);
@@ -350,10 +423,23 @@
 
     $emptyState.classList.add('hidden');
 
+    // Sort: pinned first, then by status priority, then by recency
+    var statusPriority = { waiting: 0, busy: 1, idle: 2, paused: 3, disconnected: 4 };
+    arr.sort(function (a, b) {
+      var aPinned = pinnedIds.indexOf(a.id) !== -1 ? 0 : 1;
+      var bPinned = pinnedIds.indexOf(b.id) !== -1 ? 0 : 1;
+      if (aPinned !== bPinned) return aPinned - bPinned;
+      var aPri = statusPriority[a.status] !== undefined ? statusPriority[a.status] : 5;
+      var bPri = statusPriority[b.status] !== undefined ? statusPriority[b.status] : 5;
+      if (aPri !== bPri) return aPri - bPri;
+      return 0;
+    });
+
     $instanceList.innerHTML = arr
       .map(function (inst) {
         var badgeClass = 'badge badge-' + inst.status;
         var cardClass = 'instance-card ' + inst.status;
+        var isPinned = pinnedIds.indexOf(inst.id) !== -1;
         var approvalHtml = '';
         if (inst.pendingApproval) {
           approvalHtml =
@@ -365,15 +451,18 @@
         var title = inst._firstPrompt
           ? truncate(inst._firstPrompt, 60)
           : inst.name;
+        var safeId = escapeHtml(inst.id);
+        var safeAgentType = VALID_AGENT_TYPES.indexOf(inst.agentType) !== -1 ? inst.agentType : 'claude';
         return (
-          '<div class="' + cardClass + '" data-id="' + inst.id + '">' +
+          '<div class="' + cardClass + '" data-id="' + safeId + '">' +
             '<div class="card-top">' +
               '<span class="card-name">' + escapeHtml(title) + '</span>' +
+              '<button class="btn-pin' + (isPinned ? ' pinned' : '') + '" data-pin-id="' + safeId + '" title="' + (isPinned ? 'Unpin' : 'Pin') + '">' + (isPinned ? '&#9733;' : '&#9734;') + '</button>' +
               '<span class="' + badgeClass + '">' + (inst.status === 'busy' ? '<span class="pulse-dot"></span>' : '') + inst.status + '</span>' +
             '</div>' +
             '<div class="card-meta">' +
               '<span>' + escapeHtml(inst.project || '') + '</span>' +
-              '<span class="agent-badge agent-' + (inst.agentType || 'claude') + '">' + (inst.agentType === 'codex' ? 'Codex' : inst.agentType === 'gemini' ? 'Gemini' : inst.agentType === 'opencode' ? 'OpenCode' : inst.agentType === 'pi' ? 'Pi' : 'Claude') + '</span>' +
+              '<span class="agent-badge agent-' + safeAgentType + '">' + (safeAgentType === 'codex' ? 'Codex' : safeAgentType === 'gemini' ? 'Gemini' : safeAgentType === 'opencode' ? 'OpenCode' : safeAgentType === 'pi' ? 'Pi' : 'Claude') + '</span>' +
             '</div>' +
             approvalHtml +
           '</div>'
@@ -385,6 +474,14 @@
     var cards = $instanceList.querySelectorAll('.instance-card');
     for (var i = 0; i < cards.length; i++) {
       cards[i].addEventListener('click', onCardClick);
+    }
+    // Attach pin handlers
+    var pins = $instanceList.querySelectorAll('.btn-pin');
+    for (var i = 0; i < pins.length; i++) {
+      pins[i].addEventListener('click', function (e) {
+        e.stopPropagation();
+        togglePin(e.currentTarget.getAttribute('data-pin-id'));
+      });
     }
   }
 
@@ -469,7 +566,8 @@
       $detailStatus.textContent = inst.status;
     }
     $detailProject.textContent = '📁 ' + (inst.project || '');
-    $detailType.innerHTML = '<span class="agent-badge agent-' + (inst.agentType || 'claude') + '">' + (inst.agentType === 'codex' ? 'Codex' : inst.agentType === 'gemini' ? 'Gemini' : inst.agentType === 'opencode' ? 'OpenCode' : inst.agentType === 'pi' ? 'Pi' : 'Claude') + '</span>';
+    var detailAgentType = VALID_AGENT_TYPES.indexOf(inst.agentType) !== -1 ? inst.agentType : 'claude';
+    $detailType.innerHTML = '<span class="agent-badge agent-' + detailAgentType + '">' + (detailAgentType === 'codex' ? 'Codex' : detailAgentType === 'gemini' ? 'Gemini' : detailAgentType === 'opencode' ? 'OpenCode' : detailAgentType === 'pi' ? 'Pi' : 'Claude') + '</span>';
 
     // Skills button — only for Claude instances
     var isClaude = !inst.agentType || inst.agentType === 'claude';
@@ -478,6 +576,9 @@
     } else {
       $btnSkills.classList.add('hidden');
     }
+
+    // Template bar
+    renderTemplateBar();
 
     // Takeover vs prompt input
     var canPrompt = inst.canReceivePrompts !== false;
@@ -787,7 +888,7 @@
     // Diff view for Edit tool
     var diffHtml = '';
     if (isDiff) {
-      diffHtml = renderDiffView(tool.input.old_string, tool.input.new_string);
+      diffHtml = renderDiffView(tool.input.old_string, tool.input.new_string, tool.input.file_path);
     } else if (isFileCreate) {
       var content = tool.input.content || '';
       var lines = content.split('\n');
@@ -830,11 +931,92 @@
   /**
    * Render a unified diff view from old_string and new_string.
    */
-  function renderDiffView(oldStr, newStr) {
+  var diffIdCounter = 0;
+
+  // Syntax highlight rules (applied to already-escaped HTML)
+  var SYNTAX_RULES = {
+    js: [
+      { pattern: /\b(const|let|var|function|return|if|else|for|while|class|import|export|from|async|await|new|this|try|catch|throw|typeof|instanceof|switch|case|break|continue|default|yield)\b/g, cls: 'syn-keyword' },
+      { pattern: /\b(true|false|null|undefined|NaN|Infinity)\b/g, cls: 'syn-literal' },
+      { pattern: /\b(\d+\.?\d*)\b/g, cls: 'syn-number' },
+    ],
+    py: [
+      { pattern: /\b(def|class|if|elif|else|for|while|return|import|from|as|try|except|raise|with|yield|async|await|pass|break|continue|lambda|in|not|and|or|is)\b/g, cls: 'syn-keyword' },
+      { pattern: /\b(True|False|None)\b/g, cls: 'syn-literal' },
+      { pattern: /\b(\d+\.?\d*)\b/g, cls: 'syn-number' },
+    ],
+    go: [
+      { pattern: /\b(func|package|import|return|if|else|for|range|switch|case|break|continue|default|var|const|type|struct|interface|map|chan|go|defer|select|fallthrough)\b/g, cls: 'syn-keyword' },
+      { pattern: /\b(true|false|nil|iota)\b/g, cls: 'syn-literal' },
+      { pattern: /\b(\d+\.?\d*)\b/g, cls: 'syn-number' },
+    ],
+    sh: [
+      { pattern: /\b(if|then|else|elif|fi|for|while|do|done|case|esac|function|return|exit|local|export|source|set)\b/g, cls: 'syn-keyword' },
+      { pattern: /\b(\d+)\b/g, cls: 'syn-number' },
+    ],
+  };
+  var EXT_TO_LANG = {
+    '.js': 'js', '.mjs': 'js', '.cjs': 'js', '.jsx': 'js',
+    '.ts': 'js', '.tsx': 'js', '.py': 'py', '.go': 'go',
+    '.sh': 'sh', '.bash': 'sh', '.rs': 'go',
+  };
+
+  function highlightSyntax(escapedText, filePath) {
+    if (!filePath) return escapedText;
+    var dotIdx = filePath.lastIndexOf('.');
+    if (dotIdx === -1) return escapedText;
+    var ext = filePath.slice(dotIdx).toLowerCase();
+    var rules = SYNTAX_RULES[EXT_TO_LANG[ext]];
+    if (!rules) return escapedText;
+    var tokens = [];
+    var result = escapedText;
+    rules.forEach(function (rule) {
+      result = result.replace(rule.pattern, function (match) {
+        var idx = tokens.length;
+        tokens.push('<span class="' + rule.cls + '">' + match + '</span>');
+        return '\x00SYN' + idx + '\x00';
+      });
+    });
+    return result.replace(/\x00SYN(\d+)\x00/g, function (m, idx) { return tokens[parseInt(idx)]; });
+  }
+
+  function computeWordDiff(oldText, newText) {
+    var oldWords = oldText.split(/(\s+)/);
+    var newWords = newText.split(/(\s+)/);
+    if (oldWords.length > 100 || newWords.length > 100) {
+      return { oldHtml: escapeHtml(oldText), newHtml: escapeHtml(newText) };
+    }
+    var m = oldWords.length, n = newWords.length;
+    var dp = [];
+    for (var i = 0; i <= m; i++) {
+      dp[i] = [];
+      for (var j = 0; j <= n; j++) {
+        if (i === 0 || j === 0) dp[i][j] = 0;
+        else if (oldWords[i - 1] === newWords[j - 1]) dp[i][j] = dp[i - 1][j - 1] + 1;
+        else dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
+      }
+    }
+    var oldParts = [], newParts = [];
+    var oi = m, ni = n;
+    while (oi > 0 || ni > 0) {
+      if (oi > 0 && ni > 0 && oldWords[oi - 1] === newWords[ni - 1]) {
+        oldParts.unshift(escapeHtml(oldWords[oi - 1]));
+        newParts.unshift(escapeHtml(newWords[ni - 1]));
+        oi--; ni--;
+      } else if (ni > 0 && (oi === 0 || dp[oi][ni - 1] >= dp[oi - 1][ni])) {
+        newParts.unshift('<mark class="diff-word-add">' + escapeHtml(newWords[ni - 1]) + '</mark>');
+        ni--;
+      } else {
+        oldParts.unshift('<mark class="diff-word-del">' + escapeHtml(oldWords[oi - 1]) + '</mark>');
+        oi--;
+      }
+    }
+    return { oldHtml: oldParts.join(''), newHtml: newParts.join('') };
+  }
+
+  function renderDiffView(oldStr, newStr, filePath) {
     var oldLines = (oldStr || '').split('\n');
     var newLines = (newStr || '').split('\n');
-
-    // Simple LCS-based diff
     var diff = computeLineDiff(oldLines, newLines);
     var addCount = 0, delCount = 0;
     diff.forEach(function (d) {
@@ -842,34 +1024,57 @@
       else if (d.type === 'del') delCount++;
     });
 
-    var linesHtml = diff.map(function (d) {
+    // Word-level diff: pair adjacent del+add lines
+    var enhanced = [];
+    for (var i = 0; i < diff.length; i++) {
+      if (diff[i].type === 'del' && i + 1 < diff.length && diff[i + 1].type === 'add') {
+        var wd = computeWordDiff(diff[i].text, diff[i + 1].text);
+        enhanced.push({ type: 'del', text: diff[i].text, html: wd.oldHtml });
+        enhanced.push({ type: 'add', text: diff[i + 1].text, html: wd.newHtml });
+        i++;
+      } else {
+        enhanced.push({ type: diff[i].type, text: diff[i].text, html: null });
+      }
+    }
+
+    var oldLineNo = 1, newLineNo = 1;
+    var linesHtml = enhanced.map(function (d) {
+      var leftNum = '', rightNum = '';
+      if (d.type === 'ctx') { leftNum = oldLineNo++; rightNum = newLineNo++; }
+      else if (d.type === 'del') { leftNum = oldLineNo++; }
+      else if (d.type === 'add') { rightNum = newLineNo++; }
       var prefix = d.type === 'add' ? '+' : d.type === 'del' ? '-' : ' ';
       var cls = d.type === 'add' ? 'diff-line-add' : d.type === 'del' ? 'diff-line-del' : 'diff-line-ctx';
-      return '<span class="' + cls + '"><span class="diff-gutter">' + prefix + '</span>' + escapeHtml(d.text) + '</span>';
+      var content = d.html || highlightSyntax(escapeHtml(d.text), filePath);
+      return '<span class="' + cls + '">' +
+        '<span class="diff-gutter-num">' + leftNum + '</span>' +
+        '<span class="diff-gutter-num">' + rightNum + '</span>' +
+        '<span class="diff-gutter-sign">' + prefix + '</span>' +
+        content + '</span>';
     }).join('');
+
+    var isLong = enhanced.length > 30;
+    var bodyId = 'diff-' + (++diffIdCounter);
 
     return (
       '<div class="diff-block">' +
-        '<div class="diff-header">+' + addCount + ' -' + delCount + '</div>' +
-        '<pre class="diff-body">' + linesHtml + '</pre>' +
+        '<div class="diff-header">' +
+          (filePath ? '<span class="diff-filepath">' + escapeHtml(filePath) + '</span>' : '') +
+          '<span class="diff-stats">+' + addCount + ' -' + delCount + '</span>' +
+          (isLong ? '<button class="btn-diff-toggle" data-target="' + bodyId + '" title="Expand">&#9660;</button>' : '') +
+        '</div>' +
+        '<pre class="diff-body' + (isLong ? ' diff-collapsed' : '') + '" id="' + bodyId + '">' + linesHtml + '</pre>' +
       '</div>'
     );
   }
 
-  /**
-   * Simple line diff: produces array of {type: 'ctx'|'add'|'del', text}
-   */
   function computeLineDiff(oldLines, newLines) {
-    // Use LCS for small inputs, fallback to simple replace for large
     if (oldLines.length + newLines.length > 200) {
-      // Fast path: show all old as deleted, all new as added
       var result = [];
       oldLines.forEach(function (l) { result.push({ type: 'del', text: l }); });
       newLines.forEach(function (l) { result.push({ type: 'add', text: l }); });
       return result;
     }
-
-    // LCS table
     var m = oldLines.length, n = newLines.length;
     var dp = [];
     for (var i = 0; i <= m; i++) {
@@ -880,8 +1085,6 @@
         else { dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]); }
       }
     }
-
-    // Backtrack to build diff
     var diff = [];
     var oi = m, ni = n;
     while (oi > 0 || ni > 0) {
@@ -902,6 +1105,19 @@
   function scrollToBottom() {
     $conversation.scrollTop = $conversation.scrollHeight;
   }
+
+  // Diff collapse/expand toggle (delegated)
+  $conversation.addEventListener('click', function (e) {
+    var toggle = e.target.closest('.btn-diff-toggle');
+    if (toggle) {
+      var targetId = toggle.getAttribute('data-target');
+      var body = document.getElementById(targetId);
+      if (body) {
+        body.classList.toggle('diff-collapsed');
+        toggle.innerHTML = body.classList.contains('diff-collapsed') ? '&#9660;' : '&#9650;';
+      }
+    }
+  });
 
   // ---- Actions ----
   function sendPrompt() {
@@ -924,6 +1140,67 @@
     $promptInput.style.height = 'auto';
     updateSendButton();
   }
+
+  // ---- Template Bar ----
+  var $templateBar = document.getElementById('template-bar');
+
+  function renderTemplateBar() {
+    var inst = instances.get(activeInstanceId);
+    if (!inst) { $templateBar.classList.add('hidden'); return; }
+    var agentType = inst.agentType || 'claude';
+    var all = DEFAULT_TEMPLATES.concat(customTemplates);
+    var filtered = all.filter(function (t) {
+      if (!t.agents || t.agents.length === 0) return true;
+      return t.agents.indexOf(agentType) !== -1;
+    });
+    if (filtered.length === 0) { $templateBar.classList.add('hidden'); return; }
+    $templateBar.classList.remove('hidden');
+    $templateBar.innerHTML = filtered.map(function (t) {
+      var isCustom = !DEFAULT_TEMPLATES.some(function (d) { return d.id === t.id; });
+      return '<button class="template-btn' + (isCustom ? ' template-custom' : '') + '" ' +
+        'data-template-text="' + escapeHtml(t.text).replace(/"/g, '&quot;') + '">' +
+        escapeHtml(t.label) + '</button>';
+    }).join('') +
+    '<button class="template-btn template-add" title="Add custom template">+</button>';
+  }
+
+  $templateBar.addEventListener('click', function (e) {
+    var btn = e.target.closest('.template-btn');
+    if (!btn) return;
+    if (btn.classList.contains('template-add')) {
+      var label = prompt('Template name (max 40 chars):');
+      if (!label) return;
+      label = label.trim().slice(0, 40);
+      if (!label) return;
+      var text = prompt('Template text (max 500 chars):');
+      if (!text) return;
+      text = text.trim().slice(0, MAX_TEMPLATE_LENGTH);
+      if (!text) return;
+      customTemplates.push({ id: 'custom-' + Date.now(), label: label, text: text, agents: [] });
+      saveCustomTemplates(customTemplates);
+      renderTemplateBar();
+      return;
+    }
+    var text = btn.getAttribute('data-template-text');
+    if (!text) return;
+    $promptInput.value = text;
+    $promptInput.style.height = 'auto';
+    $promptInput.style.height = Math.min($promptInput.scrollHeight, 120) + 'px';
+    updateSendButton();
+    $promptInput.focus();
+  });
+
+  $templateBar.addEventListener('contextmenu', function (e) {
+    var btn = e.target.closest('.template-custom');
+    if (!btn) return;
+    e.preventDefault();
+    var text = btn.getAttribute('data-template-text');
+    if (confirm('Remove this custom template?')) {
+      customTemplates = customTemplates.filter(function (t) { return t.text !== text; });
+      saveCustomTemplates(customTemplates);
+      renderTemplateBar();
+    }
+  });
 
   function updateSendButton() {
     $btnSend.disabled = !$promptInput.value.trim() && pendingAttachments.length === 0;
@@ -951,7 +1228,61 @@
   // ---- Event Listeners ----
   $btnBack.addEventListener('click', closeDetail);
 
-  $btnSend.addEventListener('click', sendPrompt);
+  $btnSend.addEventListener('click', function () {
+    if (recognition && isRecording) stopRecording();
+    sendPrompt();
+  });
+
+  // ---- Voice Input ----
+  var $btnMic = document.getElementById('btn-mic');
+  var SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  var recognition = null;
+  var isRecording = false;
+
+  if (SpeechRecognition) {
+    $btnMic.classList.remove('hidden');
+    recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = false;
+
+    recognition.onresult = function (event) {
+      var transcript = '';
+      for (var i = event.resultIndex; i < event.results.length; i++) {
+        if (event.results[i].isFinal) {
+          transcript += event.results[i][0].transcript;
+        }
+      }
+      if (transcript) {
+        $promptInput.value += ($promptInput.value ? ' ' : '') + transcript;
+        $promptInput.style.height = 'auto';
+        $promptInput.style.height = Math.min($promptInput.scrollHeight, 120) + 'px';
+        updateSendButton();
+      }
+    };
+    recognition.onerror = function () { stopRecording(); };
+    recognition.onend = function () { if (isRecording) stopRecording(); };
+  }
+
+  function startRecording() {
+    if (!recognition) return;
+    isRecording = true;
+    $btnMic.classList.add('recording');
+    $promptInput.classList.add('recording');
+    recognition.start();
+  }
+
+  function stopRecording() {
+    if (!recognition) return;
+    isRecording = false;
+    $btnMic.classList.remove('recording');
+    $promptInput.classList.remove('recording');
+    try { recognition.stop(); } catch (e) {}
+  }
+
+  $btnMic.addEventListener('click', function () {
+    if (isRecording) stopRecording();
+    else startRecording();
+  });
 
   $btnTakeover.addEventListener('click', function () {
     if (activeInstanceId) takeover(activeInstanceId);
@@ -1007,6 +1338,65 @@
         .catch(function () {});
     }
   });
+
+  // ---- Swipe Gestures on Approval Banner ----
+  (function () {
+    var startX = 0, startY = 0, swiping = false, swipeDebounce = false;
+    $approvalBanner.addEventListener('touchstart', function (e) {
+      if (swipeDebounce) return;
+      var t = e.touches[0];
+      startX = t.clientX;
+      startY = t.clientY;
+      swiping = true;
+      $approvalBanner.style.transition = 'none';
+    });
+    $approvalBanner.addEventListener('touchmove', function (e) {
+      if (!swiping) return;
+      var t = e.touches[0];
+      var deltaX = t.clientX - startX;
+      var deltaY = t.clientY - startY;
+      if (Math.abs(deltaY) > Math.abs(deltaX)) { swiping = false; $approvalBanner.style.transform = ''; return; }
+      e.preventDefault();
+      $approvalBanner.style.transform = 'translateX(' + deltaX + 'px)';
+      $approvalBanner.style.opacity = Math.max(0.3, 1 - Math.abs(deltaX) / $approvalBanner.offsetWidth);
+    }, { passive: false });
+    $approvalBanner.addEventListener('touchend', function (e) {
+      if (!swiping) return;
+      swiping = false;
+      var t = e.changedTouches[0];
+      var deltaX = t.clientX - startX;
+      var threshold = $approvalBanner.offsetWidth * 0.3;
+      $approvalBanner.style.transition = 'transform 0.2s, opacity 0.2s';
+      if (deltaX > threshold && activeInstanceId) {
+        // Swipe right = approve
+        swipeDebounce = true;
+        $approvalBanner.style.transform = 'translateX(100%)';
+        $approvalBanner.style.opacity = '0';
+        if (navigator.vibrate) navigator.vibrate(50);
+        setTimeout(function () {
+          $btnApprove.click();
+          $approvalBanner.style.transform = '';
+          $approvalBanner.style.opacity = '';
+          swipeDebounce = false;
+        }, 200);
+      } else if (deltaX < -threshold && activeInstanceId) {
+        // Swipe left = reject
+        swipeDebounce = true;
+        $approvalBanner.style.transform = 'translateX(-100%)';
+        $approvalBanner.style.opacity = '0';
+        if (navigator.vibrate) navigator.vibrate(50);
+        setTimeout(function () {
+          $btnReject.click();
+          $approvalBanner.style.transform = '';
+          $approvalBanner.style.opacity = '';
+          swipeDebounce = false;
+        }, 200);
+      } else {
+        $approvalBanner.style.transform = '';
+        $approvalBanner.style.opacity = '';
+      }
+    });
+  })();
 
   // Plan banner handlers
   $btnPlanToggle.addEventListener('click', function () {
@@ -1491,15 +1881,16 @@
       var title = s.firstPrompt
         ? (s.firstPrompt.length > 60 ? s.firstPrompt.slice(0, 60) + '...' : s.firstPrompt)
         : s.slug || s.project;
+      var sessionAgentType = VALID_AGENT_TYPES.indexOf(s.agentType) !== -1 ? s.agentType : 'claude';
       return (
-        '<div class="instance-card session-card" data-session-id="' + s.sessionId + '" data-cwd="' + escapeHtml(s.cwd || '') + '" data-project="' + escapeHtml(s.project) + '" data-agent-type="' + (s.agentType || 'claude') + '">' +
+        '<div class="instance-card session-card" data-session-id="' + escapeHtml(s.sessionId) + '" data-cwd="' + escapeHtml(s.cwd || '') + '" data-project="' + escapeHtml(s.project) + '" data-agent-type="' + sessionAgentType + '">' +
           '<div class="card-top">' +
             '<span class="card-name">' + escapeHtml(title) + '</span>' +
             '<span class="badge badge-session">' + ago + '</span>' +
           '</div>' +
           '<div class="card-meta">' +
             '<span>' + escapeHtml(s.project) + '</span>' +
-            '<span class="agent-badge agent-' + (s.agentType || 'claude') + '">' + (s.agentType === 'codex' ? 'Codex' : s.agentType === 'gemini' ? 'Gemini' : s.agentType === 'opencode' ? 'OpenCode' : s.agentType === 'pi' ? 'Pi' : 'Claude') + '</span>' +
+            '<span class="agent-badge agent-' + sessionAgentType + '">' + (sessionAgentType === 'codex' ? 'Codex' : sessionAgentType === 'gemini' ? 'Gemini' : sessionAgentType === 'opencode' ? 'OpenCode' : sessionAgentType === 'pi' ? 'Pi' : 'Claude') + '</span>' +
           '</div>' +
         '</div>'
       );
@@ -2281,6 +2672,63 @@
     }
   }
 
+  function subscribeToPush() {
+    authFetch('/api/push/vapid-key')
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (!data.publicKey) throw new Error('No VAPID key');
+        return navigator.serviceWorker.ready.then(function (reg) {
+          var rawKey = atob(data.publicKey.replace(/-/g, '+').replace(/_/g, '/'));
+          var keyArray = new Uint8Array(rawKey.length);
+          for (var i = 0; i < rawKey.length; i++) keyArray[i] = rawKey.charCodeAt(i);
+          return reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyArray });
+        });
+      })
+      .then(function (subscription) {
+        return authFetch('/api/push/subscribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(subscription.toJSON()),
+        });
+      })
+      .then(function () {
+        notificationsEnabled = true;
+        localStorage.setItem('polpo_notifications', 'true');
+        updateNotificationBell();
+      })
+      .catch(function () {
+        // Push not available — fall back to basic notifications
+        notificationsEnabled = true;
+        localStorage.setItem('polpo_notifications', 'true');
+        updateNotificationBell();
+      });
+  }
+
+  function unsubscribeFromPush() {
+    navigator.serviceWorker.ready.then(function (reg) {
+      return reg.pushManager.getSubscription();
+    }).then(function (subscription) {
+      if (subscription) {
+        var endpoint = subscription.endpoint;
+        return subscription.unsubscribe().then(function () {
+          return authFetch('/api/push/unsubscribe', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ endpoint: endpoint }),
+          });
+        });
+      }
+    }).then(function () {
+      notificationsEnabled = false;
+      localStorage.setItem('polpo_notifications', 'false');
+      updateNotificationBell();
+    }).catch(function () {
+      notificationsEnabled = false;
+      localStorage.setItem('polpo_notifications', 'false');
+      updateNotificationBell();
+    });
+  }
+
   $btnNotifications.addEventListener('click', function () {
     if (!notificationsEnabled) {
       if (!('Notification' in window)) {
@@ -2289,15 +2737,23 @@
       }
       Notification.requestPermission().then(function (perm) {
         if (perm === 'granted') {
-          notificationsEnabled = true;
-          localStorage.setItem('polpo_notifications', 'true');
-          updateNotificationBell();
+          if ('PushManager' in window && navigator.serviceWorker) {
+            subscribeToPush();
+          } else {
+            notificationsEnabled = true;
+            localStorage.setItem('polpo_notifications', 'true');
+            updateNotificationBell();
+          }
         }
       });
     } else {
-      notificationsEnabled = false;
-      localStorage.setItem('polpo_notifications', 'false');
-      updateNotificationBell();
+      if ('PushManager' in window && navigator.serviceWorker) {
+        unsubscribeFromPush();
+      } else {
+        notificationsEnabled = false;
+        localStorage.setItem('polpo_notifications', 'false');
+        updateNotificationBell();
+      }
     }
   });
 
