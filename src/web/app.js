@@ -121,25 +121,37 @@
   }
 
   // ---- WebSocket ----
+  var $reconnectBanner = document.getElementById('reconnect-banner');
+  var wasConnected = false;
+
+  function setConnectionState(state) {
+    $connectionStatus.className = 'status-dot ' + state;
+    $connectionStatus.title = state.charAt(0).toUpperCase() + state.slice(1);
+    if (state === 'reconnecting') {
+      $reconnectBanner.classList.add('visible');
+    } else {
+      $reconnectBanner.classList.remove('visible');
+    }
+  }
+
   function connect() {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const url = `${proto}//${location.host}?role=dashboard`;
+    if (wasConnected) setConnectionState('reconnecting');
     ws = new WebSocket(url);
 
     ws.onopen = function () {
-      $connectionStatus.className = 'status-dot connected';
-      $connectionStatus.title = 'Connected';
+      setConnectionState('connected');
+      wasConnected = true;
       reconnectDelay = 1000;
     };
 
     ws.onclose = function (evt) {
-      $connectionStatus.className = 'status-dot disconnected';
-      $connectionStatus.title = 'Disconnected';
       if (evt.code === 4001) {
-        // Auth required — redirect to auth page
         location.href = '/auth.html';
         return;
       }
+      setConnectionState(wasConnected ? 'reconnecting' : 'disconnected');
       setTimeout(connect, reconnectDelay);
       reconnectDelay = Math.min(reconnectDelay * 1.5, 10000);
     };
@@ -2290,6 +2302,15 @@
   });
 
   updateNotificationBell();
+
+  // ---- Reconnect on wake ----
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible' && ws && ws.readyState !== WebSocket.OPEN) {
+      reconnectDelay = 1000;
+      ws.close();
+      connect();
+    }
+  });
 
   // ---- Init ----
   connect();

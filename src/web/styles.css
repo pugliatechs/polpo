@@ -103,6 +103,32 @@ body {
 }
 .status-dot.connected { background: var(--green); }
 .status-dot.disconnected { background: var(--red); }
+.status-dot.reconnecting { background: var(--yellow, #f0ad4e); animation: pulse-dot 1s ease-in-out infinite; }
+@keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+/* ---- Reconnecting Banner ---- */
+.reconnect-banner {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 16px;
+  background: var(--surface, #1a1a2e);
+  border-bottom: 1px solid var(--yellow, #f0ad4e);
+  color: var(--yellow, #f0ad4e);
+  font-size: 13px;
+  text-align: center;
+}
+.reconnect-banner.visible { display: flex; }
+.reconnect-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid transparent;
+  border-top-color: var(--yellow, #f0ad4e);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
 
 /* ---- Notification Bell ---- */
 .btn-notification {
