@@ -20,6 +20,7 @@
       <span id="app-version" class="app-version"></span>
     </div>
     <div class="header-right">
+      <button id="btn-about" class="btn-icon btn-about" title="About">?</button>
       <button id="btn-notifications" class="btn-icon btn-notification" title="Notifications">
         &#128276;<span id="notification-badge" class="notification-badge hidden"></span>
       </button>
@@ -248,6 +249,29 @@
       </div>
       <div class="modal-footer">
         <button id="btn-skill-action" class="btn btn-approve btn-create-session">Install</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- About Modal -->
+  <div id="about-modal" class="modal-overlay hidden">
+    <div class="modal-content about-modal-content">
+      <div class="modal-handle"><div class="modal-handle-bar"></div></div>
+      <div class="modal-header">
+        <h3>About Polpo</h3>
+        <button id="btn-close-about" class="btn-icon" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body about-body">
+        <img class="about-logo" src="logo-96.png" alt="Polpo" width="64" height="64">
+        <div class="about-name">Polpo</div>
+        <div id="about-version" class="about-version"></div>
+        <div class="about-desc">Control multiple AI coding agents from your mobile device.</div>
+        <div class="about-meta">
+          <div class="about-row"><span class="about-label">Author</span><span class="about-value">Marco Pennelli</span></div>
+          <div class="about-row"><span class="about-label">Organisation</span><span class="about-value"><a class="about-link" href="https://www.pugliatechs.com" target="_blank" rel="noopener">PugliaTechs</a></span></div>
+          <div class="about-row"><span class="about-label">License</span><span class="about-value">MIT</span></div>
+        </div>
+        <a class="about-link" href="https://github.com/pugliatechs/polpo" target="_blank" rel="noopener">github.com/pugliatechs/polpo</a>
       </div>
     </div>
   </div>

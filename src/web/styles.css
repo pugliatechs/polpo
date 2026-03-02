@@ -131,6 +131,23 @@ body {
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* ---- Notification Bell ---- */
+.btn-about {
+  font-size: 14px;
+  font-weight: 700;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1.5px solid var(--text-muted);
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  line-height: 1;
+  opacity: 0.7;
+}
+.btn-about:active { opacity: 1; }
+
 .btn-notification {
   position: relative;
   font-size: 16px;
@@ -1754,6 +1771,41 @@ h5.plan-h { font-size: 13px; }
   flex-direction: column;
   gap: 8px;
 }
+
+/* About Modal */
+.about-modal-content { max-width: 340px; }
+.about-body {
+  align-items: center;
+  text-align: center;
+  padding-bottom: 24px;
+}
+.about-logo { border-radius: 16px; margin-bottom: 4px; }
+.about-name { font-size: 22px; font-weight: 700; letter-spacing: -0.3px; }
+.about-version { font-size: 13px; color: var(--text-muted); margin-bottom: 4px; }
+.about-desc { font-size: 13px; color: var(--text-secondary); line-height: 1.4; margin-bottom: 8px; }
+.about-meta {
+  width: 100%;
+  border-top: 1px solid rgba(255,255,255,0.06);
+  padding-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.about-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+}
+.about-label { color: var(--text-muted); }
+.about-value { color: var(--text-primary); font-weight: 500; }
+.about-link {
+  font-size: 13px;
+  color: var(--accent-light);
+  text-decoration: none;
+  opacity: 0.8;
+}
+.about-link:active { opacity: 1; }
 
 .modal-label {
   font-size: 13px;

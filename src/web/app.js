@@ -2759,6 +2759,28 @@
 
   updateNotificationBell();
 
+  // ---- About Modal ----
+  var $aboutModal = document.getElementById('about-modal');
+  var $btnAbout = document.getElementById('btn-about');
+  var $btnCloseAbout = document.getElementById('btn-close-about');
+
+  function openAbout() {
+    $aboutModal.classList.remove('hidden');
+    void $aboutModal.offsetHeight;
+    $aboutModal.classList.add('visible');
+    document.body.style.overflow = 'hidden';
+  }
+  function closeAbout() {
+    $aboutModal.classList.remove('visible');
+    document.body.style.overflow = '';
+    setTimeout(function () { $aboutModal.classList.add('hidden'); }, 300);
+  }
+  $btnAbout.addEventListener('click', openAbout);
+  $btnCloseAbout.addEventListener('click', closeAbout);
+  $aboutModal.addEventListener('click', function (e) {
+    if (e.target === $aboutModal) closeAbout();
+  });
+
   // ---- Reconnect on wake ----
   document.addEventListener('visibilitychange', function () {
     if (document.visibilityState === 'visible' && ws && ws.readyState !== WebSocket.OPEN) {
@@ -2776,7 +2798,9 @@
   // Fetch version from health endpoint
   fetch('/health').then(function (r) { return r.json(); }).then(function (data) {
     if (data.version) {
-      document.getElementById('app-version').textContent = 'v' + data.version;
+      var versionText = 'v' + data.version;
+      document.getElementById('app-version').textContent = versionText;
+      document.getElementById('about-version').textContent = versionText;
     }
   }).catch(function () {});
 })();
