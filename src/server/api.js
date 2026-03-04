@@ -624,7 +624,7 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
       });
     } catch (err) {
       console.error('[api] takeover failed:', err);
-      res.status(500).json({ error: 'Takeover failed: ' + (err.message || 'unknown error') });
+      res.status(500).json({ error: 'Takeover failed. Check server logs for details.' });
     }
   });
 
@@ -713,8 +713,8 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
       timeout: 30000,
     }, (err, stdout, stderr) => {
       if (err) {
-        console.error('[api:skills:install]', err.message);
-        return res.status(500).json({ error: 'Install failed: ' + (stderr || err.message) });
+        console.error('[api:skills:install]', err.message, stderr);
+        return res.status(500).json({ error: 'Install failed. Check server logs for details.' });
       }
       res.json({ ok: true });
     });
@@ -748,8 +748,8 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
       timeout: 15000,
     }, (err, stdout, stderr) => {
       if (err) {
-        console.error('[api:skills:remove]', err.message);
-        return res.status(500).json({ error: 'Remove failed: ' + (stderr || err.message) });
+        console.error('[api:skills:remove]', err.message, stderr);
+        return res.status(500).json({ error: 'Remove failed. Check server logs for details.' });
       }
       res.json({ ok: true });
     });
