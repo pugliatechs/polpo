@@ -324,7 +324,9 @@ class SessionScanner extends EventEmitter {
           if (obj.version && !version) version = obj.version;
           if (obj.type === 'user' && !firstPrompt) {
             const content = obj.message && obj.message.content;
-            if (Array.isArray(content)) {
+            if (typeof content === 'string' && content.length > 0 && !content.startsWith('<')) {
+              firstPrompt = content.slice(0, 120);
+            } else if (Array.isArray(content)) {
               for (const block of content) {
                 if (block.type === 'text' && !block.text.startsWith('<')) {
                   firstPrompt = block.text.slice(0, 120);

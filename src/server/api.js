@@ -198,6 +198,7 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
       if (existingInst && wsAlive) {
         return res.json({ instanceId: existing.instanceId, alreadyRunning: true });
       }
+      if (existing.instanceId) instanceManager.unregister(existing.instanceId);
       wrappedAgents.delete(sessionId);
       if (existing.ws) try { existing.ws.close(); } catch {}
     }
@@ -238,7 +239,10 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
       instanceManager.setSessionInfo(agent.instanceId, resumeId, null);
 
       // Clean up when agent disconnects
-      const cleanup = () => wrappedAgents.delete(sessionId);
+      const cleanup = () => {
+        wrappedAgents.delete(sessionId);
+        instanceManager.unregister(agent.instanceId);
+      };
       if (agent.ws) agent.ws.on('close', cleanup);
 
       res.json({ instanceId: agent.instanceId });
@@ -284,7 +288,10 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
       await agent.start();
 
       wrappedAgents.set(agent.instanceId, agent);
-      const cleanup = () => wrappedAgents.delete(agent.instanceId);
+      const cleanup = () => {
+        wrappedAgents.delete(agent.instanceId);
+        instanceManager.unregister(agent.instanceId);
+      };
       if (agent.ws) agent.ws.on('close', cleanup);
 
       res.json({ instanceId: agent.instanceId });
@@ -567,7 +574,8 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
       if (existingInst && wsAlive) {
         return res.json({ instanceId: existing.instanceId, alreadyRunning: true });
       }
-      // Stale entry — clean up and proceed with fresh takeover
+      // Stale entry — clean up instance and proceed with fresh takeover
+      if (existing.instanceId) instanceManager.unregister(existing.instanceId);
       wrappedAgents.delete(inst.sessionId);
       if (existing.ws) try { existing.ws.close(); } catch {}
     }
@@ -601,7 +609,10 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
         }
       }
 
-      const cleanup = () => wrappedAgents.delete(inst.sessionId);
+      const cleanup = () => {
+        wrappedAgents.delete(inst.sessionId);
+        instanceManager.unregister(agent.instanceId);
+      };
       if (agent.ws) agent.ws.on('close', cleanup);
 
       res.json({

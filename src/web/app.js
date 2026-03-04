@@ -256,6 +256,10 @@
           instances.set(inst.id, inst);
         });
         renderList();
+        // Eagerly load firstPrompt for instances missing it
+        instances.forEach(function (inst) {
+          if (!inst._firstPrompt && inst.sessionId) reloadHistory(inst);
+        });
         // After reconnect: reload history for the active detail view
         if (activeInstanceId) {
           var active = instances.get(activeInstanceId);
@@ -274,6 +278,10 @@
         msg.instance._firstPrompt = msg.instance.firstPrompt || null;
         instances.set(msg.instance.id, msg.instance);
         renderList();
+        // Eagerly load firstPrompt if missing
+        if (!msg.instance._firstPrompt && msg.instance.sessionId) {
+          reloadHistory(msg.instance);
+        }
         break;
 
       case 'instance:disconnected':
@@ -558,7 +566,8 @@
     var inst = instances.get(activeInstanceId);
     if (!inst) return;
 
-    $detailName.textContent = inst.name;
+    var detailTitle = inst._firstPrompt ? truncate(inst._firstPrompt, 80) : inst.name;
+    $detailName.textContent = detailTitle;
     $detailStatus.className = 'badge badge-' + inst.status;
     if (inst.status === 'busy') {
       $detailStatus.innerHTML = '<span class="pulse-dot"></span>' + escapeHtml(inst.status);
@@ -1294,7 +1303,17 @@
         updateSendButton();
       }
     };
-    recognition.onerror = function () { stopRecording(); };
+    recognition.onerror = function (event) {
+      stopRecording();
+      var errMsg = event.error || 'unknown error';
+      if (errMsg === 'not-allowed') {
+        alert('Microphone access denied. Speech recognition requires HTTPS (or localhost).');
+      } else if (errMsg === 'no-speech') {
+        // Silence — no alert needed
+      } else {
+        alert('Speech recognition error: ' + errMsg);
+      }
+    };
     recognition.onend = function () { if (isRecording) stopRecording(); };
   }
 
