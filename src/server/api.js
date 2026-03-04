@@ -190,10 +190,16 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
     }
     const { name, cwd, agentType } = req.body;
 
-    // Don't spawn duplicates
+    // Don't spawn duplicates — but verify the existing agent is still alive
     if (wrappedAgents.has(sessionId)) {
       const existing = wrappedAgents.get(sessionId);
-      return res.json({ instanceId: existing.instanceId, alreadyRunning: true });
+      const existingInst = instanceManager.get(existing.instanceId);
+      const wsAlive = existing.ws && existing.ws.readyState === 1;
+      if (existingInst && wsAlive) {
+        return res.json({ instanceId: existing.instanceId, alreadyRunning: true });
+      }
+      wrappedAgents.delete(sessionId);
+      if (existing.ws) try { existing.ws.close(); } catch {}
     }
 
     // Validate cwd: must be an absolute path to an existing directory
@@ -553,10 +559,17 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
     if (!inst) return res.status(404).json({ error: 'Instance not found' });
     if (!inst.sessionId) return res.status(400).json({ error: 'Instance has no sessionId' });
 
-    // Don't spawn duplicates
+    // Don't spawn duplicates — but verify the existing agent is still alive
     if (wrappedAgents.has(inst.sessionId)) {
       const existing = wrappedAgents.get(inst.sessionId);
-      return res.json({ instanceId: existing.instanceId, alreadyRunning: true });
+      const existingInst = instanceManager.get(existing.instanceId);
+      const wsAlive = existing.ws && existing.ws.readyState === 1; // WebSocket.OPEN
+      if (existingInst && wsAlive) {
+        return res.json({ instanceId: existing.instanceId, alreadyRunning: true });
+      }
+      // Stale entry — clean up and proceed with fresh takeover
+      wrappedAgents.delete(inst.sessionId);
+      if (existing.ws) try { existing.ws.close(); } catch {}
     }
 
     const authState = typeof getAuthState === 'function' ? getAuthState() : null;
@@ -578,12 +591,14 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
       await agent.start();
       wrappedAgents.set(inst.sessionId, agent);
 
-      // Copy conversation history from the old instance to the new takeover instance
+      // Copy session metadata and conversation history to the new takeover instance
       const newInst = instanceManager.get(agent.instanceId);
-      if (newInst && inst.conversation && inst.conversation.length > 0) {
-        newInst.conversation = [...inst.conversation];
+      if (newInst) {
         newInst.sessionId = inst.sessionId;
         newInst.transcriptPath = inst.transcriptPath;
+        if (inst.conversation && inst.conversation.length > 0) {
+          newInst.conversation = [...inst.conversation];
+        }
       }
 
       const cleanup = () => wrappedAgents.delete(inst.sessionId);
@@ -594,8 +609,8 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
         warning: 'Session taken over. You can now send prompts from your phone.',
       });
     } catch (err) {
-      console.error('[api]', err);
-      res.status(500).json({ error: 'Internal server error' });
+      console.error('[api] takeover failed:', err);
+      res.status(500).json({ error: 'Takeover failed: ' + (err.message || 'unknown error') });
     }
   });
 

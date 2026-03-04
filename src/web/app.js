@@ -1207,22 +1207,57 @@
   }
 
   function takeover(instanceId) {
+    $btnTakeover.disabled = true;
+    $btnTakeover.textContent = 'Taking over...';
     authFetch('/api/instances/' + instanceId + '/takeover', { method: 'POST' })
-      .then(function (r) { return r.json(); })
+      .then(function (r) {
+        if (!r.ok) {
+          return r.json().then(function (err) {
+            throw new Error(err.error || 'Takeover failed (' + r.status + ')');
+          });
+        }
+        return r.json();
+      })
       .then(function (result) {
         if (result.instanceId) {
-          // Switch to the new takeover instance when it appears
           var tryOpen = function (attempts) {
             if (instances.has(result.instanceId)) {
               openDetail(result.instanceId);
             } else if (attempts > 0) {
               setTimeout(function () { tryOpen(attempts - 1); }, 500);
+            } else {
+              // Polling exhausted — force refresh instances and retry once
+              authFetch('/api/instances').then(function (r) { return r.json(); }).then(function (list) {
+                list.forEach(function (inst) {
+                  inst.conversation = inst.conversation || [];
+                  inst._firstPrompt = inst.firstPrompt || null;
+                  instances.set(inst.id, inst);
+                });
+                if (instances.has(result.instanceId)) {
+                  openDetail(result.instanceId);
+                } else {
+                  $btnTakeover.disabled = false;
+                  $btnTakeover.textContent = 'Take Over Session';
+                  alert('Takeover succeeded but the new instance did not appear. Try again.');
+                }
+              }).catch(function () {
+                $btnTakeover.disabled = false;
+                $btnTakeover.textContent = 'Take Over Session';
+              });
             }
           };
           tryOpen(6);
+        } else {
+          throw new Error(result.error || 'No instance returned');
         }
       })
-      .catch(function () {});
+      .catch(function (err) {
+        $btnTakeover.disabled = false;
+        $btnTakeover.textContent = 'Take Over Session';
+        if (err.message !== 'Unauthorized') {
+          alert('Takeover failed: ' + err.message);
+        }
+      });
   }
 
   // ---- Event Listeners ----
