@@ -532,11 +532,25 @@ main {
 }
 
 .skills-empty,
-.skills-loading {
+.skills-loading,
+.loading-message {
   text-align: center;
   padding: 20px 12px;
   color: var(--text-muted);
   font-size: 13px;
+}
+
+.loading-message::before {
+  content: '';
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--text-muted);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  vertical-align: middle;
+  margin-right: 8px;
 }
 
 #skill-detail-modal {

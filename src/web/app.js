@@ -396,6 +396,10 @@
     return str.length > max ? str.slice(0, max) + '...' : str;
   }
 
+  function showLoading(el, text) {
+    el.innerHTML = '<div class="loading-message">' + escapeHtml(text) + '</div>';
+  }
+
   // ---- Render: Instance List ----
   function renderList() {
     var arr = Array.from(instances.values()).filter(function (i) {
@@ -565,6 +569,7 @@
     if (inst) {
       var hasConversation = inst.conversation && inst.conversation.length > 0;
       if ((inst.sessionId && !inst._historyLoaded) || !hasConversation) {
+        showLoading($conversation, 'Loading conversation...');
         reloadHistory(inst);
       }
     }
@@ -572,7 +577,9 @@
     $viewList.classList.add('hidden');
     $viewDetail.classList.remove('hidden');
     renderDetail();
-    renderConversation();
+    if (!inst || (inst.conversation && inst.conversation.length > 0)) {
+      renderConversation();
+    }
     $promptInput.focus();
   }
 
@@ -1913,6 +1920,7 @@
 
   // ---- Past Sessions ----
   function loadSessions() {
+    showLoading($sessionsList, 'Loading sessions...');
     authFetch('/api/sessions?days=7&limit=30')
       .then(function (r) { return r.json(); })
       .then(function (sessions) {
@@ -2256,6 +2264,7 @@
   // ---- Skills ----
 
   function loadSkills() {
+    showLoading($installedSkillsList, 'Loading skills...');
     authFetch('/api/skills')
       .then(function (r) { return r.json(); })
       .then(function (skills) {
@@ -2336,7 +2345,7 @@
       return;
     }
     $skillsSearchResults.classList.remove('hidden');
-    $skillsSearchResults.innerHTML = '<div class="skills-loading">Searching...</div>';
+    $skillsSearchResults.innerHTML = '<div class="loading-message">Searching...</div>';
 
     authFetch('/api/skills/search?q=' + encodeURIComponent(query))
       .then(function (r) { return r.json(); })
@@ -2581,7 +2590,7 @@
 
   function searchConversations(query) {
     $searchResults.classList.remove('hidden');
-    $searchResults.innerHTML = '<div class="search-empty">Searching...</div>';
+    $searchResults.innerHTML = '<div class="loading-message">Searching...</div>';
 
     authFetch('/api/search?q=' + encodeURIComponent(query) + '&limit=20')
       .then(function (r) { return r.json(); })
@@ -2866,6 +2875,7 @@
   });
 
   // ---- Init ----
+  showLoading($instanceList, 'Connecting...');
   connect();
   loadSessions();
   loadCosts();
