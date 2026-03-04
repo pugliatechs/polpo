@@ -2814,6 +2814,18 @@
   }
 
   $btnNotifications.addEventListener('click', function () {
+    // If there are pending approvals, navigate to the first one
+    if (pendingApprovalCount > 0) {
+      var targetId = null;
+      instances.forEach(function (inst, id) {
+        if (!targetId && inst.pendingApproval) targetId = id;
+      });
+      if (targetId) {
+        openDetail(targetId);
+        return;
+      }
+    }
+
     if (!notificationsEnabled) {
       if (!('Notification' in window)) {
         alert('Notifications not supported in this browser.');
