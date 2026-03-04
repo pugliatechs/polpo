@@ -2813,15 +2813,20 @@
     });
   }
 
+  var lastNotificationTarget = null;
+
   $btnNotifications.addEventListener('click', function () {
-    // If there are pending approvals, navigate to the first one
+    // If there are pending approvals, cycle through them
     if (pendingApprovalCount > 0) {
-      var targetId = null;
+      var approvalIds = [];
       instances.forEach(function (inst, id) {
-        if (!targetId && inst.pendingApproval) targetId = id;
+        if (inst.pendingApproval) approvalIds.push(id);
       });
-      if (targetId) {
-        openDetail(targetId);
+      if (approvalIds.length > 0) {
+        var idx = lastNotificationTarget ? approvalIds.indexOf(lastNotificationTarget) : -1;
+        var nextIdx = (idx + 1) % approvalIds.length;
+        lastNotificationTarget = approvalIds[nextIdx];
+        openDetail(lastNotificationTarget);
         return;
       }
     }
