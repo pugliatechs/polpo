@@ -414,6 +414,27 @@
       }
     });
 
+    // Deduplicate: when multiple instances share the same sessionId,
+    // keep only the one with the best status (busy > idle > disconnected)
+    var seenSessions = {};
+    var statusRank = { waiting: 0, busy: 1, idle: 2, paused: 3, disconnected: 4 };
+    arr = arr.filter(function (inst) {
+      if (!inst.sessionId) return true;
+      var prev = seenSessions[inst.sessionId];
+      var rank = statusRank[inst.status] !== undefined ? statusRank[inst.status] : 5;
+      if (!prev || rank < prev.rank) {
+        seenSessions[inst.sessionId] = { inst: inst, rank: rank };
+        return true;
+      }
+      return false;
+    });
+    // Second pass: remove losers
+    var kept = {};
+    Object.keys(seenSessions).forEach(function (sid) { kept[seenSessions[sid].inst.id] = true; });
+    arr = arr.filter(function (inst) {
+      return !inst.sessionId || kept[inst.id];
+    });
+
     $instanceCount.textContent = arr.length + ' instance' + (arr.length !== 1 ? 's' : '');
 
     // Re-render past sessions (to remove any that are now active)

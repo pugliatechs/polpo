@@ -609,6 +609,9 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
         }
       }
 
+      // Remove the old auto-discovered instance (replaced by the takeover)
+      instanceManager.unregister(id);
+
       const cleanup = () => {
         wrappedAgents.delete(inst.sessionId);
         instanceManager.unregister(agent.instanceId);
