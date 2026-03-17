@@ -1,0 +1,64 @@
+name: Tag Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          # Find the previous tag
+          PREV_TAG=$(git tag --sort=-v:refname | grep '^v' | sed -n '2p')
+          if [ -z "$PREV_TAG" ]; then
+            RANGE="HEAD"
+          else
+            RANGE="${PREV_TAG}..HEAD"
+          fi
+
+          # Build release notes from conventional commits
+          {
+            echo "notes<<RELEASE_EOF"
+
+            FEATS=$(git log "$RANGE" --pretty=format:'%s' | grep -E '^feat(\(.+\))?:' | sed 's/^feat\([^)]*\): //' || true)
+            if [ -n "$FEATS" ]; then
+              echo "## Features"
+              echo "$FEATS" | while IFS= read -r line; do echo "* $line"; done
+              echo ""
+            fi
+
+            FIXES=$(git log "$RANGE" --pretty=format:'%s' | grep -E '^fix(\(.+\))?:' | sed 's/^fix\([^)]*\): //' || true)
+            if [ -n "$FIXES" ]; then
+              echo "## Bug Fixes"
+              echo "$FIXES" | while IFS= read -r line; do echo "* $line"; done
+              echo ""
+            fi
+
+            OTHERS=$(git log "$RANGE" --pretty=format:'%s' | grep -vE '^(feat|fix|chore|docs|ci)(\(.+\))?:' | head -20 || true)
+            if [ -n "$OTHERS" ]; then
+              echo "## Other Changes"
+              echo "$OTHERS" | while IFS= read -r line; do echo "* $line"; done
+              echo ""
+            fi
+
+            echo "RELEASE_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body: ${{ steps.notes.outputs.notes }}
+          generate_release_notes: false
