@@ -90,6 +90,28 @@
       <div id="cost-chart" class="cost-chart"></div>
     </div>
 
+    <!-- System Stats (desktop only) -->
+    <div id="stats-bar" class="stats-bar hidden">
+      <div class="stat-item">
+        <span class="stat-label">CPU</span>
+        <div class="stat-bar-wrap"><div id="stat-cpu-bar" class="stat-bar"></div></div>
+        <span id="stat-cpu-val" class="stat-value">0%</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-label">MEM</span>
+        <div class="stat-bar-wrap"><div id="stat-mem-bar" class="stat-bar"></div></div>
+        <span id="stat-mem-val" class="stat-value">0%</span>
+      </div>
+      <div class="stat-item stat-item-text">
+        <span class="stat-label">Uptime</span>
+        <span id="stat-uptime" class="stat-value">0m</span>
+      </div>
+      <div class="stat-item stat-item-text">
+        <span class="stat-label">Polpo</span>
+        <span id="stat-process-mem" class="stat-value">0 MB</span>
+      </div>
+    </div>
+
   </main>
 
   <!-- Instance Detail View -->

@@ -1037,6 +1037,66 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
     res.json({ ok: true });
   });
 
+  // ---- System Stats ----
+  let lastCpuInfo = os.cpus();
+  let lastCpuTime = Date.now();
+
+  router.get('/stats', (req, res) => {
+    const cpus = os.cpus();
+    const now = Date.now();
+    const elapsed = now - lastCpuTime;
+
+    // Calculate CPU usage since last sample
+    let totalIdle = 0;
+    let totalTick = 0;
+    for (let i = 0; i < cpus.length; i++) {
+      const prev = lastCpuInfo[i] ? lastCpuInfo[i].times : cpus[i].times;
+      const curr = cpus[i].times;
+      const idle = curr.idle - prev.idle;
+      const tick = (curr.user - prev.user) + (curr.nice - prev.nice) +
+                   (curr.sys - prev.sys) + (curr.irq - prev.irq) + idle;
+      totalIdle += idle;
+      totalTick += tick;
+    }
+    const cpuUsage = totalTick > 0 ? Math.round((1 - totalIdle / totalTick) * 100) : 0;
+    lastCpuInfo = cpus;
+    lastCpuTime = now;
+
+    const totalMem = os.totalmem();
+    const freeMem = os.freemem();
+    const usedMem = totalMem - freeMem;
+    const proc = process.memoryUsage();
+
+    res.json({
+      cpu: {
+        usage: cpuUsage,
+        cores: cpus.length,
+        model: cpus[0] ? cpus[0].model : '',
+      },
+      memory: {
+        total: totalMem,
+        used: usedMem,
+        free: freeMem,
+        usage: Math.round((usedMem / totalMem) * 100),
+      },
+      process: {
+        rss: proc.rss,
+        heapUsed: proc.heapUsed,
+        heapTotal: proc.heapTotal,
+        uptime: Math.round(process.uptime()),
+      },
+      system: {
+        platform: os.platform(),
+        hostname: os.hostname(),
+        uptime: Math.round(os.uptime()),
+      },
+      instances: {
+        total: instanceManager.getAll().length,
+        active: instanceManager.getAll().filter(function (i) { return i.status === 'busy'; }).length,
+      },
+    });
+  });
+
   return router;
 }
 

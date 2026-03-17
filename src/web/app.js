@@ -163,6 +163,129 @@
   const $searchInput = document.getElementById('search-input');
   const $searchResults = document.getElementById('search-results');
 
+  // ---- Desktop layout ----
+  var desktopBreakpoint = 1024;
+
+  function isDesktop() {
+    return window.innerWidth >= desktopBreakpoint;
+  }
+
+  function setupDesktopLayout() {
+    if (!isDesktop()) {
+      // Tear down desktop layout if it exists
+      var wrapper = document.querySelector('.desktop-split');
+      if (wrapper) {
+        wrapper.parentNode.insertBefore($viewList, wrapper);
+        wrapper.parentNode.insertBefore($viewDetail, wrapper.nextSibling);
+        wrapper.remove();
+      }
+      return;
+    }
+
+    // Already set up
+    if (document.querySelector('.desktop-split')) return;
+
+    // Wrap both views in a flex container
+    var wrapper = document.createElement('div');
+    wrapper.className = 'desktop-split';
+    $viewList.parentNode.insertBefore(wrapper, $viewList);
+    wrapper.appendChild($viewList);
+    wrapper.appendChild($viewDetail);
+
+    // Show both panels
+    $viewList.classList.remove('hidden');
+    $viewDetail.classList.remove('hidden');
+
+    // Add empty state placeholder if no instance selected
+    if (!activeInstanceId) {
+      showDesktopDetailEmpty();
+    }
+  }
+
+  function showDesktopDetailEmpty() {
+    if (!isDesktop()) return;
+    $conversation.innerHTML =
+      '<div class="desktop-detail-empty">' +
+      '<img class="empty-icon" src="logo-96.png" alt="" width="48" height="48">' +
+      '<div>Select a session to view</div>' +
+      '</div>';
+  }
+
+  // Initialize on load and handle resize
+  setupDesktopLayout();
+  var resizeTimer;
+  window.addEventListener('resize', function () {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(setupDesktopLayout, 150);
+  });
+
+  // ---- System Stats (desktop) ----
+  var $statsBar = document.getElementById('stats-bar');
+  var $statCpuBar = document.getElementById('stat-cpu-bar');
+  var $statCpuVal = document.getElementById('stat-cpu-val');
+  var $statMemBar = document.getElementById('stat-mem-bar');
+  var $statMemVal = document.getElementById('stat-mem-val');
+  var $statUptime = document.getElementById('stat-uptime');
+  var $statProcessMem = document.getElementById('stat-process-mem');
+  var statsInterval = null;
+
+  function formatUptime(seconds) {
+    if (seconds < 60) return seconds + 's';
+    if (seconds < 3600) return Math.floor(seconds / 60) + 'm';
+    var h = Math.floor(seconds / 3600);
+    var m = Math.floor((seconds % 3600) / 60);
+    return h + 'h ' + m + 'm';
+  }
+
+  function formatBytes(bytes) {
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(0) + ' KB';
+    if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(0) + ' MB';
+    return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+  }
+
+  function setBarLevel(barEl, pct) {
+    barEl.style.width = pct + '%';
+    barEl.classList.remove('warning', 'critical');
+    if (pct >= 90) barEl.classList.add('critical');
+    else if (pct >= 70) barEl.classList.add('warning');
+  }
+
+  function pollStats() {
+    if (!isDesktop()) return;
+    fetch('/api/stats').then(function (r) { return r.json(); }).then(function (s) {
+      setBarLevel($statCpuBar, s.cpu.usage);
+      $statCpuVal.textContent = s.cpu.usage + '%';
+
+      setBarLevel($statMemBar, s.memory.usage);
+      $statMemVal.textContent = s.memory.usage + '%';
+
+      $statUptime.textContent = formatUptime(s.system.uptime);
+      $statProcessMem.textContent = formatBytes(s.process.rss);
+    }).catch(function () {});
+  }
+
+  function startStatsPolling() {
+    if (statsInterval) return;
+    $statsBar.classList.remove('hidden');
+    pollStats();
+    statsInterval = setInterval(pollStats, 5000);
+  }
+
+  function stopStatsPolling() {
+    if (statsInterval) {
+      clearInterval(statsInterval);
+      statsInterval = null;
+    }
+    $statsBar.classList.add('hidden');
+  }
+
+  // Start/stop on layout change
+  if (isDesktop()) startStatsPolling();
+  window.addEventListener('resize', function () {
+    if (isDesktop()) startStatsPolling();
+    else stopStatsPolling();
+  });
+
   // ---- Auth-aware fetch wrapper ----
   function authFetch(url, options) {
     return fetch(url, options).then(function (res) {
@@ -516,6 +639,11 @@
         togglePin(e.currentTarget.getAttribute('data-pin-id'));
       });
     }
+
+    // Desktop: maintain selected card highlight after re-render
+    if (isDesktop() && activeInstanceId) {
+      highlightSelectedCard(activeInstanceId);
+    }
   }
 
   function onCardClick(e) {
@@ -529,7 +657,7 @@
    * Uses the JSONL history endpoint when a sessionId is available,
    * otherwise falls back to the in-memory conversation endpoint.
    */
-  function reloadHistory(inst) {
+  function reloadHistory(inst, forceScroll) {
     if (inst.sessionId) {
       authFetch('/api/sessions/' + inst.sessionId + '/history')
         .then(function (r) { return r.json(); })
@@ -543,7 +671,10 @@
             inst._firstPrompt = getFirstPrompt(inst.conversation);
             renderList();
           }
-          if (activeInstanceId === inst.id) renderConversation();
+          if (activeInstanceId === inst.id) {
+            renderConversation();
+            if (forceScroll) scrollToBottom(true);
+          }
         })
         .catch(function () {});
     } else {
@@ -555,7 +686,10 @@
             inst._firstPrompt = getFirstPrompt(inst.conversation);
             renderList();
           }
-          if (activeInstanceId === inst.id) renderConversation();
+          if (activeInstanceId === inst.id) {
+            renderConversation();
+            if (forceScroll) scrollToBottom(true);
+          }
         })
         .catch(function () {});
     }
@@ -570,24 +704,47 @@
       var hasConversation = inst.conversation && inst.conversation.length > 0;
       if ((inst.sessionId && !inst._historyLoaded) || !hasConversation) {
         showLoading($conversation, 'Loading conversation...');
-        reloadHistory(inst);
+        reloadHistory(inst, true);
       }
     }
 
-    $viewList.classList.add('hidden');
-    $viewDetail.classList.remove('hidden');
+    if (isDesktop()) {
+      // Desktop: highlight selected card, both panels stay visible
+      highlightSelectedCard(id);
+    } else {
+      $viewList.classList.add('hidden');
+      $viewDetail.classList.remove('hidden');
+    }
     renderDetail();
     if (!inst || (inst.conversation && inst.conversation.length > 0)) {
       renderConversation();
+      scrollToBottom(true);
     }
     $promptInput.focus();
   }
 
   function closeDetail() {
     activeInstanceId = null;
-    $viewDetail.classList.add('hidden');
-    $viewList.classList.remove('hidden');
+    if (isDesktop()) {
+      highlightSelectedCard(null);
+      showDesktopDetailEmpty();
+      renderDetail();
+    } else {
+      $viewDetail.classList.add('hidden');
+      $viewList.classList.remove('hidden');
+    }
     renderList();
+  }
+
+  function highlightSelectedCard(id) {
+    var cards = $instanceList.querySelectorAll('.instance-card');
+    cards.forEach(function (card) {
+      if (card.dataset.id === id) {
+        card.classList.add('selected');
+      } else {
+        card.classList.remove('selected');
+      }
+    });
   }
 
   function renderDetail() {
@@ -1139,8 +1296,19 @@
     return diff;
   }
 
-  function scrollToBottom() {
-    $conversation.scrollTop = $conversation.scrollHeight;
+  /**
+   * Only auto-scroll if user is already near the bottom (within 150px).
+   * Use scrollToBottom(true) to force-scroll regardless (e.g. user sent a prompt).
+   */
+  function scrollToBottom(force) {
+    if (force || isNearBottom()) {
+      $conversation.scrollTop = $conversation.scrollHeight;
+    }
+  }
+
+  function isNearBottom() {
+    var threshold = 150;
+    return ($conversation.scrollHeight - $conversation.scrollTop - $conversation.clientHeight) < threshold;
   }
 
   // Diff collapse/expand toggle (delegated)
@@ -1176,6 +1344,7 @@
     $promptInput.value = '';
     $promptInput.style.height = 'auto';
     updateSendButton();
+    scrollToBottom(true);
   }
 
   // ---- Template Bar ----
@@ -2064,7 +2233,7 @@
   if (window.visualViewport) {
     var onViewportResize = function () {
       document.body.style.height = window.visualViewport.height + 'px';
-      if (activeInstanceId) scrollToBottom();
+      if (activeInstanceId) scrollToBottom(true);
     };
     window.visualViewport.addEventListener('resize', onViewportResize);
     window.visualViewport.addEventListener('scroll', onViewportResize);
