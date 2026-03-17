@@ -1041,10 +1041,9 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
   let lastCpuInfo = os.cpus();
   let lastCpuTime = Date.now();
 
-  router.get('/stats', (req, res) => {
+  router.get('/stats', async (req, res) => {
     const cpus = os.cpus();
     const now = Date.now();
-    const elapsed = now - lastCpuTime;
 
     // Calculate CPU usage since last sample
     let totalIdle = 0;
@@ -1066,6 +1065,32 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
     const freeMem = os.freemem();
     const usedMem = totalMem - freeMem;
     const proc = process.memoryUsage();
+
+    // Per-instance details with cost
+    const allInstances = instanceManager.getAll();
+    let costByInstance = {};
+    try {
+      const records = await costTracker.readAll();
+      for (const r of records) {
+        if (r.instance) {
+          if (!costByInstance[r.instance]) costByInstance[r.instance] = 0;
+          costByInstance[r.instance] += r.cost || 0;
+        }
+      }
+    } catch {}
+
+    const sessions = allInstances.map(function (inst) {
+      return {
+        id: inst.id,
+        name: inst.firstPrompt ? inst.firstPrompt.slice(0, 60) : inst.name,
+        project: inst.project,
+        status: inst.status,
+        agentType: inst.agentType,
+        uptime: Math.round((now - inst.registeredAt) / 1000),
+        cost: Math.round((costByInstance[inst.id] || 0) * 10000) / 10000,
+        messages: inst.conversationLength,
+      };
+    });
 
     res.json({
       cpu: {
@@ -1090,10 +1115,7 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
         hostname: os.hostname(),
         uptime: Math.round(os.uptime()),
       },
-      instances: {
-        total: instanceManager.getAll().length,
-        active: instanceManager.getAll().filter(function (i) { return i.status === 'busy'; }).length,
-      },
+      sessions: sessions,
     });
   });
 

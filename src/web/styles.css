@@ -2320,6 +2320,12 @@ h5.plan-h { font-size: 13px; }
   border-top: 1px solid rgba(255,255,255,0.06);
   gap: 12px;
   flex-shrink: 0;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.stats-bar:hover {
+  background: rgba(255,255,255,0.03);
 }
 
 .stat-item {
@@ -2373,6 +2379,198 @@ h5.plan-h { font-size: 13px; }
   min-width: 36px;
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+
+/* ---- Stats Modal ---- */
+.stats-modal-content {
+  max-width: 620px;
+}
+
+.stats-gauges {
+  display: flex;
+  gap: 20px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.stats-gauge {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.gauge-ring {
+  width: 90px;
+  height: 90px;
+  position: relative;
+}
+
+.gauge-ring svg {
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+}
+
+.gauge-bg {
+  fill: none;
+  stroke: rgba(255,255,255,0.06);
+  stroke-width: 3;
+}
+
+.gauge-fill {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 3;
+  stroke-linecap: round;
+  transition: stroke-dasharray 0.6s ease, stroke 0.3s ease;
+}
+
+.gauge-fill.warning { stroke: var(--yellow); }
+.gauge-fill.critical { stroke: var(--red); }
+
+.gauge-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.gauge-value {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.gauge-name {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.gauge-detail {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.stats-info-col {
+  flex: 1;
+  min-width: 160px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.stats-info-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  padding: 4px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+
+.stats-info-label {
+  color: var(--text-muted);
+}
+
+.stats-info-value {
+  color: var(--text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.stats-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin: 16px 0 8px;
+}
+
+.stats-sessions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 300px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.stats-session-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: rgba(255,255,255,0.02);
+  border: 1px solid rgba(255,255,255,0.04);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+}
+
+.stats-session-agent {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 10px;
+  flex-shrink: 0;
+  text-transform: uppercase;
+}
+
+.stats-session-agent.claude { background: rgba(124,58,237,0.2); color: var(--accent-light); }
+.stats-session-agent.codex { background: rgba(16,185,129,0.2); color: #34d399; }
+.stats-session-agent.gemini { background: rgba(66,133,244,0.2); color: #4285f4; }
+.stats-session-agent.opencode { background: rgba(249,115,22,0.2); color: #f97316; }
+.stats-session-agent.pi { background: rgba(236,72,153,0.2); color: #ec4899; }
+
+.stats-session-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-weight: 500;
+}
+
+.stats-session-meta {
+  display: flex;
+  gap: 12px;
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.stats-session-cost {
+  color: var(--accent-light);
+  font-weight: 600;
+}
+
+.stats-session-status {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+  flex-shrink: 0;
+}
+
+.stats-session-status.busy { background: rgba(34,197,94,0.15); color: var(--green); }
+.stats-session-status.idle { background: rgba(148,163,184,0.1); color: var(--text-muted); }
+.stats-session-status.waiting { background: rgba(234,179,8,0.15); color: var(--yellow); }
+.stats-session-status.disconnected { background: rgba(239,68,68,0.1); color: var(--red); }
+
+.stats-sessions-empty {
+  text-align: center;
+  padding: 16px;
+  color: var(--text-muted);
+  font-size: 13px;
 }
 
 /* ---- Responsive: tablets ---- */

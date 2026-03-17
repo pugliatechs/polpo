@@ -228,6 +228,23 @@
   var $statUptime = document.getElementById('stat-uptime');
   var $statProcessMem = document.getElementById('stat-process-mem');
   var statsInterval = null;
+  var lastStatsData = null;
+
+  // Stats modal refs
+  var $statsModal = document.getElementById('stats-modal');
+  var $btnCloseStats = document.getElementById('btn-close-stats');
+  var $gaugeCpuFill = document.getElementById('gauge-cpu-fill');
+  var $gaugeCpuVal = document.getElementById('gauge-cpu-val');
+  var $gaugeCpuDetail = document.getElementById('gauge-cpu-detail');
+  var $gaugeMemFill = document.getElementById('gauge-mem-fill');
+  var $gaugeMemVal = document.getElementById('gauge-mem-val');
+  var $gaugeMemDetail = document.getElementById('gauge-mem-detail');
+  var $statsHostname = document.getElementById('stats-hostname');
+  var $statsPlatform = document.getElementById('stats-platform');
+  var $statsSysUptime = document.getElementById('stats-sys-uptime');
+  var $statsProcUptime = document.getElementById('stats-proc-uptime');
+  var $statsProcMem = document.getElementById('stats-proc-mem');
+  var $statsSessionsList = document.getElementById('stats-sessions-list');
 
   function formatUptime(seconds) {
     if (seconds < 60) return seconds + 's';
@@ -243,6 +260,12 @@
     return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
   }
 
+  function formatCost(cost) {
+    if (cost === 0) return '$0';
+    if (cost < 0.01) return '<$0.01';
+    return '$' + cost.toFixed(2);
+  }
+
   function setBarLevel(barEl, pct) {
     barEl.style.width = pct + '%';
     barEl.classList.remove('warning', 'critical');
@@ -250,19 +273,94 @@
     else if (pct >= 70) barEl.classList.add('warning');
   }
 
+  function setGaugeLevel(fillEl, pct) {
+    fillEl.setAttribute('stroke-dasharray', pct + ', 100');
+    fillEl.classList.remove('warning', 'critical');
+    if (pct >= 90) fillEl.classList.add('critical');
+    else if (pct >= 70) fillEl.classList.add('warning');
+  }
+
   function pollStats() {
-    if (!isDesktop()) return;
     fetch('/api/stats').then(function (r) { return r.json(); }).then(function (s) {
+      lastStatsData = s;
+
+      // Update stats bar
       setBarLevel($statCpuBar, s.cpu.usage);
       $statCpuVal.textContent = s.cpu.usage + '%';
-
       setBarLevel($statMemBar, s.memory.usage);
       $statMemVal.textContent = s.memory.usage + '%';
-
       $statUptime.textContent = formatUptime(s.system.uptime);
       $statProcessMem.textContent = formatBytes(s.process.rss);
+
+      // Update modal if open
+      if (!$statsModal.classList.contains('hidden')) {
+        renderStatsModal(s);
+      }
     }).catch(function () {});
   }
+
+  function renderStatsModal(s) {
+    // Gauges
+    setGaugeLevel($gaugeCpuFill, s.cpu.usage);
+    $gaugeCpuVal.textContent = s.cpu.usage + '%';
+    $gaugeCpuDetail.textContent = s.cpu.cores + ' cores';
+
+    setGaugeLevel($gaugeMemFill, s.memory.usage);
+    $gaugeMemVal.textContent = s.memory.usage + '%';
+    $gaugeMemDetail.textContent = formatBytes(s.memory.used) + ' / ' + formatBytes(s.memory.total);
+
+    // Info
+    $statsHostname.textContent = s.system.hostname;
+    $statsPlatform.textContent = s.system.platform;
+    $statsSysUptime.textContent = formatUptime(s.system.uptime);
+    $statsProcUptime.textContent = formatUptime(s.process.uptime);
+    $statsProcMem.textContent = formatBytes(s.process.rss);
+
+    // Sessions
+    if (!s.sessions || s.sessions.length === 0) {
+      $statsSessionsList.innerHTML = '<div class="stats-sessions-empty">No active sessions</div>';
+      return;
+    }
+
+    $statsSessionsList.innerHTML = s.sessions.map(function (sess) {
+      var agentLabel = sess.agentType === 'codex' ? 'Codex' :
+        sess.agentType === 'gemini' ? 'Gemini' :
+        sess.agentType === 'opencode' ? 'OpenCode' :
+        sess.agentType === 'pi' ? 'Pi' : 'Claude';
+      var safeAgent = escapeHtml(sess.agentType || 'claude');
+      return (
+        '<div class="stats-session-row">' +
+          '<span class="stats-session-agent ' + safeAgent + '">' + escapeHtml(agentLabel) + '</span>' +
+          '<span class="stats-session-name" title="' + escapeHtml(sess.name) + '">' + escapeHtml(sess.name) + '</span>' +
+          '<span class="stats-session-meta">' +
+            '<span>' + formatUptime(sess.uptime) + '</span>' +
+            '<span class="stats-session-cost">' + formatCost(sess.cost) + '</span>' +
+            '<span>' + sess.messages + ' msgs</span>' +
+          '</span>' +
+          '<span class="stats-session-status ' + escapeHtml(sess.status) + '">' + escapeHtml(sess.status) + '</span>' +
+        '</div>'
+      );
+    }).join('');
+  }
+
+  function openStatsModal() {
+    $statsModal.classList.remove('hidden');
+    requestAnimationFrame(function () { $statsModal.classList.add('visible'); });
+    if (lastStatsData) renderStatsModal(lastStatsData);
+    pollStats(); // Refresh immediately
+  }
+
+  function closeStatsModal() {
+    $statsModal.classList.remove('visible');
+    setTimeout(function () { $statsModal.classList.add('hidden'); }, 300);
+  }
+
+  // Stats bar click opens modal
+  $statsBar.addEventListener('click', openStatsModal);
+  $btnCloseStats.addEventListener('click', closeStatsModal);
+  $statsModal.addEventListener('click', function (e) {
+    if (e.target === $statsModal) closeStatsModal();
+  });
 
   function startStatsPolling() {
     if (statsInterval) return;

@@ -298,6 +298,73 @@
     </div>
   </div>
 
+  <!-- Stats Modal (desktop) -->
+  <div id="stats-modal" class="modal-overlay hidden">
+    <div class="modal-content stats-modal-content">
+      <div class="modal-handle"><div class="modal-handle-bar"></div></div>
+      <div class="modal-header">
+        <h3>System Monitor</h3>
+        <button id="btn-close-stats" class="btn-icon" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body" id="stats-modal-body">
+        <div class="stats-gauges">
+          <div class="stats-gauge">
+            <div class="gauge-ring" id="gauge-cpu">
+              <svg viewBox="0 0 36 36">
+                <path class="gauge-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
+                <path class="gauge-fill" id="gauge-cpu-fill" stroke-dasharray="0, 100" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
+              </svg>
+              <div class="gauge-label">
+                <span id="gauge-cpu-val" class="gauge-value">0%</span>
+                <span class="gauge-name">CPU</span>
+              </div>
+            </div>
+            <div class="gauge-detail" id="gauge-cpu-detail"></div>
+          </div>
+          <div class="stats-gauge">
+            <div class="gauge-ring" id="gauge-mem">
+              <svg viewBox="0 0 36 36">
+                <path class="gauge-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
+                <path class="gauge-fill" id="gauge-mem-fill" stroke-dasharray="0, 100" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
+              </svg>
+              <div class="gauge-label">
+                <span id="gauge-mem-val" class="gauge-value">0%</span>
+                <span class="gauge-name">MEM</span>
+              </div>
+            </div>
+            <div class="gauge-detail" id="gauge-mem-detail"></div>
+          </div>
+          <div class="stats-info-col">
+            <div class="stats-info-row">
+              <span class="stats-info-label">Hostname</span>
+              <span id="stats-hostname" class="stats-info-value">—</span>
+            </div>
+            <div class="stats-info-row">
+              <span class="stats-info-label">Platform</span>
+              <span id="stats-platform" class="stats-info-value">—</span>
+            </div>
+            <div class="stats-info-row">
+              <span class="stats-info-label">System uptime</span>
+              <span id="stats-sys-uptime" class="stats-info-value">—</span>
+            </div>
+            <div class="stats-info-row">
+              <span class="stats-info-label">Polpo uptime</span>
+              <span id="stats-proc-uptime" class="stats-info-value">—</span>
+            </div>
+            <div class="stats-info-row">
+              <span class="stats-info-label">Polpo memory</span>
+              <span id="stats-proc-mem" class="stats-info-value">—</span>
+            </div>
+          </div>
+        </div>
+        <div class="stats-sessions-section">
+          <h4 class="stats-section-title">Active Sessions</h4>
+          <div id="stats-sessions-list" class="stats-sessions-list"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <script src="app.js"></script>
   <script>
     if ('serviceWorker' in navigator) {
