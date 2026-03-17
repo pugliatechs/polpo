@@ -676,25 +676,30 @@ describe('timingSafeEqual', () => {
 
 describe('isLocalhost', () => {
   it('returns true for 127.0.0.1', () => {
-    assert.equal(isLocalhost({ ip: '127.0.0.1', socket: {} }), true);
+    assert.equal(isLocalhost({ ip: '127.0.0.1', headers: {}, socket: {} }), true);
   });
 
   it('returns true for ::1', () => {
-    assert.equal(isLocalhost({ ip: '::1', socket: {} }), true);
+    assert.equal(isLocalhost({ ip: '::1', headers: {}, socket: {} }), true);
   });
 
   it('returns true for ::ffff:127.0.0.1', () => {
-    assert.equal(isLocalhost({ ip: '::ffff:127.0.0.1', socket: {} }), true);
+    assert.equal(isLocalhost({ ip: '::ffff:127.0.0.1', headers: {}, socket: {} }), true);
   });
 
   it('returns false for external IPs', () => {
-    assert.equal(isLocalhost({ ip: '192.168.1.5', socket: {} }), false);
-    assert.equal(isLocalhost({ ip: '10.0.0.1', socket: {} }), false);
+    assert.equal(isLocalhost({ ip: '192.168.1.5', headers: {}, socket: {} }), false);
+    assert.equal(isLocalhost({ ip: '10.0.0.1', headers: {}, socket: {} }), false);
   });
 
   it('falls back to socket.remoteAddress', () => {
-    assert.equal(isLocalhost({ socket: { remoteAddress: '127.0.0.1' } }), true);
-    assert.equal(isLocalhost({ socket: { remoteAddress: '10.0.0.1' } }), false);
+    assert.equal(isLocalhost({ headers: {}, socket: { remoteAddress: '127.0.0.1' } }), true);
+    assert.equal(isLocalhost({ headers: {}, socket: { remoteAddress: '10.0.0.1' } }), false);
+  });
+
+  it('returns false when X-Forwarded-For is set (tunnel/proxy)', () => {
+    assert.equal(isLocalhost({ ip: '127.0.0.1', headers: { 'x-forwarded-for': '203.0.113.50' }, socket: {} }), false);
+    assert.equal(isLocalhost({ ip: '::1', headers: { 'x-forwarded-for': '10.0.0.1' }, socket: {} }), false);
   });
 });
 

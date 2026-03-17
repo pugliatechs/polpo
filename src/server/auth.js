@@ -222,11 +222,18 @@ function saveTotpSecret(configPath, secret) {
 // ---- Localhost Trust ----
 
 /**
- * Check if a request originates from localhost.
+ * Check if a request originates from a genuine localhost client.
  * When trustLocalhost is enabled, localhost connections bypass auth
  * entirely — the user is already on the machine.
+ *
+ * Tunnels (cloudflared, ngrok, etc.) proxy from 127.0.0.1 but set
+ * X-Forwarded-For to the real client IP. If that header is present,
+ * the request came through a proxy and is NOT a direct localhost client.
  */
 function isLocalhost(req) {
+  // If a proxy set X-Forwarded-For, the real client is remote
+  if (req.headers['x-forwarded-for']) return false;
+
   const ip = req.ip || req.socket.remoteAddress || '';
   return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
 }
