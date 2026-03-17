@@ -20,6 +20,7 @@ const {
   createStaticAuthMiddleware,
   validateWsAuth,
   isAgentToken,
+  isLocalhost,
   timingSafeEqual,
 } = require('../src/server/auth');
 
@@ -668,5 +669,79 @@ describe('timingSafeEqual', () => {
   it('returns false for non-string inputs', () => {
     assert.equal(timingSafeEqual(null, 'abc'), false);
     assert.equal(timingSafeEqual('abc', undefined), false);
+  });
+});
+
+// --- isLocalhost ---
+
+describe('isLocalhost', () => {
+  it('returns true for 127.0.0.1', () => {
+    assert.equal(isLocalhost({ ip: '127.0.0.1', socket: {} }), true);
+  });
+
+  it('returns true for ::1', () => {
+    assert.equal(isLocalhost({ ip: '::1', socket: {} }), true);
+  });
+
+  it('returns true for ::ffff:127.0.0.1', () => {
+    assert.equal(isLocalhost({ ip: '::ffff:127.0.0.1', socket: {} }), true);
+  });
+
+  it('returns false for external IPs', () => {
+    assert.equal(isLocalhost({ ip: '192.168.1.5', socket: {} }), false);
+    assert.equal(isLocalhost({ ip: '10.0.0.1', socket: {} }), false);
+  });
+
+  it('falls back to socket.remoteAddress', () => {
+    assert.equal(isLocalhost({ socket: { remoteAddress: '127.0.0.1' } }), true);
+    assert.equal(isLocalhost({ socket: { remoteAddress: '10.0.0.1' } }), false);
+  });
+});
+
+// --- trustLocalhost ---
+
+describe('trustLocalhost', () => {
+  it('auth middleware allows localhost when trustLocalhost is true', () => {
+    const state = new AuthState({ token: generateToken(), trustLocalhost: true });
+    const mw = createAuthMiddleware(() => state);
+    const req = mockReq({ ip: '127.0.0.1' });
+    const res = mockRes();
+    let called = false;
+    mw(req, res, () => { called = true; });
+    assert.equal(called, true);
+  });
+
+  it('auth middleware blocks localhost when trustLocalhost is false', () => {
+    const state = new AuthState({ token: generateToken(), trustLocalhost: false });
+    const mw = createAuthMiddleware(() => state);
+    const req = mockReq({ ip: '127.0.0.1' });
+    const res = mockRes();
+    let called = false;
+    mw(req, res, () => { called = true; });
+    assert.equal(called, false);
+    assert.equal(res.statusCode, 401);
+  });
+
+  it('auth middleware blocks remote IPs even when trustLocalhost is true', () => {
+    const state = new AuthState({ token: generateToken(), trustLocalhost: true });
+    const mw = createAuthMiddleware(() => state);
+    const req = mockReq({ ip: '192.168.1.5' });
+    const res = mockRes();
+    let called = false;
+    mw(req, res, () => { called = true; });
+    assert.equal(called, false);
+    assert.equal(res.statusCode, 401);
+  });
+
+  it('validateWsAuth allows localhost WebSocket when trustLocalhost is true', () => {
+    const state = new AuthState({ token: generateToken(), trustLocalhost: true });
+    const req = mockReq({ ip: '::1' });
+    assert.equal(validateWsAuth(state, req), true);
+  });
+
+  it('validateWsAuth blocks localhost WebSocket when trustLocalhost is false', () => {
+    const state = new AuthState({ token: generateToken(), trustLocalhost: false });
+    const req = mockReq({ ip: '::1' });
+    assert.equal(validateWsAuth(state, req), false);
   });
 });

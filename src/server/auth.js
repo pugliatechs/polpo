@@ -10,6 +10,7 @@ class AuthState {
     this.token = options.token || null;
     this.mode = options.mode || null; // null | 'pin' | 'paranoid'
     this.totpSecret = options.totpSecret || null;
+    this.trustLocalhost = options.trustLocalhost !== undefined ? options.trustLocalhost : false;
     this.pin = null;
     this.pinAttempts = 0;
     this.maxPinAttempts = 3;
@@ -218,12 +219,27 @@ function saveTotpSecret(configPath, secret) {
   fs.writeFileSync(configPath, JSON.stringify({ secret }, null, 2) + '\n', { mode: 0o600 });
 }
 
+// ---- Localhost Trust ----
+
+/**
+ * Check if a request originates from localhost.
+ * When trustLocalhost is enabled, localhost connections bypass auth
+ * entirely — the user is already on the machine.
+ */
+function isLocalhost(req) {
+  const ip = req.ip || req.socket.remoteAddress || '';
+  return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+}
+
 // ---- Middleware ----
 
 function createAuthMiddleware(getAuthState) {
   return (req, res, next) => {
     const state = typeof getAuthState === 'function' ? getAuthState() : getAuthState;
     if (!state || !state.enabled) return next();
+
+    // Localhost bypass: desktop access is trusted
+    if (state.trustLocalhost && isLocalhost(req)) return next();
 
     // Session cookie (MFA-authenticated dashboard)
     if (validateSession(state, req)) return next();
@@ -246,6 +262,9 @@ function createStaticAuthMiddleware(getAuthState) {
 
     // Allow auth page
     if (req.path === '/auth' || req.path === '/auth.html') return next();
+
+    // Localhost bypass: desktop access is trusted
+    if (state.trustLocalhost && isLocalhost(req)) return next();
 
     // Valid session
     if (validateSession(state, req)) return next();
@@ -279,6 +298,9 @@ function createStaticAuthMiddleware(getAuthState) {
 
 function validateWsAuth(authState, req) {
   if (!authState || !authState.enabled) return true;
+
+  // Localhost bypass: desktop WebSocket is trusted
+  if (authState.trustLocalhost && isLocalhost(req)) return true;
 
   // Session cookie (dashboard after MFA)
   if (validateSession(authState, req)) return true;
@@ -327,5 +349,6 @@ module.exports = {
   createStaticAuthMiddleware,
   validateWsAuth,
   isAgentToken,
+  isLocalhost,
   timingSafeEqual,
 };

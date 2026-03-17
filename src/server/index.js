@@ -247,10 +247,11 @@ function createServer(options = {}) {
         server.close(resolve);
       });
     },
-    setAuth({ token, mode, totpSecret }) {
+    setAuth({ token, mode, totpSecret, trustLocalhost }) {
       if (token !== undefined) authState.token = token;
       if (mode !== undefined) authState.mode = mode;
       if (totpSecret !== undefined) authState.totpSecret = totpSecret;
+      if (trustLocalhost !== undefined) authState.trustLocalhost = trustLocalhost;
     },
     get authState() {
       return authState;

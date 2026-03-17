@@ -52,6 +52,8 @@ function printHelp() {
                       pin      — Token + 4-digit PIN displayed in terminal
                       paranoid — Token + TOTP via authenticator app
     --token <tok>   Use a specific token instead of auto-generating one
+    --trust-localhost  Skip auth for localhost connections (desktop browser)
+                       Tunnel/remote connections still require full auth
     --verbose       Enable verbose logging
 
   AGENT OPTIONS
@@ -163,6 +165,9 @@ async function runServer() {
     authOpts.token = token;
     authOpts.mode = authMode === 'paranoid' ? 'paranoid' : authMode === 'pin' ? 'pin' : null;
   }
+  if (flags['trust-localhost']) {
+    authOpts.trustLocalhost = true;
+  }
 
   const server = createServer({
     port: parseInt(flags.port) || 7890,
@@ -214,6 +219,10 @@ async function runServer() {
   }
 
   await server.start();
+
+  if (flags['trust-localhost']) {
+    console.log('  🏠 Localhost trusted — desktop browser at http://localhost:' + (parseInt(flags.port) || 7890) + ' (no auth)');
+  }
 
   const port = parseInt(flags.port) || 7890;
   let tunnel = null;
