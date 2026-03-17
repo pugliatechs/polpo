@@ -112,12 +112,20 @@ body {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  padding: 10px 16px;
-  background: var(--surface, #1a1a2e);
-  border-bottom: 1px solid var(--yellow, #f0ad4e);
+  padding: 6px 16px;
+  background: rgba(26, 26, 46, 0.95);
+  border: 1px solid rgba(234, 179, 8, 0.3);
+  border-radius: 20px;
   color: var(--yellow, #f0ad4e);
-  font-size: 13px;
+  font-size: 12px;
   text-align: center;
+  position: fixed;
+  top: calc(8px + var(--safe-top, 0px));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 150;
+  pointer-events: none;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.4);
 }
 .reconnect-banner.visible { display: flex; }
 .reconnect-spinner {
