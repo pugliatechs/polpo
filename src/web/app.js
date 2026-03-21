@@ -2747,9 +2747,7 @@
     $changesModal.classList.add('visible');
     document.body.style.overflow = 'hidden';
 
-    fetch('/api/instances/' + encodeURIComponent(activeInstanceId) + '/changes', {
-      headers: authHeaders(),
-    })
+    authFetch('/api/instances/' + encodeURIComponent(activeInstanceId) + '/changes')
       .then(function (r) { return r.json(); })
       .then(function (data) {
         if (data.error && !data.files) {
