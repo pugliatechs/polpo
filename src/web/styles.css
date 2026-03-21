@@ -2724,3 +2724,113 @@ h5.plan-h { font-size: 13px; }
     max-width: 560px;
   }
 }
+
+/* ---- Git Changes Modal ---- */
+
+.changes-modal-content {
+  max-height: 85vh;
+}
+
+.changes-file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.changes-file-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  background: var(--bg-tertiary);
+  transition: background 0.15s;
+}
+
+.changes-file-item:hover {
+  background: var(--bg-secondary);
+}
+
+.changes-file-item.expanded {
+  border-radius: 6px 6px 0 0;
+}
+
+.changes-file-status {
+  display: inline-block;
+  min-width: 18px;
+  text-align: center;
+  font-weight: 700;
+  font-size: 12px;
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+
+.changes-file-status.status-M { color: var(--warning); }
+.changes-file-status.status-A { color: var(--success); }
+.changes-file-status.status-D { color: var(--error); }
+.changes-file-status.status-R { color: var(--info, #60a5fa); }
+.changes-file-status.status-U { color: var(--text-muted); }
+.changes-file-status.status-Q { color: var(--text-muted); }
+
+.changes-file-path {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
+.changes-file-dir {
+  color: var(--text-muted);
+}
+
+.changes-diff-block {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-top: none;
+  border-radius: 0 0 6px 6px;
+  overflow-x: auto;
+  margin-bottom: 4px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.changes-diff-block pre {
+  margin: 0;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  white-space: pre;
+  color: var(--text-primary);
+}
+
+.diff-line-add {
+  background: rgba(46, 160, 67, 0.15);
+  color: #3fb950;
+}
+
+.diff-line-del {
+  background: rgba(248, 81, 73, 0.15);
+  color: #f85149;
+}
+
+.diff-line-hunk {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.changes-empty {
+  text-align: center;
+  padding: 24px 12px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.btn-changes {
+  font-weight: 700;
+  font-size: 14px;
+}

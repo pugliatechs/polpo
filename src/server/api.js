@@ -639,6 +639,90 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
     }
   });
 
+  // ---- Git Changes ----
+
+  // Get uncommitted changes for an instance's working directory
+  router.get('/instances/:id/changes', (req, res) => {
+    const inst = instanceManager.getInstance(req.params.id);
+    if (!inst) return res.status(404).json({ error: 'Instance not found' });
+    if (!inst.cwd) return res.status(400).json({ error: 'No working directory' });
+
+    // Verify it's a git repo
+    const gitDir = path.join(inst.cwd, '.git');
+    if (!fs.existsSync(gitDir)) {
+      return res.json({ files: [], diff: null, error: 'Not a git repository' });
+    }
+
+    // Get file status list
+    execFile('git', ['status', '--porcelain', '-u'], { cwd: inst.cwd, timeout: 5000 }, (err, stdout) => {
+      if (err) {
+        console.error('[api:git:status]', err.message);
+        return res.status(500).json({ error: 'Failed to read git status' });
+      }
+
+      const files = stdout.trim().split('\n').filter(Boolean).map(line => {
+        const status = line.substring(0, 2).trim();
+        const filePath = line.substring(3);
+        return { status, path: filePath };
+      });
+
+      if (files.length === 0) {
+        return res.json({ files: [], diff: null });
+      }
+
+      // Get unified diff for all changes (staged + unstaged)
+      execFile('git', ['diff', 'HEAD', '--no-color', '--stat=120', '-p'], {
+        cwd: inst.cwd,
+        timeout: 10000,
+        maxBuffer: 2 * 1024 * 1024, // 2MB max
+      }, (diffErr, diffOut) => {
+        if (diffErr) {
+          // diff against HEAD fails if no commits yet — try diff of staged
+          return execFile('git', ['diff', '--no-color', '--stat=120', '-p'], {
+            cwd: inst.cwd,
+            timeout: 10000,
+            maxBuffer: 2 * 1024 * 1024,
+          }, (diffErr2, diffOut2) => {
+            res.json({ files, diff: diffErr2 ? null : diffOut2 });
+          });
+        }
+        res.json({ files, diff: diffOut });
+      });
+    });
+  });
+
+  // Get diff for a specific file
+  router.get('/instances/:id/changes/:filePath(*)', (req, res) => {
+    const inst = instanceManager.getInstance(req.params.id);
+    if (!inst) return res.status(404).json({ error: 'Instance not found' });
+    if (!inst.cwd) return res.status(400).json({ error: 'No working directory' });
+
+    const filePath = req.params.filePath;
+    // Prevent path traversal — resolved path must stay within cwd
+    const resolved = path.resolve(inst.cwd, filePath);
+    if (!resolved.startsWith(inst.cwd + path.sep) && resolved !== inst.cwd) {
+      return res.status(400).json({ error: 'Invalid file path' });
+    }
+
+    execFile('git', ['diff', 'HEAD', '--no-color', '-p', '--', filePath], {
+      cwd: inst.cwd,
+      timeout: 5000,
+      maxBuffer: 1024 * 1024,
+    }, (err, stdout) => {
+      if (err) {
+        // Fallback for unstaged-only or untracked
+        return execFile('git', ['diff', '--no-color', '-p', '--', filePath], {
+          cwd: inst.cwd,
+          timeout: 5000,
+          maxBuffer: 1024 * 1024,
+        }, (err2, stdout2) => {
+          res.json({ path: filePath, diff: err2 ? null : stdout2 });
+        });
+      }
+      res.json({ path: filePath, diff: stdout });
+    });
+  });
+
   // ---- Skills Management ----
 
   const SKILLS_DIR = path.join(os.homedir(), '.agents', 'skills');

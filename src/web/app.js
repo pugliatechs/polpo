@@ -140,6 +140,10 @@
   const $newModel = document.getElementById('new-model');
   const $btnCreateSession = document.getElementById('btn-create-session');
   const $newSessionError = document.getElementById('new-session-error');
+  const $btnChanges = document.getElementById('btn-changes');
+  const $changesModal = document.getElementById('changes-modal');
+  const $btnCloseChanges = document.getElementById('btn-close-changes');
+  const $changesFileList = document.getElementById('changes-file-list');
   const $btnSkills = document.getElementById('btn-skills');
   const $skillsManagerModal = document.getElementById('skills-manager-modal');
   const $btnCloseSkillsManager = document.getElementById('btn-close-skills-manager');
@@ -2733,6 +2737,140 @@
   }
 
   // Skills Manager modal open/close
+  // ---- Git Changes Panel ----
+
+  function openChanges() {
+    if (!activeInstanceId) return;
+    $changesFileList.innerHTML = '<div class="loading-message">Loading changes...</div>';
+    $changesModal.classList.remove('hidden');
+    void $changesModal.offsetHeight;
+    $changesModal.classList.add('visible');
+    document.body.style.overflow = 'hidden';
+
+    fetch('/api/instances/' + encodeURIComponent(activeInstanceId) + '/changes', {
+      headers: authHeaders(),
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data.error && !data.files) {
+          $changesFileList.innerHTML = '<div class="changes-empty">' + escapeHtml(data.error) + '</div>';
+          return;
+        }
+        if (!data.files || data.files.length === 0) {
+          $changesFileList.innerHTML = '<div class="changes-empty">Working tree clean</div>';
+          return;
+        }
+        renderChangesFileList(data.files, data.diff);
+      })
+      .catch(function () {
+        $changesFileList.innerHTML = '<div class="changes-empty">Failed to load changes</div>';
+      });
+  }
+
+  function closeChanges() {
+    $changesModal.classList.remove('visible');
+    document.body.style.overflow = '';
+    setTimeout(function () {
+      $changesModal.classList.add('hidden');
+      $changesFileList.innerHTML = '';
+    }, 300);
+  }
+
+  function renderChangesFileList(files, fullDiff) {
+    // Parse the full diff into per-file sections
+    var fileDiffs = {};
+    if (fullDiff) {
+      var sections = fullDiff.split(/^diff --git /m);
+      for (var s = 1; s < sections.length; s++) {
+        var section = sections[s];
+        var bMatch = section.match(/b\/(.+?)[\n\r]/);
+        if (bMatch) {
+          fileDiffs[bMatch[1]] = 'diff --git ' + section;
+        }
+      }
+    }
+
+    var html = '';
+    var statusLabels = { M: 'Modified', A: 'Added', D: 'Deleted', R: 'Renamed', '??': 'Untracked', AM: 'Added' };
+
+    for (var i = 0; i < files.length; i++) {
+      var f = files[i];
+      var st = f.status.replace(/\s/g, '') || '?';
+      var statusClass = 'status-' + (st === '??' ? 'U' : st.charAt(0));
+      var label = st === '??' ? '?' : st;
+      var dir = '';
+      var name = f.path;
+      var slashIdx = f.path.lastIndexOf('/');
+      if (slashIdx !== -1) {
+        dir = f.path.substring(0, slashIdx + 1);
+        name = f.path.substring(slashIdx + 1);
+      }
+
+      html += '<div class="changes-file-item" data-idx="' + i + '" data-path="' + escapeHtml(f.path) + '" title="' + escapeHtml(statusLabels[st] || st) + ': ' + escapeHtml(f.path) + '">';
+      html += '<span class="changes-file-status ' + statusClass + '">' + escapeHtml(label) + '</span>';
+      html += '<span class="changes-file-path"><span class="changes-file-dir">' + escapeHtml(dir) + '</span>' + escapeHtml(name) + '</span>';
+      html += '</div>';
+
+      // Pre-render diff block (hidden initially)
+      var diffContent = fileDiffs[f.path] || '';
+      html += '<div class="changes-diff-block hidden" id="changes-diff-' + i + '">';
+      if (diffContent) {
+        html += '<pre>' + renderDiffLines(diffContent) + '</pre>';
+      } else if (st === '??') {
+        html += '<pre class="diff-line-add">(untracked file)</pre>';
+      } else {
+        html += '<pre>(no diff available)</pre>';
+      }
+      html += '</div>';
+    }
+
+    $changesFileList.innerHTML = html;
+
+    // Click to expand/collapse diffs
+    $changesFileList.addEventListener('click', function (e) {
+      var item = e.target.closest('.changes-file-item');
+      if (!item) return;
+      var idx = item.dataset.idx;
+      var diffBlock = document.getElementById('changes-diff-' + idx);
+      if (!diffBlock) return;
+      var isExpanded = !diffBlock.classList.contains('hidden');
+      if (isExpanded) {
+        diffBlock.classList.add('hidden');
+        item.classList.remove('expanded');
+      } else {
+        diffBlock.classList.remove('hidden');
+        item.classList.add('expanded');
+      }
+    });
+  }
+
+  function renderDiffLines(diffText) {
+    var lines = diffText.split('\n');
+    var html = '';
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      var escaped = escapeHtml(line);
+      if (line.charAt(0) === '+' && line.charAt(1) !== '+') {
+        html += '<span class="diff-line-add">' + escaped + '</span>\n';
+      } else if (line.charAt(0) === '-' && line.charAt(1) !== '-') {
+        html += '<span class="diff-line-del">' + escaped + '</span>\n';
+      } else if (line.substring(0, 2) === '@@') {
+        html += '<span class="diff-line-hunk">' + escaped + '</span>\n';
+      } else {
+        html += escaped + '\n';
+      }
+    }
+    return html;
+  }
+
+  $btnChanges.addEventListener('click', openChanges);
+  $btnCloseChanges.addEventListener('click', closeChanges);
+  $changesModal.addEventListener('click', function (e) {
+    if (e.target === $changesModal) closeChanges();
+  });
+
+  // ---- Skills Manager ----
+
   function openSkillsManager() {
     loadSkills();
     $skillsManagerModal.classList.remove('hidden');

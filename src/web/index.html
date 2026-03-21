@@ -123,6 +123,7 @@
         <span id="detail-status" class="badge">idle</span>
       </div>
       <div class="detail-actions">
+        <button id="btn-changes" class="btn-icon btn-changes" title="Changes">&#916;</button>
         <button id="btn-skills" class="btn-icon btn-skills hidden" title="Skills">&#9881;</button>
         <button id="btn-abort" class="btn-icon btn-danger" title="Abort">&#10005;</button>
       </div>
@@ -361,6 +362,20 @@
           <h4 class="stats-section-title">Active Sessions</h4>
           <div id="stats-sessions-list" class="stats-sessions-list"></div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Git Changes Modal -->
+  <div id="changes-modal" class="modal-overlay hidden">
+    <div class="modal-content changes-modal-content">
+      <div class="modal-handle"><div class="modal-handle-bar"></div></div>
+      <div class="modal-header">
+        <h3>Changes</h3>
+        <button id="btn-close-changes" class="btn-icon" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body" id="changes-modal-body">
+        <div id="changes-file-list" class="changes-file-list"></div>
       </div>
     </div>
   </div>
