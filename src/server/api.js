@@ -643,7 +643,7 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
 
   // Get uncommitted changes for an instance's working directory
   router.get('/instances/:id/changes', (req, res) => {
-    const inst = instanceManager.getInstance(req.params.id);
+    const inst = instanceManager.get(req.params.id);
     if (!inst) return res.status(404).json({ error: 'Instance not found' });
     if (!inst.cwd) return res.status(400).json({ error: 'No working directory' });
 
@@ -693,7 +693,7 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
 
   // Get diff for a specific file
   router.get('/instances/:id/changes/:filePath(*)', (req, res) => {
-    const inst = instanceManager.getInstance(req.params.id);
+    const inst = instanceManager.get(req.params.id);
     if (!inst) return res.status(404).json({ error: 'Instance not found' });
     if (!inst.cwd) return res.status(400).json({ error: 'No working directory' });
 
