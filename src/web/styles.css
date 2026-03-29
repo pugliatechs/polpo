@@ -541,6 +541,16 @@ main {
 
 .skills-empty,
 .skills-loading,
+.load-more-sentinel {
+  text-align: center;
+  padding: 10px 12px;
+}
+
+.load-more-sentinel .loading-message {
+  padding: 6px 12px;
+  font-size: 11px;
+}
+
 .loading-message {
   text-align: center;
   padding: 20px 12px;
@@ -653,10 +663,10 @@ main {
 .detail-header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px 16px;
+  gap: 6px;
+  padding: 6px 10px;
   padding-left: calc(10px + var(--safe-left));
-  padding-right: calc(10px + var(--safe-right));
+  padding-right: calc(6px + var(--safe-right));
   background: var(--bg-card);
   border-bottom: 1px solid rgba(255,255,255,0.06);
   flex-shrink: 0;
@@ -687,16 +697,23 @@ main {
 
 .btn-danger { color: var(--red); }
 
-.detail-title {
+.detail-header-body {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.detail-title-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
 }
 
-.detail-title h2 {
-  font-size: 16px;
+.detail-title-row h2 {
+  font-size: 14px;
   font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
@@ -704,30 +721,54 @@ main {
   min-width: 0;
 }
 
-.detail-meta {
+.detail-meta-row {
   display: flex;
-  gap: 12px;
-  padding: 6px 16px 10px;
-  padding-left: calc(16px + var(--safe-left));
-  padding-right: calc(16px + var(--safe-right));
-  font-size: 12px;
+  gap: 8px;
+  font-size: 11px;
   color: var(--text-muted);
-  background: var(--bg-card);
+  min-width: 0;
+}
+
+.detail-meta-row span:empty { display: none; }
+
+.detail-actions {
+  display: flex;
+  align-items: center;
+  gap: 0;
   flex-shrink: 0;
 }
 
+.btn-back { font-size: 18px; padding: 8px; min-width: 36px; min-height: 36px; }
+
+.detail-actions .btn-icon {
+  font-size: 16px;
+  padding: 6px;
+  min-width: 34px;
+  min-height: 34px;
+}
+
 /* ---- Auto-approve Banner ---- */
+.auto-approve-pill {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(34,197,94,0.15);
+  color: #22c55e;
+  border: 1px solid rgba(34,197,94,0.3);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.btn-auto-stop {
+  color: #22c55e;
+  font-size: 14px !important;
+}
+
+/* Legacy auto-approve-banner (keep for compatibility) */
 .auto-approve-banner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin: 8px 12px 0;
-  margin-left: calc(12px + var(--safe-left));
-  margin-right: calc(12px + var(--safe-right));
-  padding: 8px 12px;
-  background: rgba(34,197,94,0.1);
-  border: 1px solid rgba(34,197,94,0.25);
-  border-radius: var(--radius-sm);
+  display: none;
   flex-shrink: 0;
   font-size: 13px;
   font-weight: 600;
@@ -2065,13 +2106,13 @@ h5.plan-h { font-size: 13px; }
     margin-bottom: 8px;
   }
   .detail-header {
-    padding-top: 6px;
-    padding-bottom: 6px;
+    padding: 4px 10px;
+    gap: 4px;
   }
-  .detail-meta {
-    padding-top: 4px;
-    padding-bottom: 6px;
-  }
+  .detail-title-row h2 { font-size: 13px; }
+  .detail-meta-row { font-size: 10px; }
+  .detail-actions .btn-icon { padding: 4px; min-width: 30px; min-height: 30px; font-size: 14px; }
+  .btn-back { padding: 4px; min-width: 30px; min-height: 30px; font-size: 16px; }
 }
 
 /* ---- Conversation Search ---- */
@@ -2725,6 +2766,37 @@ h5.plan-h { font-size: 13px; }
   }
 }
 
+/* ---- Inline Spinner (for loading titles) ---- */
+
+.inline-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--text-muted);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  vertical-align: middle;
+}
+
+.card-name-loading {
+  min-height: 16px;
+  display: inline-flex;
+  align-items: center;
+}
+
+.detail-name-loading::after {
+  content: '';
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--text-muted);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  vertical-align: middle;
+}
+
 /* ---- Git Changes Modal ---- */
 
 .changes-modal-content {
@@ -2735,6 +2807,32 @@ h5.plan-h { font-size: 13px; }
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+.changes-repo-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  margin-top: 8px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.changes-repo-header:first-child {
+  margin-top: 0;
+}
+
+.changes-repo-count {
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: none;
+  letter-spacing: 0;
 }
 
 .changes-file-item {

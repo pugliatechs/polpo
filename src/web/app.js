@@ -109,7 +109,7 @@
   const $btnApprove = document.getElementById('btn-approve');
   const $btnApproveAll = document.getElementById('btn-approve-all');
   const $btnReject = document.getElementById('btn-reject');
-  const $autoApproveBanner = document.getElementById('auto-approve-banner');
+  const $autoApprovePill = document.getElementById('auto-approve-pill');
   const $btnStopAutoApprove = document.getElementById('btn-stop-auto-approve');
   const $sessionsSection = document.getElementById('sessions-section');
   const $sessionsList = document.getElementById('sessions-list');
@@ -705,16 +705,18 @@
             escapeHtml(inst.pendingApproval.description || 'Action requires approval') +
             '</div>';
         }
-        // Use first prompt as title (matching session cards), fall back to name
+        // Use first prompt as title; show spinner while loading
         var title = inst._firstPrompt
           ? truncate(inst._firstPrompt, 60)
-          : inst.name;
+          : null;
         var safeId = escapeHtml(inst.id);
         var safeAgentType = VALID_AGENT_TYPES.indexOf(inst.agentType) !== -1 ? inst.agentType : 'claude';
         return (
           '<div class="' + cardClass + '" data-id="' + safeId + '">' +
             '<div class="card-top">' +
-              '<span class="card-name">' + escapeHtml(title) + '</span>' +
+              (title
+                ? '<span class="card-name">' + escapeHtml(title) + '</span>'
+                : '<span class="card-name card-name-loading"><span class="inline-spinner"></span></span>') +
               '<button class="btn-pin' + (isPinned ? ' pinned' : '') + '" data-pin-id="' + safeId + '" title="' + (isPinned ? 'Unpin' : 'Pin') + '">' + (isPinned ? '&#9733;' : '&#9734;') + '</button>' +
               '<span class="' + badgeClass + '">' + (inst.status === 'busy' ? '<span class="pulse-dot"></span>' : '') + inst.status + '</span>' +
             '</div>' +
@@ -759,16 +761,28 @@
    * Uses the JSONL history endpoint when a sessionId is available,
    * otherwise falls back to the in-memory conversation endpoint.
    */
+  var HISTORY_PAGE_SIZE = 30;
+
   function reloadHistory(inst, forceScroll) {
     if (inst.sessionId) {
-      authFetch('/api/sessions/' + inst.sessionId + '/history')
+      // Load only the last page initially for faster rendering
+      authFetch('/api/sessions/' + inst.sessionId + '/history?tail=' + HISTORY_PAGE_SIZE)
         .then(function (r) { return r.json(); })
-        .then(function (history) {
-          if (history.length > 0) {
-            inst.conversation = history;
-            inst._historyLen = history.length;
+        .then(function (data) {
+          // Handle paginated response (has .messages) or legacy flat array
+          var messages = data.messages || data;
+          var total = data.total || messages.length;
+          if (messages.length > 0) {
+            inst.conversation = messages;
+            inst._historyLen = total;
+            inst._totalMessages = total;
+            inst._loadedFrom = total - messages.length; // index of first loaded message
+          } else {
+            inst._totalMessages = 0;
+            inst._loadedFrom = 0;
           }
           inst._historyLoaded = true;
+          inst._loadingOlder = false;
           if (!inst._firstPrompt) {
             inst._firstPrompt = getFirstPrompt(inst.conversation);
             renderList();
@@ -784,6 +798,9 @@
         .then(function (r) { return r.json(); })
         .then(function (msgs) {
           inst.conversation = msgs;
+          inst._totalMessages = msgs.length;
+          inst._loadedFrom = 0;
+          inst._loadingOlder = false;
           if (!inst._firstPrompt) {
             inst._firstPrompt = getFirstPrompt(inst.conversation);
             renderList();
@@ -795,6 +812,38 @@
         })
         .catch(function () {});
     }
+  }
+
+  function loadOlderMessages(inst) {
+    if (!inst || !inst.sessionId || inst._loadingOlder) return;
+    if (inst._loadedFrom <= 0) return; // already have everything
+
+    inst._loadingOlder = true;
+    var end = inst._loadedFrom;
+    var start = Math.max(0, end - HISTORY_PAGE_SIZE);
+
+    authFetch('/api/sessions/' + inst.sessionId + '/history?offset=' + start + '&limit=' + (end - start))
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        var older = data.messages || data;
+        if (older.length > 0) {
+          inst.conversation = older.concat(inst.conversation);
+          inst._loadedFrom = start;
+
+          // Preserve scroll position: measure before, render, restore
+          if (activeInstanceId === inst.id) {
+            var prevHeight = $conversation.scrollHeight;
+            var prevScroll = $conversation.scrollTop;
+            renderConversation(true); // skipScroll = true
+            var newHeight = $conversation.scrollHeight;
+            $conversation.scrollTop = prevScroll + (newHeight - prevHeight);
+          }
+        }
+        inst._loadingOlder = false;
+      })
+      .catch(function () {
+        inst._loadingOlder = false;
+      });
   }
 
   // ---- Render: Detail View ----
@@ -853,8 +902,13 @@
     var inst = instances.get(activeInstanceId);
     if (!inst) return;
 
-    var detailTitle = inst._firstPrompt ? truncate(inst._firstPrompt, 80) : inst.name;
-    $detailName.textContent = detailTitle;
+    if (inst._firstPrompt) {
+      $detailName.textContent = truncate(inst._firstPrompt, 80);
+      $detailName.classList.remove('detail-name-loading');
+    } else {
+      $detailName.textContent = '';
+      $detailName.classList.add('detail-name-loading');
+    }
     $detailStatus.className = 'badge badge-' + inst.status;
     if (inst.status === 'busy') {
       $detailStatus.innerHTML = '<span class="pulse-dot"></span>' + escapeHtml(inst.status);
@@ -886,11 +940,13 @@
       $inputArea.classList.remove('hidden');
     }
 
-    // Auto-approve indicator
+    // Auto-approve indicator (pill in title + stop button in actions)
     if (inst.autoApprove) {
-      $autoApproveBanner.classList.remove('hidden');
+      $autoApprovePill.classList.remove('hidden');
+      $btnStopAutoApprove.classList.remove('hidden');
     } else {
-      $autoApproveBanner.classList.add('hidden');
+      $autoApprovePill.classList.add('hidden');
+      $btnStopAutoApprove.classList.add('hidden');
     }
 
     // Approval banners - show the right one based on approval type
@@ -922,7 +978,7 @@
     }
   }
 
-  function renderConversation() {
+  function renderConversation(skipScroll) {
     var inst = instances.get(activeInstanceId);
     if (!inst || !inst.conversation) {
       $conversation.innerHTML = '';
@@ -931,12 +987,17 @@
 
     // Pre-process: pair tool_use with their tool_result by toolUseId
     var merged = mergeToolMessages(inst.conversation);
-    $conversation.innerHTML = merged
-      .map(function (m) {
-        return formatMessage(m);
-      })
-      .join('');
-    scrollToBottom();
+    var html = '';
+
+    // Show "load more" sentinel if there are older messages
+    if (inst._loadedFrom > 0) {
+      html += '<div class="load-more-sentinel" id="load-more-sentinel">' +
+        '<span class="loading-message">Loading earlier messages...</span></div>';
+    }
+
+    html += merged.map(function (m) { return formatMessage(m); }).join('');
+    $conversation.innerHTML = html;
+    if (!skipScroll) scrollToBottom();
   }
 
   /**
@@ -1412,6 +1473,31 @@
     var threshold = 150;
     return ($conversation.scrollHeight - $conversation.scrollTop - $conversation.clientHeight) < threshold;
   }
+
+  // Reverse infinite scroll: load older messages when sentinel is visible
+  var _loadMoreObserver = new IntersectionObserver(function (entries) {
+    entries.forEach(function (entry) {
+      if (!entry.isIntersecting) return;
+      var inst = instances.get(activeInstanceId);
+      if (inst && inst._loadedFrom > 0 && !inst._loadingOlder) {
+        loadOlderMessages(inst);
+      }
+    });
+  }, { root: $conversation, threshold: 0.1 });
+
+  // Re-observe sentinel after each render
+  var _prevSentinel = null;
+  var _origRenderConversation = renderConversation;
+  renderConversation = function (skipScroll) {
+    _origRenderConversation(skipScroll);
+    // Observe new sentinel if present
+    if (_prevSentinel) _loadMoreObserver.unobserve(_prevSentinel);
+    var sentinel = document.getElementById('load-more-sentinel');
+    if (sentinel) {
+      _loadMoreObserver.observe(sentinel);
+      _prevSentinel = sentinel;
+    }
+  };
 
   // Diff collapse/expand toggle (delegated)
   $conversation.addEventListener('click', function (e) {
@@ -2750,15 +2836,18 @@
     authFetch('/api/instances/' + encodeURIComponent(activeInstanceId) + '/changes')
       .then(function (r) { return r.json(); })
       .then(function (data) {
-        if (data.error && !data.files) {
+        if (data.error && !data.repos) {
           $changesFileList.innerHTML = '<div class="changes-empty">' + escapeHtml(data.error) + '</div>';
           return;
         }
-        if (!data.files || data.files.length === 0) {
+        var repos = data.repos || [];
+        // Filter to repos that have changes
+        var withChanges = repos.filter(function (r) { return r.files.length > 0; });
+        if (withChanges.length === 0) {
           $changesFileList.innerHTML = '<div class="changes-empty">Working tree clean</div>';
           return;
         }
-        renderChangesFileList(data.files, data.diff);
+        renderChangesRepos(withChanges);
       })
       .catch(function () {
         $changesFileList.innerHTML = '<div class="changes-empty">Failed to load changes</div>';
@@ -2774,52 +2863,65 @@
     }, 300);
   }
 
-  function renderChangesFileList(files, fullDiff) {
-    // Parse the full diff into per-file sections
-    var fileDiffs = {};
-    if (fullDiff) {
-      var sections = fullDiff.split(/^diff --git /m);
-      for (var s = 1; s < sections.length; s++) {
-        var section = sections[s];
-        var bMatch = section.match(/b\/(.+?)[\n\r]/);
-        if (bMatch) {
-          fileDiffs[bMatch[1]] = 'diff --git ' + section;
-        }
-      }
-    }
-
+  function renderChangesRepos(repos) {
     var html = '';
+    var globalIdx = 0;
     var statusLabels = { M: 'Modified', A: 'Added', D: 'Deleted', R: 'Renamed', '??': 'Untracked', AM: 'Added' };
 
-    for (var i = 0; i < files.length; i++) {
-      var f = files[i];
-      var st = f.status.replace(/\s/g, '') || '?';
-      var statusClass = 'status-' + (st === '??' ? 'U' : st.charAt(0));
-      var label = st === '??' ? '?' : st;
-      var dir = '';
-      var name = f.path;
-      var slashIdx = f.path.lastIndexOf('/');
-      if (slashIdx !== -1) {
-        dir = f.path.substring(0, slashIdx + 1);
-        name = f.path.substring(slashIdx + 1);
+    for (var r = 0; r < repos.length; r++) {
+      var repo = repos[r];
+      // Show repo name as last path segment
+      var repoName = repo.root.split('/').filter(Boolean).pop() || repo.root;
+
+      // Parse diff into per-file sections
+      var fileDiffs = {};
+      if (repo.diff) {
+        var sections = repo.diff.split(/^diff --git /m);
+        for (var s = 1; s < sections.length; s++) {
+          var section = sections[s];
+          var bMatch = section.match(/b\/(.+?)[\n\r]/);
+          if (bMatch) {
+            fileDiffs[bMatch[1]] = 'diff --git ' + section;
+          }
+        }
       }
 
-      html += '<div class="changes-file-item" data-idx="' + i + '" data-path="' + escapeHtml(f.path) + '" title="' + escapeHtml(statusLabels[st] || st) + ': ' + escapeHtml(f.path) + '">';
-      html += '<span class="changes-file-status ' + statusClass + '">' + escapeHtml(label) + '</span>';
-      html += '<span class="changes-file-path"><span class="changes-file-dir">' + escapeHtml(dir) + '</span>' + escapeHtml(name) + '</span>';
-      html += '</div>';
-
-      // Pre-render diff block (hidden initially)
-      var diffContent = fileDiffs[f.path] || '';
-      html += '<div class="changes-diff-block hidden" id="changes-diff-' + i + '">';
-      if (diffContent) {
-        html += '<pre>' + renderDiffLines(diffContent) + '</pre>';
-      } else if (st === '??') {
-        html += '<pre class="diff-line-add">(untracked file)</pre>';
-      } else {
-        html += '<pre>(no diff available)</pre>';
+      // Repo header (show if multiple repos)
+      if (repos.length > 1) {
+        html += '<div class="changes-repo-header">' + escapeHtml(repoName) +
+          '<span class="changes-repo-count">' + repo.files.length + ' file' + (repo.files.length !== 1 ? 's' : '') + '</span></div>';
       }
-      html += '</div>';
+
+      for (var i = 0; i < repo.files.length; i++) {
+        var f = repo.files[i];
+        var st = f.status.replace(/\s/g, '') || '?';
+        var statusClass = 'status-' + (st === '??' ? 'U' : st.charAt(0));
+        var label = st === '??' ? '?' : st;
+        var dir = '';
+        var name = f.path;
+        var slashIdx = f.path.lastIndexOf('/');
+        if (slashIdx !== -1) {
+          dir = f.path.substring(0, slashIdx + 1);
+          name = f.path.substring(slashIdx + 1);
+        }
+
+        html += '<div class="changes-file-item" data-idx="' + globalIdx + '" data-path="' + escapeHtml(f.path) + '" title="' + escapeHtml(statusLabels[st] || st) + ': ' + escapeHtml(f.path) + '">';
+        html += '<span class="changes-file-status ' + statusClass + '">' + escapeHtml(label) + '</span>';
+        html += '<span class="changes-file-path"><span class="changes-file-dir">' + escapeHtml(dir) + '</span>' + escapeHtml(name) + '</span>';
+        html += '</div>';
+
+        var diffContent = fileDiffs[f.path] || '';
+        html += '<div class="changes-diff-block hidden" id="changes-diff-' + globalIdx + '">';
+        if (diffContent) {
+          html += '<pre>' + renderDiffLines(diffContent) + '</pre>';
+        } else if (st === '??') {
+          html += '<pre class="diff-line-add">(untracked file)</pre>';
+        } else {
+          html += '<pre>(no diff available)</pre>';
+        }
+        html += '</div>';
+        globalIdx++;
+      }
     }
 
     $changesFileList.innerHTML = html;

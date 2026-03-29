@@ -117,26 +117,24 @@
   <!-- Instance Detail View -->
   <main id="view-detail" class="hidden">
     <div class="detail-header">
-      <button id="btn-back" class="btn-icon" aria-label="Back">&#8592;</button>
-      <div class="detail-title">
-        <h2 id="detail-name">Instance</h2>
-        <span id="detail-status" class="badge">idle</span>
+      <button id="btn-back" class="btn-icon btn-back" aria-label="Back">&#8592;</button>
+      <div class="detail-header-body">
+        <div class="detail-title-row">
+          <h2 id="detail-name">Instance</h2>
+          <span id="detail-status" class="badge">idle</span>
+          <span id="auto-approve-pill" class="auto-approve-pill hidden" title="Auto-approve is on">AUTO</span>
+        </div>
+        <div class="detail-meta-row">
+          <span id="detail-project"></span>
+          <span id="detail-type"></span>
+        </div>
       </div>
       <div class="detail-actions">
-        <button id="btn-changes" class="btn-icon btn-changes" title="Changes">&#916;</button>
+        <button id="btn-stop-auto-approve" class="btn-icon btn-auto-stop hidden" title="Stop auto-approve">&#9210;</button>
         <button id="btn-skills" class="btn-icon btn-skills hidden" title="Skills">&#9881;</button>
-        <button id="btn-abort" class="btn-icon btn-danger" title="Abort">&#10005;</button>
+        <button id="btn-changes" class="btn-icon btn-changes" title="Changes">&#177;</button>
+        <button id="btn-abort" class="btn-icon btn-danger" title="Abort">&#9632;</button>
       </div>
-    </div>
-    <div class="detail-meta">
-      <span id="detail-project"></span>
-      <span id="detail-type"></span>
-    </div>
-
-    <!-- Auto-approve indicator -->
-    <div id="auto-approve-banner" class="auto-approve-banner hidden">
-      <span>Auto-approve ON</span>
-      <button id="btn-stop-auto-approve" class="btn btn-small">Stop</button>
     </div>
 
     <!-- Approval Banner (standard tool approval) -->

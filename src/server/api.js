@@ -169,12 +169,32 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
   });
 
   // Get conversation history for a session from the JSONL file
+  // Supports pagination: ?tail=N (last N messages), ?offset=N&limit=N (slice)
   router.get('/sessions/:sessionId/history', async (req, res) => {
     if (!isValidSessionId(req.params.sessionId)) {
       return res.status(400).json({ error: 'Invalid sessionId' });
     }
     try {
       const history = await loadHistory(req.params.sessionId);
+      const total = history.length;
+      const tail = parseInt(req.query.tail);
+      const offset = parseInt(req.query.offset);
+      const limit = parseInt(req.query.limit);
+
+      // Paginated response
+      if (tail > 0 || (offset >= 0 && limit > 0)) {
+        let slice;
+        if (tail > 0) {
+          // Return last N messages
+          slice = history.slice(Math.max(0, total - tail));
+        } else {
+          // Return messages from offset, up to limit
+          slice = history.slice(offset, offset + limit);
+        }
+        return res.json({ messages: slice, total, hasMore: slice.length < total });
+      }
+
+      // Legacy: return flat array for backward compatibility
       res.json(history);
     } catch (err) {
       console.error('[api]', err);
@@ -641,24 +661,40 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
 
   // ---- Git Changes ----
 
-  // Get uncommitted changes for an instance's working directory
-  router.get('/instances/:id/changes', (req, res) => {
-    const inst = instanceManager.get(req.params.id);
-    if (!inst) return res.status(404).json({ error: 'Instance not found' });
-    if (!inst.cwd) return res.status(400).json({ error: 'No working directory' });
+  // Discover all unique git repo roots reachable from cwd:
+  // 1. cwd itself (or its parent repo)
+  // 2. immediate subdirectories that are separate repos
+  function discoverGitRoots(cwd, cb) {
+    const roots = new Set();
+    let pending = 1; // start with cwd itself
 
-    // Verify it's a git repo
-    const gitDir = path.join(inst.cwd, '.git');
-    if (!fs.existsSync(gitDir)) {
-      return res.json({ files: [], diff: null, error: 'Not a git repository' });
+    function tryResolve(dir) {
+      execFile('git', ['rev-parse', '--show-toplevel'], { cwd: dir, timeout: 3000 }, (err, stdout) => {
+        if (!err && stdout.trim()) roots.add(stdout.trim());
+        if (--pending === 0) cb([...roots]);
+      });
     }
 
-    // Get file status list
-    execFile('git', ['status', '--porcelain', '-u'], { cwd: inst.cwd, timeout: 5000 }, (err, stdout) => {
-      if (err) {
-        console.error('[api:git:status]', err.message);
-        return res.status(500).json({ error: 'Failed to read git status' });
+    // Check cwd itself
+    tryResolve(cwd);
+
+    // Also scan immediate subdirs for separate repos (VS Code multi-root workspaces)
+    try {
+      const entries = fs.readdirSync(cwd, { withFileTypes: true });
+      const dirs = entries.filter(e => e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules');
+      pending += dirs.length;
+      for (const d of dirs) {
+        tryResolve(path.join(cwd, d.name));
       }
+    } catch (_) {
+      // If we can't read subdirs, just rely on cwd
+    }
+  }
+
+  // Get status + diff for a single git root
+  function getRepoChanges(gitRoot, cb) {
+    execFile('git', ['status', '--porcelain', '-u'], { cwd: gitRoot, timeout: 5000 }, (err, stdout) => {
+      if (err) return cb({ root: gitRoot, files: [], diff: null });
 
       const files = stdout.trim().split('\n').filter(Boolean).map(line => {
         const status = line.substring(0, 2).trim();
@@ -666,55 +702,73 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
         return { status, path: filePath };
       });
 
-      if (files.length === 0) {
-        return res.json({ files: [], diff: null });
-      }
+      if (files.length === 0) return cb({ root: gitRoot, files: [], diff: null });
 
-      // Get unified diff for all changes (staged + unstaged)
       execFile('git', ['diff', 'HEAD', '--no-color', '--stat=120', '-p'], {
-        cwd: inst.cwd,
-        timeout: 10000,
-        maxBuffer: 2 * 1024 * 1024, // 2MB max
+        cwd: gitRoot, timeout: 10000, maxBuffer: 2 * 1024 * 1024,
       }, (diffErr, diffOut) => {
         if (diffErr) {
-          // diff against HEAD fails if no commits yet — try diff of staged
           return execFile('git', ['diff', '--no-color', '--stat=120', '-p'], {
-            cwd: inst.cwd,
-            timeout: 10000,
-            maxBuffer: 2 * 1024 * 1024,
+            cwd: gitRoot, timeout: 10000, maxBuffer: 2 * 1024 * 1024,
           }, (diffErr2, diffOut2) => {
-            res.json({ files, diff: diffErr2 ? null : diffOut2 });
+            cb({ root: gitRoot, files, diff: diffErr2 ? null : diffOut2 });
           });
         }
-        res.json({ files, diff: diffOut });
+        cb({ root: gitRoot, files, diff: diffOut });
+      });
+    });
+  }
+
+  // Get uncommitted changes across all repos in the workspace
+  router.get('/instances/:id/changes', (req, res) => {
+    const inst = instanceManager.get(req.params.id);
+    if (!inst) return res.status(404).json({ error: 'Instance not found' });
+    if (!inst.cwd) return res.status(400).json({ error: 'No working directory' });
+
+    discoverGitRoots(inst.cwd, (roots) => {
+      if (roots.length === 0) {
+        return res.json({ repos: [], error: 'No git repositories found' });
+      }
+
+      let pending = roots.length;
+      const repos = [];
+      roots.forEach((root) => {
+        getRepoChanges(root, (result) => {
+          repos.push(result);
+          if (--pending === 0) {
+            // Sort: repos with changes first, then alphabetically by root
+            repos.sort((a, b) => (b.files.length - a.files.length) || a.root.localeCompare(b.root));
+            res.json({ repos });
+          }
+        });
       });
     });
   });
 
-  // Get diff for a specific file
+  // Get diff for a specific file (requires root query param for multi-repo)
   router.get('/instances/:id/changes/:filePath(*)', (req, res) => {
     const inst = instanceManager.get(req.params.id);
     if (!inst) return res.status(404).json({ error: 'Instance not found' });
     if (!inst.cwd) return res.status(400).json({ error: 'No working directory' });
 
+    const gitRoot = req.query.root;
+    if (!gitRoot || !path.isAbsolute(gitRoot)) {
+      return res.status(400).json({ error: 'Missing or invalid root parameter' });
+    }
+
     const filePath = req.params.filePath;
-    // Prevent path traversal — resolved path must stay within cwd
-    const resolved = path.resolve(inst.cwd, filePath);
-    if (!resolved.startsWith(inst.cwd + path.sep) && resolved !== inst.cwd) {
+    // Prevent path traversal
+    const resolved = path.resolve(gitRoot, filePath);
+    if (!resolved.startsWith(gitRoot + path.sep) && resolved !== gitRoot) {
       return res.status(400).json({ error: 'Invalid file path' });
     }
 
     execFile('git', ['diff', 'HEAD', '--no-color', '-p', '--', filePath], {
-      cwd: inst.cwd,
-      timeout: 5000,
-      maxBuffer: 1024 * 1024,
+      cwd: gitRoot, timeout: 5000, maxBuffer: 1024 * 1024,
     }, (err, stdout) => {
       if (err) {
-        // Fallback for unstaged-only or untracked
         return execFile('git', ['diff', '--no-color', '-p', '--', filePath], {
-          cwd: inst.cwd,
-          timeout: 5000,
-          maxBuffer: 1024 * 1024,
+          cwd: gitRoot, timeout: 5000, maxBuffer: 1024 * 1024,
         }, (err2, stdout2) => {
           res.json({ path: filePath, diff: err2 ? null : stdout2 });
         });
