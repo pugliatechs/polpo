@@ -15,7 +15,8 @@ class AuthState {
     this.pinAttempts = 0;
     this.maxPinAttempts = 3;
     this.tokenBurned = false;
-    this.sessions = new Set();
+    this.sessions = new Map(); // sessionId -> createdAt timestamp
+    this.sessionMaxAge = 24 * 60 * 60 * 1000; // 24 hours
     this.onPinRegenerated = null; // callback(newPin) for terminal display
   }
 
@@ -58,7 +59,7 @@ function extractToken(req) {
 
 function createSession(authState) {
   const sessionId = crypto.randomBytes(32).toString('base64url');
-  authState.sessions.add(sessionId);
+  authState.sessions.set(sessionId, Date.now());
   return sessionId;
 }
 
@@ -71,12 +72,21 @@ function extractSessionId(req) {
 function validateSession(authState, req) {
   if (!authState.enabled) return true;
   const sessionId = extractSessionId(req);
-  return sessionId !== null && authState.sessions.has(sessionId);
+  if (!sessionId) return false;
+  const lastActive = authState.sessions.get(sessionId);
+  if (lastActive === undefined) return false;
+  if (Date.now() - lastActive > authState.sessionMaxAge) {
+    authState.sessions.delete(sessionId);
+    return false;
+  }
+  // Sliding window: renew on activity
+  authState.sessions.set(sessionId, Date.now());
+  return true;
 }
 
 function setSessionCookie(res, sessionId, secure) {
   res.setHeader('Set-Cookie',
-    `polpo_session=${sessionId}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax${secure ? '; Secure' : ''}`
+    `polpo_session=${sessionId}; Path=/; Max-Age=86400; HttpOnly; SameSite=Lax${secure ? '; Secure' : ''}`
   );
 }
 
@@ -293,9 +303,15 @@ function createStaticAuthMiddleware(getAuthState) {
       return next();
     }
 
-    // Token already burned, MFA in progress
-    if (state.mfaEnabled && state.tokenBurned) {
-      res.redirect(`/auth.html?mode=${state.mode}`);
+    // Token already burned — redirect to auth page for re-authentication
+    if (state.tokenBurned) {
+      if (state.mfaEnabled) {
+        // MFA modes: user can re-enter PIN/TOTP remotely
+        res.redirect(`/auth.html?mode=${state.mode}`);
+      } else {
+        // Token-only mode: no remote re-auth possible, show expired message
+        res.redirect('/auth.html?mode=expired');
+      }
       return;
     }
 

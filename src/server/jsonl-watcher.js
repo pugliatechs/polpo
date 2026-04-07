@@ -19,8 +19,9 @@ class JsonlWatcher extends EventEmitter {
     this.pollTimer = null;
     this.lineBuffer = '';
     this.closed = false;
-    this.debounceTimer = null;
-    this.debounceMs = options.debounceMs || 100;
+    this.throttleTimer = null;
+    this.throttlePending = false;
+    this.throttleMs = options.throttleMs || options.debounceMs || 50;
     this.pollMs = options.pollMs || 500;
     this.seenUuids = new Set();
     this.assistantMessageIds = new Set();
@@ -90,8 +91,21 @@ class JsonlWatcher extends EventEmitter {
     if (this.closed) return;
     try {
       this.watcher = fs.watch(this.filePath, () => {
-        clearTimeout(this.debounceTimer);
-        this.debounceTimer = setTimeout(() => this._onFileChange(), this.debounceMs);
+        // Throttle (not debounce): fire immediately on first change, then at most
+        // once per throttleMs. A trailing-edge debounce starves during rapid writes
+        // because each new write resets the timer — the UI never updates mid-stream.
+        if (!this.throttleTimer) {
+          this._onFileChange();
+          this.throttleTimer = setTimeout(() => {
+            this.throttleTimer = null;
+            if (this.throttlePending) {
+              this.throttlePending = false;
+              this._onFileChange();
+            }
+          }, this.throttleMs);
+        } else {
+          this.throttlePending = true;
+        }
       });
       this.watcher.on('error', (err) => this.emit('error', err));
     } catch (e) {
@@ -274,7 +288,7 @@ class JsonlWatcher extends EventEmitter {
 
   close() {
     this.closed = true;
-    clearTimeout(this.debounceTimer);
+    clearTimeout(this.throttleTimer);
     if (this.pollTimer) {
       clearInterval(this.pollTimer);
       this.pollTimer = null;

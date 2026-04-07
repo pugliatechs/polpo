@@ -155,6 +155,7 @@
   const $skillDetailContent = document.getElementById('skill-detail-content');
   const $btnCloseSkillDetail = document.getElementById('btn-close-skill-detail');
   const $btnSkillAction = document.getElementById('btn-skill-action');
+  const $btnWakeLock = document.getElementById('btn-wakelock');
   const $btnNotifications = document.getElementById('btn-notifications');
   const $notificationBadge = document.getElementById('notification-badge');
   const $costSection = document.getElementById('cost-section');
@@ -414,20 +415,55 @@
   }
 
   var heartbeatCheckTimer = null;
-  var HEARTBEAT_STALE_MS = 45000;
+  var HEARTBEAT_STALE_MS = 20000;
+  var pingTimer = null;
+  var pongReceived = true;
+  var isReconnecting = false;
 
   function startHeartbeatCheck() {
     clearInterval(heartbeatCheckTimer);
+    clearInterval(pingTimer);
     var lastMessageTime = Date.now();
+
+    // Check for stale connection every 5s
     heartbeatCheckTimer = setInterval(function () {
       if (Date.now() - lastMessageTime > HEARTBEAT_STALE_MS && ws && ws.readyState === WebSocket.OPEN) {
         ws.close();
       }
+    }, 5000);
+
+    // Send application-level pings every 10s to detect dead connections
+    // (browser WebSocket API doesn't expose protocol-level ping/pong)
+    pongReceived = true;
+    pingTimer = setInterval(function () {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      if (!pongReceived) {
+        // No pong since last ping — connection is dead
+        ws.close();
+        return;
+      }
+      pongReceived = false;
+      try { ws.send(JSON.stringify({ type: 'ping' })); } catch (e) {}
     }, 10000);
-    return function () { lastMessageTime = Date.now(); };
+
+    return function () {
+      lastMessageTime = Date.now();
+      pongReceived = true;
+    };
+  }
+
+  function forceReconnect() {
+    if (isReconnecting) return;
+    reconnectDelay = 1000;
+    if (ws) {
+      try { ws.close(); } catch (e) {}
+    }
+    connect();
   }
 
   function connect() {
+    if (isReconnecting) return;
+    isReconnecting = true;
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const url = `${proto}//${location.host}?role=dashboard`;
     if (wasConnected) setConnectionState('reconnecting');
@@ -439,24 +475,28 @@
       setConnectionState('connected');
       wasConnected = true;
       reconnectDelay = 1000;
+      isReconnecting = false;
       markAlive = startHeartbeatCheck();
     };
 
     ws.onclose = function (evt) {
       clearInterval(heartbeatCheckTimer);
+      clearInterval(pingTimer);
+      isReconnecting = false;
       if (evt.code === 4001) {
         location.href = '/auth.html';
         return;
       }
       setConnectionState(wasConnected ? 'reconnecting' : 'disconnected');
       setTimeout(connect, reconnectDelay);
-      reconnectDelay = Math.min(reconnectDelay * 1.5, 10000);
+      reconnectDelay = Math.min(reconnectDelay * 1.5, 8000);
     };
 
     ws.onmessage = function (evt) {
       if (markAlive) markAlive();
       try {
         var msg = JSON.parse(evt.data);
+        if (msg.type === 'pong') return;
         handleMessage(msg);
       } catch (e) {
         // ignore
@@ -718,7 +758,7 @@
                 ? '<span class="card-name">' + escapeHtml(title) + '</span>'
                 : '<span class="card-name card-name-loading"><span class="inline-spinner"></span></span>') +
               '<button class="btn-pin' + (isPinned ? ' pinned' : '') + '" data-pin-id="' + safeId + '" title="' + (isPinned ? 'Unpin' : 'Pin') + '">' + (isPinned ? '&#9733;' : '&#9734;') + '</button>' +
-              '<span class="' + badgeClass + '">' + (inst.status === 'busy' ? '<span class="pulse-dot"></span>' : '') + inst.status + '</span>' +
+              '<span class="' + badgeClass + '">' + (inst.status === 'busy' ? '<span class="pulse-dot"></span>' : '') + escapeHtml(inst.status) + '</span>' +
             '</div>' +
             '<div class="card-meta">' +
               '<span>' + escapeHtml(inst.project || '') + '</span>' +
@@ -997,7 +1037,14 @@
 
     html += merged.map(function (m) { return formatMessage(m); }).join('');
     $conversation.innerHTML = html;
-    if (!skipScroll) scrollToBottom();
+    if (!skipScroll) {
+      scrollToBottom();
+      // Re-scroll when images finish loading (their height is 0 at insert time)
+      var imgs = $conversation.querySelectorAll('img');
+      for (var i = 0; i < imgs.length; i++) {
+        imgs[i].addEventListener('load', function () { scrollToBottom(true); });
+      }
+    }
   }
 
   /**
@@ -1045,6 +1092,11 @@
   }
 
   function appendMessage(msg) {
+    // Capture scroll intent BEFORE inserting content — once inserted,
+    // the new content height inflates scrollHeight and isNearBottom()
+    // may return false even though the user was following the stream.
+    var shouldScroll = isNearBottom();
+
     // For tool_result: try to merge into the preceding tool_use block
     if (msg.contentType === 'tool_result' && msg.toolUseId) {
       var safeId = CSS.escape(msg.toolUseId);
@@ -1062,12 +1114,23 @@
           '<div class="tool-block-label">OUT</div>' +
           '<pre>' + escapeHtml(output) + '</pre>';
         toolBlock.appendChild(resultDiv);
-        scrollToBottom();
+        if (shouldScroll) scrollToBottom(true);
         return;
       }
     }
     $conversation.insertAdjacentHTML('beforeend', formatMessage(msg));
-    scrollToBottom();
+    if (shouldScroll) {
+      scrollToBottom(true);
+      // Images load asynchronously — their height is 0 at insert time, then
+      // expands when data arrives, pushing content below the viewport.
+      // Re-scroll after each image loads to keep the view pinned to bottom.
+      var imgs = $conversation.lastElementChild
+        ? $conversation.lastElementChild.querySelectorAll('img')
+        : [];
+      for (var i = 0; i < imgs.length; i++) {
+        imgs[i].addEventListener('load', function () { scrollToBottom(true); });
+      }
+    }
   }
 
   function formatMessage(m) {
@@ -1149,8 +1212,8 @@
       attachHtml = '<div class="msg-attachments">' +
         m.attachments.map(function (att) {
           if (att.mediaType && att.mediaType.startsWith('image/')) {
-            var thumbUrl = '/api/uploads/' + att.path.split('/').pop();
-            return '<img class="msg-attachment-thumb" src="' + thumbUrl + '" alt="' + escapeHtml(att.filename) + '">';
+            var thumbUrl = '/api/uploads/' + encodeURIComponent(att.path.split('/').pop());
+            return '<img class="msg-attachment-thumb" src="' + escapeHtml(thumbUrl) + '" alt="' + escapeHtml(att.filename) + '">';
           }
           return '<span class="msg-attachment-file">&#128196; ' + escapeHtml(att.filename) + '</span>';
         }).join('') +
@@ -3387,13 +3450,92 @@
     if (e.target === $aboutModal) closeAbout();
   });
 
-  // ---- Reconnect on wake ----
-  document.addEventListener('visibilitychange', function () {
-    if (document.visibilityState === 'visible' && ws && ws.readyState !== WebSocket.OPEN) {
-      reconnectDelay = 1000;
-      ws.close();
-      connect();
+  // ---- Wake Lock (keep screen on) ----
+  var wakeLockSentinel = null;
+  var wakeLockEnabled = localStorage.getItem('polpo_wakelock') === 'true';
+
+  function acquireWakeLock() {
+    if ('wakeLock' in navigator) {
+      navigator.wakeLock.request('screen').then(function (sentinel) {
+        wakeLockSentinel = sentinel;
+        sentinel.addEventListener('release', function () {
+          wakeLockSentinel = null;
+        });
+      }).catch(function () {});
+    } else {
+      // Fallback for browsers without Wake Lock API: use a tiny hidden video
+      // that tricks the browser into thinking media is playing.
+      if (!wakeLockFallbackVideo) {
+        var v = document.createElement('video');
+        v.setAttribute('playsinline', '');
+        v.setAttribute('muted', '');
+        v.setAttribute('loop', '');
+        v.style.cssText = 'position:fixed;top:-1px;left:-1px;width:1px;height:1px;opacity:0.01';
+        // Minimal silent MP4 (base64) — triggers media session without audio
+        v.src = 'data:video/mp4;base64,AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAAIZnJlZQAAABltZGF0AAAA0wYF//+c3EXpvebZSLeWLNgg2SPu73gyNjQgLSBjb3JlIDE1NyByMjk4MCAtIEguMjY0L01QRUctNCBBVkMgY29kZWMAAAAIYXZjQwAAAAhhdmNDAAAACmNvbmZpZwAAAAhhdmNDAAAADGNvbGxlY3Rpb24=';
+        document.body.appendChild(v);
+        wakeLockFallbackVideo = v;
+      }
+      try { wakeLockFallbackVideo.play().catch(function () {}); } catch (e) {}
     }
+  }
+
+  function releaseWakeLock() {
+    if (wakeLockSentinel) {
+      wakeLockSentinel.release().catch(function () {});
+      wakeLockSentinel = null;
+    }
+    if (wakeLockFallbackVideo) {
+      wakeLockFallbackVideo.pause();
+    }
+  }
+
+  var wakeLockFallbackVideo = null;
+
+  function updateWakeLockButton() {
+    if (wakeLockEnabled) {
+      $btnWakeLock.classList.add('active');
+      $btnWakeLock.title = 'Screen stays awake (tap to disable)';
+    } else {
+      $btnWakeLock.classList.remove('active');
+      $btnWakeLock.title = 'Keep screen awake';
+    }
+  }
+
+  $btnWakeLock.addEventListener('click', function () {
+    wakeLockEnabled = !wakeLockEnabled;
+    localStorage.setItem('polpo_wakelock', wakeLockEnabled ? 'true' : 'false');
+    if (wakeLockEnabled) {
+      acquireWakeLock();
+    } else {
+      releaseWakeLock();
+    }
+    updateWakeLockButton();
+  });
+
+  // Re-acquire wake lock when returning to foreground (OS releases it on background)
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible' && wakeLockEnabled) {
+      acquireWakeLock();
+    }
+  });
+
+  updateWakeLockButton();
+  if (wakeLockEnabled) acquireWakeLock();
+
+  // ---- Reconnect on wake / network change ----
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible') {
+      // Always force-reconnect when returning to foreground.
+      // On mobile, the TCP connection is often dead after sleep/background
+      // but readyState still shows OPEN (half-open socket).
+      forceReconnect();
+    }
+  });
+
+  window.addEventListener('online', function () {
+    // Network restored (e.g. Wi-Fi reconnect, VPN toggle) — reconnect immediately
+    forceReconnect();
   });
 
   // ---- Init ----

@@ -756,6 +756,13 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
       return res.status(400).json({ error: 'Missing or invalid root parameter' });
     }
 
+    // Validate gitRoot is within the instance's working directory
+    const normalizedRoot = path.resolve(gitRoot);
+    const normalizedCwd = path.resolve(inst.cwd);
+    if (normalizedRoot !== normalizedCwd && !normalizedRoot.startsWith(normalizedCwd + path.sep)) {
+      return res.status(403).json({ error: 'Root outside instance working directory' });
+    }
+
     const filePath = req.params.filePath;
     // Prevent path traversal
     const resolved = path.resolve(gitRoot, filePath);

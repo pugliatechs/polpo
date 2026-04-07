@@ -156,6 +156,18 @@ body {
 }
 .btn-about:active { opacity: 1; }
 
+.btn-wakelock {
+  font-size: 18px;
+  padding: 4px;
+  line-height: 1;
+  opacity: 0.5;
+  transition: opacity 0.2s;
+}
+.btn-wakelock.active {
+  opacity: 1;
+  color: #fbbf24;
+}
+
 .btn-notification {
   position: relative;
   font-size: 16px;

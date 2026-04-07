@@ -377,7 +377,7 @@ describe('createStaticAuthMiddleware', () => {
     assert.ok(res.redirectUrl.includes('auth.html'));
   });
 
-  it('returns 401 for unauthenticated non-API non-MFA request', () => {
+  it('redirects to expired auth page for unauthenticated non-API non-MFA request', () => {
     const state = new AuthState({ token: 'tok' }); // no MFA mode
     state.tokenBurned = true;
     const mw = createStaticAuthMiddleware(() => state);
@@ -386,10 +386,11 @@ describe('createStaticAuthMiddleware', () => {
     let nextCalled = false;
     mw(req, res, () => { nextCalled = true; });
     assert.equal(nextCalled, false);
-    assert.equal(res.statusCode, 401);
+    assert.ok(res.redirectUrl);
+    assert.ok(res.redirectUrl.includes('mode=expired'));
   });
 
-  it('rejects burned token on second use', () => {
+  it('redirects on burned token second use and un-burns for re-scan', () => {
     const state = new AuthState({ token: 'tok' });
     const mw = createStaticAuthMiddleware(() => state);
     // First use: burns token, creates session
@@ -400,13 +401,14 @@ describe('createStaticAuthMiddleware', () => {
     assert.equal(firstNext, true); // no MFA, creates session
     assert.equal(state.tokenBurned, true);
 
-    // Second use: token is burned, should fail
+    // Second use: token is burned, redirects to expired page
     const req2 = mockReq({ url: '/?token=tok', path: '/' });
     const res2 = mockRes();
     let secondNext = false;
     mw(req2, res2, () => { secondNext = true; });
     assert.equal(secondNext, false);
-    assert.equal(res2.statusCode, 401);
+    assert.ok(res2.redirectUrl);
+    assert.ok(res2.redirectUrl.includes('mode=expired'));
   });
 
   it('allows access with session cookie after token burn', (_, done) => {

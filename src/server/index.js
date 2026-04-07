@@ -64,6 +64,24 @@ function createServer(options = {}) {
 
   app.use(express.json({ limit: '15mb' }));
 
+  // Security headers
+  app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('X-XSS-Protection', '0'); // disabled in favor of CSP
+    res.setHeader('Content-Security-Policy',
+      "default-src 'self'; " +
+      "script-src 'self' 'unsafe-inline'; " +
+      "style-src 'self' 'unsafe-inline'; " +
+      "img-src 'self' data: blob:; " +
+      "connect-src 'self' ws: wss:; " +
+      "media-src 'self' data:; " +
+      "frame-ancestors 'none'"
+    );
+    next();
+  });
+
   // CSRF protection: block cross-origin requests to API endpoints.
   // Browsers send Origin or Referer headers on cross-origin requests.
   // A malicious page at evil.com fetching http://localhost:7890/api/* will

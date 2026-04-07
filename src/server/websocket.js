@@ -421,6 +421,13 @@ function setupWebSocket(server, instanceManager, getAuthState, pushManager) {
       ws.on('message', (raw) => {
         try {
           const msg = JSON.parse(raw);
+          // Application-level ping/pong for detecting dead connections on mobile
+          if (msg.type === 'ping') {
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: 'pong' }));
+            }
+            return;
+          }
           handleDashboardMessage(msg, instanceManager);
         } catch (e) {
           // ignore malformed messages

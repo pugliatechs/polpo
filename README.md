@@ -233,7 +233,7 @@ node bin/polpo.js server --tunnel ssh --tunnel-host user@myserver.com --tunnel-p
 | Provider | Install | Signup | Auto-detect | Notes |
 |----------|---------|--------|-------------|-------|
 | **cloudflared** | [Download](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) | No | Yes (1st) | Best reliability, free quick tunnels |
-| **localtunnel** | Bundled | No | Yes (2nd) | Always available fallback (npm dep) |
+| **localtunnel** | Bundled | No | Yes (2nd) | Always available fallback (npm dep). Note: localtunnel bundles an outdated version of axios with known vulnerabilities (CSRF, SSRF, DoS). Consider using cloudflared or ngrok for production use. |
 | **ngrok** | [Download](https://ngrok.com/download) | Yes | No | Requires auth token, stable URLs available |
 | **ssh** | Built-in | No | No | Requires `--tunnel-host`, uses your own server |
 
