@@ -52,10 +52,49 @@ function registerHandlers(bot, config, deps) {
       '<code>/forget</code> &lt;key&gt; — Remove\n' +
       '<code>/memories</code> — List all\n' +
       '<code>/search</code> &lt;query&gt; — Search\n\n' +
-      '<b>Auth</b>\n' +
+      '<b>Settings</b>\n' +
+      '<code>/notifications</code> — Toggle notifications\n' +
       '<code>/renew_token</code> — Renew token',
       { html: true }
     );
+  });
+
+  // /notifications — toggle or show notification settings
+  bot.command('notifications', async function (ctx) {
+    if (!isSenderAllowed(ctx.from, allowFrom)) return;
+    var arg = (ctx.match || '').trim().toLowerCase();
+
+    if (arg === 'on') {
+      config.notifications.approvals = true;
+      config.notifications.completions = true;
+      await sendMessage(bot, ctx.chat.id, '🔔 All notifications <b>enabled</b>.', { html: true });
+    } else if (arg === 'off') {
+      config.notifications.approvals = false;
+      config.notifications.completions = false;
+      await sendMessage(bot, ctx.chat.id, '🔕 All notifications <b>disabled</b>.', { html: true });
+    } else if (arg === 'approvals') {
+      config.notifications.approvals = !config.notifications.approvals;
+      await sendMessage(bot, ctx.chat.id,
+        '🔔 Approval notifications: <b>' + (config.notifications.approvals ? 'on' : 'off') + '</b>', { html: true });
+    } else if (arg === 'completions') {
+      config.notifications.completions = !config.notifications.completions;
+      await sendMessage(bot, ctx.chat.id,
+        '🔔 Completion notifications: <b>' + (config.notifications.completions ? 'on' : 'off') + '</b>', { html: true });
+    } else {
+      // Show current status
+      var approvals = config.notifications.approvals ? '✅ on' : '❌ off';
+      var completions = config.notifications.completions ? '✅ on' : '❌ off';
+      await sendMessage(bot, ctx.chat.id,
+        '<b>Notifications</b>\n' +
+        '• Approvals: ' + approvals + '\n' +
+        '• Completions: ' + completions + '\n\n' +
+        'Toggle:\n' +
+        '<code>/notifications on</code> — enable all\n' +
+        '<code>/notifications off</code> — disable all\n' +
+        '<code>/notifications approvals</code> — toggle approvals\n' +
+        '<code>/notifications completions</code> — toggle completions',
+        { html: true });
+    }
   });
 
   // /renew_token — initiate auth renewal (agent-type aware)

@@ -182,43 +182,43 @@ function createPA(opts) {
       });
 
       // Subscribe to approval events for ALL instances (not just PA)
-      if (config.notifications.approvals) {
-        opts.instanceManager.on('instance:approval', function (data) {
-          // Skip PA's own approvals (already handled above)
-          if (data.id === agentBridge.getInstanceId()) return;
-          if (!chatId || !telegramBot || !data.approval) return;
+      // Always register — check config.notifications flag inside callback
+      // so /notifications toggle works at runtime without restart
+      opts.instanceManager.on('instance:approval', function (data) {
+        if (!config.notifications.approvals) return;
+        // Skip PA's own approvals (already handled above)
+        if (data.id === agentBridge.getInstanceId()) return;
+        if (!chatId || !telegramBot || !data.approval) return;
 
-          var inst = opts.instanceManager.get(data.id);
-          var name = inst ? (inst.name || inst.project || 'Agent') : 'Agent';
-          var toolName = data.approval.tool || 'action';
-          var text = '⚠️ <b>' + escapeHtml(name) + '</b> needs approval for <b>' + escapeHtml(toolName) + '</b>';
+        var inst = opts.instanceManager.get(data.id);
+        var name = inst ? (inst.name || inst.project || 'Agent') : 'Agent';
+        var toolName = data.approval.tool || 'action';
+        var text = '⚠️ <b>' + escapeHtml(name) + '</b> needs approval for <b>' + escapeHtml(toolName) + '</b>';
 
-          sendMessage(telegramBot.bot, chatId, text, {
-            html: true,
-            buttons: [
-              [
-                { text: '✅ Approve', callback_data: 'approve:' + data.id },
-                { text: '❌ Reject', callback_data: 'reject:' + data.id },
-              ],
+        sendMessage(telegramBot.bot, chatId, text, {
+          html: true,
+          buttons: [
+            [
+              { text: '✅ Approve', callback_data: 'approve:' + data.id },
+              { text: '❌ Reject', callback_data: 'reject:' + data.id },
             ],
-          }).catch(function () {});
-        });
-      }
+          ],
+        }).catch(function () {});
+      });
 
       // Subscribe to task completion notifications
-      if (config.notifications.completions) {
-        opts.instanceManager.on('instance:status', function (data) {
-          if (data.status !== 'idle') return;
-          // Skip PA agent's own status
-          if (data.id === agentBridge.getInstanceId()) return;
-          if (!chatId || !telegramBot) return;
+      opts.instanceManager.on('instance:status', function (data) {
+        if (!config.notifications.completions) return;
+        if (data.status !== 'idle') return;
+        // Skip PA agent's own status
+        if (data.id === agentBridge.getInstanceId()) return;
+        if (!chatId || !telegramBot) return;
 
-          var inst = opts.instanceManager.get(data.id);
-          var name = inst ? (inst.name || inst.project || 'Agent') : 'Agent';
-          sendMessage(telegramBot.bot, chatId, '✅ <b>' + escapeHtml(name) + '</b> finished.', { html: true })
-            .catch(function () {});
-        });
-      }
+        var inst = opts.instanceManager.get(data.id);
+        var name = inst ? (inst.name || inst.project || 'Agent') : 'Agent';
+        sendMessage(telegramBot.bot, chatId, '✅ <b>' + escapeHtml(name) + '</b> finished.', { html: true })
+          .catch(function () {});
+      });
 
       telegramBot.start();
 
