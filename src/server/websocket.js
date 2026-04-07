@@ -533,12 +533,18 @@ function handleDashboardMessage(msg, instanceManager) {
 
 function handleAgentMessage(instanceId, msg, instanceManager, activeWatchers) {
   switch (msg.type) {
-    case 'status':
-      // If JSONL watcher is active, it provides status via stop_reason detection
-      if (!activeWatchers.has(instanceId)) {
+    case 'status': {
+      // If JSONL watcher is active, it provides status via stop_reason detection.
+      // Exception: PA and session-spawned agents always trust their own status
+      // because the agent bridge needs immediate busy/idle transitions for
+      // turn serialization. JSONL watcher status has debounce latency.
+      const inst = instanceManager.get(instanceId);
+      const isAgentSpawned = inst && (inst.type === 'pa' || inst.canReceivePrompts !== false);
+      if (isAgentSpawned || !activeWatchers.has(instanceId)) {
         instanceManager.updateStatus(instanceId, msg.status);
       }
       break;
+    }
     case 'message':
       // If JSONL watcher is active, skip hook-delivered messages (watcher provides them)
       if (!activeWatchers.has(instanceId)) {
