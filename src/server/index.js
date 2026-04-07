@@ -228,6 +228,15 @@ function createServer(options = {}) {
   // WebSocket
   const wss = setupWebSocket(server, instanceManager, getAuthState, pushManager);
 
+  // Personal Assistant (opt-in — requires POLPO_PA_TELEGRAM_TOKEN)
+  let pa = null;
+  try {
+    const { createPA } = require('../pa/index');
+    pa = createPA({ instanceManager, getAuthState, pushManager, serverPort: port });
+  } catch (e) {
+    // PA module not available or misconfigured — skip silently
+  }
+
   if (verbose) {
     instanceManager.on('instance:registered', (inst) => {
       console.log(`[polpo] Instance registered: ${inst.name} (${inst.id})`);
@@ -243,16 +252,22 @@ function createServer(options = {}) {
   return {
     start() {
       return new Promise((resolve) => {
-        server.listen(port, host, () => {
+        server.listen(port, host, async () => {
           const addr = server.address();
           const { version: pkgVersion } = require('../../package.json');
           console.log(`\n  🐙 Polpo v${pkgVersion} running on http://${host}:${addr.port}`);
           console.log(`     Open this URL on your phone (same network)\n`);
+          if (pa && pa.isEnabled()) {
+            try { await pa.start(); } catch (e) {
+              console.error('[polpo] PA failed to start:', e.message);
+            }
+          }
           resolve(addr);
         });
       });
     },
-    stop() {
+    async stop() {
+      if (pa) { try { await pa.stop(); } catch {} }
       return new Promise((resolve) => {
         if (wss.scanner) wss.scanner.stop();
         if (wss.geminiScanner) wss.geminiScanner.stop();

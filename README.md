@@ -115,6 +115,11 @@ The dashboard shows active sessions, past session history, and lets you send pro
 | Skills Management | Browse, search, install, and remove [skills.sh](https://skills.sh) skills from Claude instance detail view |
 | Mobile-First UI | Dark OLED theme, touch-optimized, safe-area support, responsive layout |
 | Tunnel Access | Expose the hub over the internet with `--tunnel` (cloudflared, localtunnel, ngrok, SSH) |
+| **Personal Assistant** | Telegram bot backed by the same agent system — daily tasks, conversation, web research, memory |
+| PA Token Renewal | Renew Anthropic OAuth tokens directly from Telegram via `/renew_token` |
+| PA Memory | Persistent conversation history and user memories with hybrid vector + keyword search |
+| PA Notifications | Telegram alerts for approval requests and task completions across all instances |
+| PA Multi-Agent | Switch between Claude, Codex, Gemini, OpenCode, and Pi via `/agent <type>` |
 
 > **Note**: Polpo streaming is **near real-time**, not strictly real-time. Auto-discovery relies on filesystem events (`fs.watch`) which have inherent OS-level latency; JSONL/JSON watchers debounce file changes; agents using one-shot process invocation (Codex, Gemini) accumulate deltas before flushing; and when `fs.watch` is unavailable (e.g. inotify limit exhaustion), the system falls back to periodic polling. In practice, latency is typically under one second, but it is not zero.
 
@@ -508,6 +513,103 @@ Skills are stored at `~/.agents/skills/` and symlinked into `~/.claude/skills/` 
 | DELETE | `/api/skills/:name` | Remove an installed skill |
 | GET | `/api/skills/:name/content` | Get SKILL.md content for detail view |
 
+## Personal Assistant (Telegram)
+
+Polpo includes an optional **Personal Assistant** module — a Telegram bot backed by the same agent system that powers the web UI. Send messages via Telegram, get AI responses, manage coding sessions, and handle daily tasks — all from a chat interface.
+
+The PA is **opt-in**: it only starts if a Telegram bot token is configured. When active, the PA agent appears in the web UI dashboard alongside coding sessions, so you can see and interact with PA conversations from both Telegram and the web.
+
+### Quick Start
+
+1. Create a bot via [@BotFather](https://t.me/BotFather) on Telegram
+2. Set the environment variable:
+
+```bash
+export POLPO_PA_TELEGRAM_TOKEN="123456:ABC-DEF..."
+export POLPO_PA_TELEGRAM_ALLOW="your_telegram_user_id"
+```
+
+3. Start Polpo as usual:
+
+```bash
+node bin/polpo.js server
+```
+
+The PA will auto-start and begin polling Telegram. Send any message to your bot to start a conversation.
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `/start` | Welcome message with command list |
+| `/status` | Show active instances with status |
+| `/instances` | Detailed instance list with IDs |
+| `/new` | Start a new PA agent session |
+| `/stop` | Stop the current PA agent |
+| `/abort` | Abort the running task |
+| `/agent <type>` | Switch agent type (claude/codex/gemini/opencode/pi) |
+| `/approve <id>` | Approve a pending action on any instance |
+| `/reject <id>` | Reject a pending action on any instance |
+| `/web <query>` | Web research via the agent |
+| `/remind <when> <what>` | Set a reminder |
+| `/remember <key> <text>` | Save a memory |
+| `/forget <key>` | Remove a memory |
+| `/memories` | List stored memories |
+| `/search <query>` | Search memories |
+| `/renew_token` | Renew authentication token |
+
+### How It Works
+
+The PA spawns a real coding agent (Claude Code by default) using the same `AgentFactory` and `InstanceManager` as the web UI. Telegram messages become prompts; agent responses are forwarded back to Telegram with markdown-to-HTML conversion.
+
+- **Approval requests** from the agent appear as Telegram inline buttons (Approve / Reject)
+- **Tool calls** are shown with tool name and a brief summary (file path, command, etc.)
+- **Cross-instance notifications** — approval requests and task completions from *any* coding session are forwarded to Telegram
+- **Typing indicator** is sent while the agent processes
+
+### PA Workspace
+
+The PA agent runs in a dedicated workspace (`~/.config/polpo/pa-workspace/`) with a `CLAUDE.md` file that defines its personal assistant personality. You can customize this file to change the PA's behavior, tone, and capabilities.
+
+### Memory System
+
+Conversations are persisted in a local SQLite database (`~/.config/polpo/pa-memory.db`). The memory system supports:
+
+- **Conversation history** — automatically saved, survives server restarts
+- **User memories** — key/value store for facts the PA should remember
+- **Hybrid search** — vector embeddings + BM25 keyword search for retrieval
+- **Embedding providers** — OpenAI API or a built-in hash-based fallback (no API key needed)
+
+### Token Renewal
+
+For Claude Code agents, the PA includes an **Anthropic OAuth token renewal** system:
+
+- `/renew_token` generates a PKCE authorization URL — authenticate in browser, paste the callback code
+- **Background monitor** checks token health every 5 minutes and auto-refreshes when possible
+- **Telegram alerts** when manual renewal is needed
+- Tokens are written to `~/.claude/.credentials.json` so the agent picks them up automatically
+
+### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `POLPO_PA_TELEGRAM_TOKEN` | (none) | Bot token from @BotFather (required) |
+| `POLPO_PA_TELEGRAM_ALLOW` | (none) | Comma-separated Telegram user IDs or usernames |
+| `POLPO_PA_AGENT_TYPE` | `claude` | Agent type: claude, codex, gemini, opencode, pi |
+| `POLPO_PA_AGENT_CWD` | PA workspace | Working directory for the agent |
+| `POLPO_PA_AGENT_MODEL` | (agent default) | Model override |
+| `POLPO_PA_AGENT_NAME` | `Personal Assistant` | Display name in dashboard |
+| `POLPO_PA_AUTH_CHECK_INTERVAL` | `5` | Token health check interval (minutes) |
+| `POLPO_PA_AUTH_EXPIRY_BUFFER` | `15` | Alert when token expires within N minutes |
+| `POLPO_PA_AUTH_AUTO_REFRESH` | `true` | Auto-refresh tokens via refresh_token |
+| `POLPO_PA_NOTIFY_APPROVALS` | `true` | Telegram notifications for approval requests |
+| `POLPO_PA_NOTIFY_COMPLETIONS` | `true` | Notifications when tasks complete |
+| `POLPO_PA_MEMORY_DB` | `~/.config/polpo/pa-memory.db` | SQLite database path |
+| `POLPO_PA_EMBEDDING_PROVIDER` | `hash` | Embedding provider (openai or hash) |
+| `POLPO_PA_EMBEDDING_API_KEY` | (none) | API key for OpenAI embeddings |
+
+All settings can also be configured via `~/.config/polpo/pa.json`. See [docs/personal-assistant.md](docs/personal-assistant.md) for full documentation.
+
 ## Mobile UI
 
 - Dark theme optimized for OLED screens
@@ -576,23 +678,29 @@ Connect to `ws://<host>:<port>?role=agent&instanceId=<id>` as an agent.
 npm test
 ```
 
-Runs unit tests with Node's built-in test runner. Tests cover authentication (token, PIN, TOTP, sessions, middleware), instance manager, tunnel provider logic, session JSONL/JSON parsing, JSONL/JSON file watcher (messages, status events, dedup), session scanner (Claude/Codex/Gemini/Pi auto-discovery, idle detection, project watching), Codex agent (event translation, hub messages, multi-turn), OpenCode agent (event translation, delta accumulation), Pi agent (RPC event handling, delta accumulation, tool call streaming), Codex scanner (Codex session discovery), Pi scanner (Pi session discovery, slug parsing), agent factory (agent type routing), and skills API (frontmatter parsing, search output parsing, input validation).
+Runs unit tests with Node's built-in test runner. Tests cover authentication (token, PIN, TOTP, sessions, middleware), instance manager, tunnel provider logic, session JSONL/JSON parsing, JSONL/JSON file watcher (messages, status events, dedup), session scanner (Claude/Codex/Gemini/Pi auto-discovery, idle detection, project watching), Codex agent (event translation, hub messages, multi-turn), OpenCode agent (event translation, delta accumulation), Pi agent (RPC event handling, delta accumulation, tool call streaming), Codex scanner (Codex session discovery), Pi scanner (Pi session discovery, slug parsing), agent factory (agent type routing), skills API (frontmatter parsing, search output parsing, input validation), and Personal Assistant (config, Telegram access control, markdown formatting, message chunking, agent bridge, OAuth PKCE, flow state, memory CRUD, hybrid search, cosine similarity, workspace management).
 
 ## System Overview
 
 ```mermaid
 graph TD
     Phone["Phone (any network)"]
+    Telegram["Telegram Bot
+    (Personal Assistant)"]
     Tunnel["Tunnel (optional)
     cloudflared / localtunnel / ngrok / SSH"]
     Hub["Polpo Hub :7890
     Express + WebSocket"]
+    PA["PA Module
+    (Telegram ↔ Agent Bridge)"]
     Factory["Agent Factory"]
     Scanner["Session Scanner
     (Claude + Codex + Gemini + Pi)"]
     Hooks["Hook Bridge
     (optional)"]
     Browser["Session Browser"]
+    Memory["PA Memory
+    (SQLite + FTS5)"]
     Claude["claude CLI
     (stream-json)"]
     Codex["codex exec --json"]
@@ -615,11 +723,15 @@ graph TD
 
     Phone -->|"cellular / internet"| Tunnel
     Phone -->|"VPN / LAN"| Hub
+    Telegram -->|"Bot API"| PA
     Tunnel --> Hub
     Hub --> Factory
     Hub --> Scanner
     Hub --> Hooks
     Hub --> Browser
+    Hub --> PA
+    PA --> Factory
+    PA --> Memory
     Factory -->|"claude agent"| Claude
     Factory -->|"codex agent"| Codex
     Factory -->|"gemini agent"| Gemini
@@ -645,7 +757,7 @@ graph TD
     Browser -->|"reads"| PiJSONL
 ```
 
-See [docs/diagrams.md](docs/diagrams.md) for auth, tunnel, session, auto-discovery, takeover, and hook flow diagrams.
+See [docs/diagrams.md](docs/diagrams.md) for auth, tunnel, session, auto-discovery, takeover, and hook flow diagrams. See [docs/personal-assistant.md](docs/personal-assistant.md) for full PA module documentation.
 
 ## Disclaimer
 

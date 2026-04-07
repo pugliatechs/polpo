@@ -39,6 +39,8 @@ class WrappedAgent {
     this.model = options.model || null;
     this.permissionMode = options.permissionMode || 'default';
     this.claudeBinary = options.claudeBinary || 'claude';
+    this.allowedTools = options.allowedTools || null; // Array of tool names for --allowedTools
+    this.extraEnv = options.extraEnv || null; // Additional env vars for the Claude process
 
     // Hub connection state
     this.instanceId = null;
@@ -187,7 +189,9 @@ class WrappedAgent {
       args.push('--model', this.model);
     }
 
-    if (this.permissionMode === 'bypass') {
+    if (this.allowedTools && this.allowedTools.length > 0) {
+      args.push('--allowedTools', this.allowedTools.join(','));
+    } else if (this.permissionMode === 'bypass') {
       args.push('--dangerously-skip-permissions');
     } else {
       // Use the MCP permission server for interactive approval from the phone.
@@ -223,6 +227,10 @@ class WrappedAgent {
     const env = { ...process.env };
     if (!env.PATH || !env.PATH.startsWith(nodeDir)) {
       env.PATH = nodeDir + ':' + (env.PATH || '');
+    }
+    // Apply extra env vars (e.g., CLAUDE_STREAM_ACTIVE for PA mode)
+    if (this.extraEnv) {
+      Object.assign(env, this.extraEnv);
     }
 
     this.claude = spawn(this.claudeBinary, args, {
