@@ -13,6 +13,46 @@ const os = require('os');
 
 var DEFAULT_WORKSPACE = path.join(os.homedir(), '.config', 'polpo', 'pa-workspace');
 
+var DEFAULT_USER_MD = `# User Profile
+
+<!-- Edit this file with your personal info so the PA knows who you are. -->
+<!-- This is injected into every conversation for personalized responses. -->
+
+## Name
+<!-- Your name -->
+
+## Location
+<!-- City, timezone — used for weather, local recommendations, time references -->
+
+## Language
+<!-- Preferred language(s) for responses -->
+
+## Preferences
+<!-- Things the PA should know: communication style, topics of interest, etc. -->
+
+## Work
+<!-- Your role, company, industry — helps with professional tasks -->
+
+## Notes
+<!-- Anything else: allergies, important dates, recurring tasks, etc. -->
+`;
+
+var DEFAULT_MEMORY_README = `# Memory Files
+
+Place .md files in this directory to give your PA long-term knowledge.
+These files are automatically indexed and searchable.
+
+Examples:
+- contacts.md — people you interact with, their roles, preferences
+- projects.md — active projects, deadlines, status
+- recipes.md — favorite recipes or meal plans
+- travel.md — upcoming trips, loyalty numbers, preferences
+- health.md — medications, appointments, provider info
+
+The PA searches these files when answering questions about your life,
+preferences, decisions, and history. Keep them organized and up to date.
+`;
+
 var DEFAULT_CLAUDE_MD = `# Personal Assistant
 
 You are a personal and professional AI assistant accessed via Telegram. You help the user with their daily life — not coding. Think of yourself as a smart, reliable assistant that lives in their pocket.
