@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node bin/polpo.js server",
     "dev": "node bin/polpo.js server --verbose",
-    "test": "node --test --test-concurrency=1 test/auth.test.js test/instances.test.js test/tunnel.test.js test/sessions.test.js test/jsonl-watcher.test.js test/session-scanner.test.js test/agent-factory.test.js test/codex-agent.test.js test/codex-scanner.test.js test/opencode-agent.test.js test/pi-agent.test.js test/pi-scanner.test.js test/skills-api.test.js"
+    "test": "node --test --test-concurrency=1 test/auth.test.js test/instances.test.js test/tunnel.test.js test/sessions.test.js test/jsonl-watcher.test.js test/session-scanner.test.js test/agent-factory.test.js test/codex-agent.test.js test/codex-scanner.test.js test/opencode-agent.test.js test/pi-agent.test.js test/pi-scanner.test.js test/skills-api.test.js test/goose-agent.test.js"
   },
   "keywords": [
     "claude-code",

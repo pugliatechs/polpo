@@ -10,6 +10,7 @@ const { GeminiScanner } = require('./gemini-scanner');
 const { OpencodeScanner } = require('./opencode-scanner');
 const { PiScanner } = require('./pi-scanner');
 const { PiJsonlAdapter } = require('./pi-jsonl-adapter');
+const { GooseScanner } = require('./goose-scanner');
 const { CostTracker } = require('./cost-tracker');
 
 function setupWebSocket(server, instanceManager, getAuthState, pushManager) {
@@ -381,6 +382,41 @@ function setupWebSocket(server, instanceManager, getAuthState, pushManager) {
 
   piScanner.start();
 
+  // --- Goose auto-discovery: poll SQLite for active sessions ---
+  const gooseScanner = new GooseScanner();
+
+  gooseScanner.on('session:discovered', (data) => {
+    const { sessionId, cwd, projectName, firstPrompt } = data;
+
+    if (sessionToInstance.has(sessionId)) return;
+
+    const instance = instanceManager.register({
+      name: firstPrompt || projectName || 'Goose',
+      type: 'terminal',
+      project: projectName || 'goose',
+      cwd,
+      sessionId,
+      transcriptPath: null, // Goose uses SQLite, not transcript files
+      firstPrompt: firstPrompt || null,
+      canReceivePrompts: false,
+      agentType: 'goose',
+    });
+
+    sessionToInstance.set(sessionId, instance.id);
+    instanceManager.updateStatus(instance.id, 'busy');
+  });
+
+  gooseScanner.on('session:inactive', (data) => {
+    const instanceId = sessionToInstance.get(data.sessionId);
+    if (instanceId) {
+      instanceManager.updateStatus(instanceId, 'disconnected');
+      instanceManager.unregister(instanceId);
+      sessionToInstance.delete(data.sessionId);
+    }
+  });
+
+  gooseScanner.start();
+
   wss.on('connection', (ws, req) => {
     // CSRF protection: validate Origin header for browser connections.
     // Browsers always send Origin on WebSocket upgrades. A malicious page
@@ -474,6 +510,7 @@ function setupWebSocket(server, instanceManager, getAuthState, pushManager) {
   wss.geminiScanner = geminiScanner;
   wss.opencodeScanner = opencodeScanner;
   wss.piScanner = piScanner;
+  wss.gooseScanner = gooseScanner;
   wss.costTracker = costTracker;
 
   return wss;

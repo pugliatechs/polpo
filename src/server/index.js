@@ -258,6 +258,7 @@ function createServer(options = {}) {
         if (wss.geminiScanner) wss.geminiScanner.stop();
         if (wss.opencodeScanner) wss.opencodeScanner.stop();
         if (wss.piScanner) wss.piScanner.stop();
+        if (wss.gooseScanner) wss.gooseScanner.stop();
         for (const client of wss.clients) {
           client.terminate();
         }

@@ -7,6 +7,7 @@
  *   - 'gemini'           → GeminiAgent (Google Gemini CLI)
  *   - 'opencode'         → OpencodeAgent (OpenCode CLI)
  *   - 'pi'               → PiAgent (Pi coding agent RPC mode)
+ *   - 'goose'            → GooseAgent (Goose AI agent ACP mode)
  */
 
 function createAgent(type, options) {
@@ -25,6 +26,10 @@ function createAgent(type, options) {
   if (type === 'pi') {
     const { PiAgent } = require('./pi-agent');
     return new PiAgent(options);
+  }
+  if (type === 'goose') {
+    const { GooseAgent } = require('./goose-agent');
+    return new GooseAgent(options);
   }
   const { WrappedAgent } = require('./wrapped');
   return new WrappedAgent(options);
