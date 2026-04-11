@@ -40,7 +40,9 @@
     { id: 'commit', label: 'Commit', text: 'Create a git commit for the current changes with a descriptive message.', agents: ['claude', 'codex', 'opencode'] },
     { id: 'review', label: 'Review', text: 'Review the changes you made. Check for bugs, security issues, and edge cases.', agents: ['claude', 'gemini', 'opencode', 'pi'] },
   ];
-  var VALID_AGENT_TYPES = ['claude', 'codex', 'gemini', 'opencode', 'pi', 'goose'];
+  var VALID_AGENT_TYPES = ['claude', 'codex', 'gemini', 'opencode', 'pi', 'goose', 'mind'];
+  var AGENT_LABELS = { claude: 'Claude', codex: 'Codex', gemini: 'Gemini', opencode: 'OpenCode', pi: 'Pi', goose: 'Goose', mind: 'Mind' };
+  function agentLabel(type) { return AGENT_LABELS[type] || 'Claude'; }
   var MAX_TEMPLATE_LENGTH = 500;
   var MAX_CUSTOM_TEMPLATES = 20;
   var customTemplates = loadCustomTemplates();
@@ -767,7 +769,7 @@
             '</div>' +
             '<div class="card-meta">' +
               '<span>' + escapeHtml(inst.project || '') + '</span>' +
-              '<span class="agent-badge agent-' + safeAgentType + '">' + (safeAgentType === 'codex' ? 'Codex' : safeAgentType === 'gemini' ? 'Gemini' : safeAgentType === 'opencode' ? 'OpenCode' : safeAgentType === 'pi' ? 'Pi' : safeAgentType === 'goose' ? 'Goose' : 'Claude') + '</span>' +
+              '<span class="agent-badge agent-' + safeAgentType + '">' + agentLabel(safeAgentType) + '</span>' +
             '</div>' +
             approvalHtml +
           '</div>'
@@ -962,7 +964,7 @@
     }
     $detailProject.textContent = '📁 ' + (inst.project || '');
     var detailAgentType = VALID_AGENT_TYPES.indexOf(inst.agentType) !== -1 ? inst.agentType : 'claude';
-    $detailType.innerHTML = '<span class="agent-badge agent-' + detailAgentType + '">' + (detailAgentType === 'codex' ? 'Codex' : detailAgentType === 'gemini' ? 'Gemini' : detailAgentType === 'opencode' ? 'OpenCode' : detailAgentType === 'pi' ? 'Pi' : detailAgentType === 'goose' ? 'Goose' : 'Claude') + '</span>';
+    $detailType.innerHTML = '<span class="agent-badge agent-' + detailAgentType + '">' + agentLabel(detailAgentType) + '</span>';
 
     // Skills button — only for Claude instances
     var isClaude = !inst.agentType || inst.agentType === 'claude';
@@ -2442,7 +2444,7 @@
           '</div>' +
           '<div class="card-meta">' +
             '<span>' + escapeHtml(s.project) + '</span>' +
-            '<span class="agent-badge agent-' + sessionAgentType + '">' + (sessionAgentType === 'codex' ? 'Codex' : sessionAgentType === 'gemini' ? 'Gemini' : sessionAgentType === 'opencode' ? 'OpenCode' : sessionAgentType === 'pi' ? 'Pi' : sessionAgentType === 'goose' ? 'Goose' : 'Claude') + '</span>' +
+            '<span class="agent-badge agent-' + sessionAgentType + '">' + agentLabel(sessionAgentType) + '</span>' +
           '</div>' +
         '</div>'
       );

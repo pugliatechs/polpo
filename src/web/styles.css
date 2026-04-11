@@ -398,6 +398,10 @@ main {
   background: rgba(34,197,94,0.15);
   color: #22c55e;
 }
+.agent-mind {
+  background: rgba(168,85,247,0.15);
+  color: #a855f7;
+}
 
 .card-approval {
   margin-top: 10px;

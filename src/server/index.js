@@ -233,6 +233,17 @@ function createServer(options = {}) {
   // WebSocket
   const wss = setupWebSocket(server, instanceManager, getAuthState, pushManager);
 
+  // Alien Mind meta-agent (opt-in: POLPO_MIND=1)
+  let mind = null;
+  if (process.env.POLPO_MIND === '1') {
+    try {
+      const { createMind } = require('../mind/index');
+      mind = createMind(instanceManager, { verbose, serverPort: port });
+    } catch (e) {
+      console.error('[polpo] Mind module failed to load:', e.message);
+    }
+  }
+
   if (verbose) {
     instanceManager.on('instance:registered', (inst) => {
       console.log(`[polpo] Instance registered: ${inst.name} (${inst.id})`);
@@ -258,6 +269,7 @@ function createServer(options = {}) {
       });
     },
     stop() {
+      if (mind) { try { mind.destroy(); } catch {} }
       return new Promise((resolve) => {
         if (wss.scanner) wss.scanner.stop();
         if (wss.geminiScanner) wss.geminiScanner.stop();
