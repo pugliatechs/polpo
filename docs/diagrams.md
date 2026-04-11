@@ -124,6 +124,44 @@ sequenceDiagram
     Hub->>Phone: Real-time updates
 ```
 
+## Session Flow (Goose)
+
+Goose uses ACP mode (`goose acp`) with JSON-RPC 2.0 over stdin/stdout. The process stays alive across prompts, similar to Pi's RPC mode.
+
+```mermaid
+sequenceDiagram
+    participant Phone
+    participant Hub as Polpo Hub
+    participant Agent as GooseAgent
+    participant CLI as goose acp
+
+    Phone->>Hub: Create session (agent: goose)
+    Hub->>Agent: Create GooseAgent
+    Agent->>CLI: Spawn goose acp
+    Agent->>CLI: initialize (JSON-RPC)
+    CLI->>Agent: capabilities + agentInfo
+    Agent->>CLI: session/new {cwd}
+    CLI->>Agent: {sessionId, models}
+    Agent->>Hub: session_info + init message
+
+    Phone->>Hub: Send prompt
+    Hub->>Agent: Forward prompt
+    Agent->>CLI: session/prompt {sessionId, prompt}
+    CLI->>Agent: session/notification agentMessageChunk (streaming)
+    CLI->>Agent: session/notification toolCall (pending)
+    CLI->>Agent: session/notification toolCallUpdate (completed)
+    CLI->>Agent: requestPermission (tool approval)
+    Agent->>Hub: approval_request
+    Hub->>Phone: Inline buttons (Approve / Reject)
+    Phone->>Hub: Approve
+    Hub->>Agent: approve
+    Agent->>CLI: {optionId: "allowOnce"}
+    CLI->>Agent: Continue processing
+    CLI->>Agent: session/notification agentMessageChunk (final)
+    Agent->>Hub: Relay messages
+    Hub->>Phone: Real-time updates
+```
+
 ## Auto-Discovery & Takeover Flow
 
 ```mermaid
@@ -134,10 +172,10 @@ sequenceDiagram
     participant Hub as Polpo Hub
     participant Phone
     participant Agent as Takeover Agent
-    participant CLI as CLI (claude / codex / gemini / opencode / pi)
+    participant CLI as CLI (claude / codex / gemini / opencode / pi / goose)
 
-    Dev->>FS: Run CLI (writes session files)
-    Scanner->>FS: fs.watch() detects new/changed files
+    Dev->>FS: Run CLI (writes session files / SQLite)
+    Scanner->>FS: fs.watch() or SQLite polling detects sessions
     Scanner->>Hub: session:discovered (sessionId, transcriptPath, agentType)
     Hub->>Hub: Register read-only instance (canReceivePrompts: false)
     Hub->>Phone: New instance card on dashboard

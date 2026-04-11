@@ -4,31 +4,31 @@
   <img src="assets/logo.png" alt="Polpo" width="240" height="240">
 </p>
 
-<p align="center"><strong>Work on Claude Code, Codex, Gemini, OpenCode, and Pi from your phone.</strong></p>
+<p align="center"><strong>Work on Claude Code, Codex, Gemini, OpenCode, Pi, and Goose from your phone.</strong></p>
 
-Polpo lets developers send prompts, see responses, and control Claude Code, OpenAI Codex CLI, Google Gemini CLI, OpenCode, and Pi coding agent sessions from any mobile device over VPN, Wi-Fi, LAN, or a public tunnel.
+Polpo lets developers send prompts, see responses, and control Claude Code, OpenAI Codex CLI, Google Gemini CLI, OpenCode, Pi, and Goose coding agent sessions from any mobile device over VPN, Wi-Fi, LAN, or a public tunnel.
 
-> **Help us test!** Claude Code support is stable and battle-tested. Support for **Codex**, **Gemini**, **OpenCode**, and **Pi** is functional but still being stabilized — edge cases in multi-turn, auto-discovery, and session resume may exist. If you use any of these agents, we'd love your feedback: open an issue with reproduction steps and we'll fix it fast.
+> **Help us test!** Claude Code support is stable and battle-tested. Support for **Codex**, **Gemini**, **OpenCode**, **Pi**, and **Goose** is functional but still being stabilized — edge cases in multi-turn, auto-discovery, and session resume may exist. If you use any of these agents, we'd love your feedback: open an issue with reproduction steps and we'll fix it fast.
 
 ## Why
 
 AI coding sessions can run for minutes while reading files, writing code, and running tests. During that time, developers are tethered to their terminal waiting to approve tool calls, review output, or send the next prompt.
 
-Polpo frees you from the keyboard. Grab a coffee, kick off a refactor while waiting for a train, or review tool calls from an airport lounge - your phone becomes a full remote control for Claude Code, Codex, Gemini, OpenCode, and Pi. You see every tool call as it happens, approve or reject actions with a tap, send follow-up prompts, and abort tasks when something goes wrong. All in real time, from any network.
+Polpo frees you from the keyboard. Grab a coffee, kick off a refactor while waiting for a train, or review tool calls from an airport lounge - your phone becomes a full remote control for Claude Code, Codex, Gemini, OpenCode, Pi, and Goose. You see every tool call as it happens, approve or reject actions with a tap, send follow-up prompts, and abort tasks when something goes wrong. All in real time, from any network.
 
 ## Architecture
 
-Four integration modes, supporting **Claude Code**, **OpenAI Codex CLI**, **Google Gemini CLI**, **OpenCode**, and **Pi**:
+Four integration modes, supporting **Claude Code**, **OpenAI Codex CLI**, **Google Gemini CLI**, **OpenCode**, **Pi**, and **Goose**:
 
-- **Session** - spawns `claude`, `codex exec --json`, `gemini --output-format stream-json`, `opencode run --format json`, or `pi --mode rpc` with full bidirectional control from phone, including MCP-based tool approval
-- **Auto-Discovery** - watches `~/.claude/projects/`, `~/.codex/sessions/`, `~/.gemini/tmp/`, `~/.local/share/opencode/opencode.db`, and `~/.pi/agent/sessions/` for active sessions, auto-registers them on the dashboard — no setup needed
+- **Session** - spawns `claude`, `codex exec --json`, `gemini --output-format stream-json`, `opencode run --format json`, `pi --mode rpc`, or `goose acp` with full bidirectional control from phone, including MCP-based tool approval
+- **Auto-Discovery** - watches `~/.claude/projects/`, `~/.codex/sessions/`, `~/.gemini/tmp/`, `~/.local/share/opencode/opencode.db`, `~/.pi/agent/sessions/`, and `~/.config/goose/sessions.db` for active sessions, auto-registers them on the dashboard — no setup needed
 - **Hooks** - taps into existing terminal sessions via Claude Code hooks for terminal prompt forwarding and phone-based tool approval
-- **Session Browser** - discovers and displays past sessions from Claude Code, Codex, Gemini, OpenCode, and Pi, with the ability to resume them
+- **Session Browser** - discovers and displays past sessions from Claude Code, Codex, Gemini, OpenCode, Pi, and Goose, with the ability to resume them
 
 ## Requirements
 
 - **Node.js** 22+
-- **Claude Code** CLI installed and authenticated, **and/or** **Codex CLI** installed and authenticated, **and/or** **Gemini CLI** installed and authenticated, **and/or** **OpenCode** installed and configured, **and/or** **Pi** installed and configured
+- **Claude Code** CLI installed and authenticated, **and/or** **Codex CLI** installed and authenticated, **and/or** **Gemini CLI** installed and authenticated, **and/or** **OpenCode** installed and configured, **and/or** **Pi** installed and configured, **and/or** **Goose** installed and configured
 - **macOS** or **Linux** (Windows is not currently supported)
 
 ### macOS Notes
@@ -72,6 +72,9 @@ node bin/polpo.js session --agent gemini --cwd /path/to/project --name "Gemini T
 # New Pi session
 node bin/polpo.js session --agent pi --cwd /path/to/project --name "Pi Task"
 
+# New Goose session
+node bin/polpo.js session --agent goose --cwd /path/to/project --name "Goose Task"
+
 # Resume an existing session
 node bin/polpo.js session --resume <session-id>
 ```
@@ -99,8 +102,8 @@ The dashboard shows active sessions, past session history, and lets you send pro
 | Question Answers | Answer multi-choice questions from your phone when Claude asks |
 | Auto-approve | Tap "Approve All" to auto-approve tool calls (plans and questions always require review) |
 | File Attachments | Send any file from your phone - images, PDFs, code, documents, etc. |
-| Multi-Agent | Full support for Claude Code, OpenAI Codex CLI, Google Gemini CLI, OpenCode, and Pi |
-| Session Browser | Browse past sessions from Claude Code, Codex, Gemini, OpenCode, and Pi with conversation history |
+| Multi-Agent | Full support for Claude Code, OpenAI Codex CLI, Google Gemini CLI, OpenCode, Pi, and Goose |
+| Session Browser | Browse past sessions from Claude Code, Codex, Gemini, OpenCode, Pi, and Goose with conversation history |
 | Session Resume | Resume any past session directly from the phone dashboard |
 | Auto-Discovery | Active sessions detected automatically via filesystem watching — no hooks required |
 | Live History Sync | Terminal/VS Code conversations synced to phone in real-time via JSONL watcher |
@@ -257,6 +260,9 @@ node bin/polpo.js session --agent gemini --cwd /path/to/project --name "Gemini T
 
 # Pi (75+ model providers)
 node bin/polpo.js session --agent pi --cwd /path/to/project --name "Pi Task"
+
+# Goose (any LLM via ACP)
+node bin/polpo.js session --agent goose --cwd /path/to/project --name "Goose Task"
 ```
 
 ### Tool Approval
@@ -288,29 +294,30 @@ node bin/polpo.js session --cwd /path/to/project --permissions bypass
 | `--name <name>` | Display name for this session |
 | `--cwd <dir>` | Project directory (default: current) |
 | `--resume <id>` | Resume an existing session |
-| `--model <model>` | Model to use (e.g. opus, sonnet for Claude; gpt-5-codex for Codex; flash, pro for Gemini; any provider model for OpenCode/Pi) |
+| `--model <model>` | Model to use (e.g. opus, sonnet for Claude; gpt-5-codex for Codex; flash, pro for Gemini; any provider model for OpenCode/Pi; provider/model for Goose) |
 | `--permissions <mode>` | `default` (phone approval via MCP) or `bypass` (skip all) |
-| `--agent <type>` | Agent type: `claude` (default), `codex`, `gemini`, `opencode`, or `pi` |
+| `--agent <type>` | Agent type: `claude` (default), `codex`, `gemini`, `opencode`, `pi`, or `goose` |
 | `--server <url>` | Hub WebSocket URL (default: `ws://127.0.0.1:7890`) |
 | `--token <token>` | Auth token (or set `POLPO_TOKEN` env var) |
 
 ## Session Browser
 
-The dashboard automatically discovers past sessions from `~/.claude/projects/` (Claude Code), `~/.codex/sessions/` (Codex), `~/.gemini/tmp/` (Gemini), `~/.local/share/opencode/opencode.db` (OpenCode), and `~/.pi/agent/sessions/` (Pi) and displays them as cards with the session's first prompt as the title. Each card shows an agent type badge (Claude, Codex, Gemini, OpenCode, or Pi). Tap a session to view its full conversation history, or resume it to continue working from your phone.
+The dashboard automatically discovers past sessions from `~/.claude/projects/` (Claude Code), `~/.codex/sessions/` (Codex), `~/.gemini/tmp/` (Gemini), `~/.local/share/opencode/opencode.db` (OpenCode), `~/.pi/agent/sessions/` (Pi), and `~/.config/goose/sessions.db` (Goose) and displays them as cards with the session's first prompt as the title. Each card shows an agent type badge (Claude, Codex, Gemini, OpenCode, Pi, or Goose). Tap a session to view its full conversation history, or resume it to continue working from your phone.
 
-Sessions are loaded from JSONL/JSON files (or SQLite for OpenCode) and deduplicated to show clean conversation threads. Use the `?source=claude|codex|gemini|opencode|pi|all` query parameter on the `/api/sessions` endpoint to filter by agent type.
+Sessions are loaded from JSONL/JSON files (or SQLite for OpenCode and Goose) and deduplicated to show clean conversation threads. Use the `?source=claude|codex|gemini|opencode|pi|all` query parameter on the `/api/sessions` endpoint to filter by agent type.
 
 ## Auto-Discovery
 
-The Polpo server automatically discovers active sessions from Claude Code, Codex, Gemini, OpenCode, and Pi by watching their respective session directories:
+The Polpo server automatically discovers active sessions from Claude Code, Codex, Gemini, OpenCode, Pi, and Goose by watching their respective session directories:
 
 - **Claude Code**: `~/.claude/projects/<project-slug>/*.jsonl`
 - **Codex CLI**: `~/.codex/sessions/*.jsonl`
 - **Gemini CLI**: `~/.gemini/tmp/<project-slug>/chats/session-*.json`
 - **OpenCode**: `~/.local/share/opencode/opencode.db` (SQLite, polled every 5s)
 - **Pi**: `~/.pi/agent/sessions/--<cwd-dashes>--/*.jsonl`
+- **Goose**: `~/.config/goose/sessions.db` (SQLite, polled every 5s)
 
-Claude, Codex, Gemini, and Pi use event-driven `fs.watch()`. OpenCode uses SQLite polling via `sqlite3` CLI (requires `sqlite3` to be installed).
+Claude, Codex, Gemini, and Pi use event-driven `fs.watch()`. OpenCode and Goose use SQLite polling via `sqlite3` CLI (requires `sqlite3` to be installed).
 
 When a session is detected:
 1. An instance appears on the phone dashboard with the appropriate agent type badge
@@ -423,6 +430,37 @@ npm install -g @mariozechner/pi-coding-agent
 
 Pi must be configured with at least one provider (run `pi` once to set up).
 
+## Goose Support
+
+Polpo supports [Goose](https://github.com/block/goose), Block's open-source AI agent that works with any LLM provider:
+
+- **Session spawning** -- `polpo session --agent goose` starts `goose acp` in ACP (Agent Communication Protocol) mode
+- **Multi-turn** -- persistent process with JSON-RPC 2.0 over stdin/stdout, no respawning needed
+- **Auto-discovery** -- polls `~/.config/goose/sessions.db` for active sessions
+- **Session browser** -- lists past Goose sessions alongside other agent types
+- **Takeover** -- take over a terminal Goose session from your phone
+- **Permission requests** -- Goose's `requestPermission` events map to polpo's approval flow (Approve / Reject)
+- **Multi-provider** -- supports OpenAI, Anthropic, Google, Bedrock, Ollama, and 1,700+ models via Goose's canonical model registry
+
+### Goose-Specific Notes
+
+- Goose uses ACP mode (`goose acp`) with JSON-RPC 2.0 over stdin/stdout, similar to Pi's RPC mode.
+- The agent stays alive across prompts (long-running process). Sessions are created via `session/new` and resumed via `session/load`.
+- Streaming events: `agentMessageChunk` (text), `toolCall` (pending), `toolCallUpdate` (completed/failed).
+- Model selection via `--model provider/model` flag (e.g., `--model anthropic/claude-sonnet-4-20250514`) or `GOOSE_PROVIDER`/`GOOSE_MODEL` environment variables.
+- Sessions stored in SQLite (`~/.config/goose/sessions.db`), not JSONL files. Auto-discovery polls every 5 seconds.
+- The dashboard shows a green "Goose" badge on Goose instances.
+
+### Requirements
+
+```bash
+curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | bash
+```
+
+Goose must be configured with a provider (run `goose configure` to set up).
+
+Auto-discovery requires `sqlite3` CLI (`apt install sqlite3` / `brew install sqlite3`).
+
 ## Terminal Sync (Hooks)
 
 Hooks are **optional** — auto-discovery handles session detection and conversation sync without them. Hooks add two capabilities:
@@ -443,7 +481,7 @@ Add the output to `~/.claude/settings.json`. The bridge daemon auto-discovers th
 
 ### Phone Takeover
 
-Auto-discovered and hook instances are **read-only** — they mirror conversations from session files on disk, but have no backing agent process to accept prompts. Tap **Take Over** to spawn a real agent process (`claude --resume`, `codex exec resume`, `gemini --resume`, or `pi --session`) that resumes the session with full prompt capability. The existing conversation history is preserved in the new instance. This is the same resume mechanism used by the Claude Code VS Code extension when selecting a previous conversation — there is no long-lived process to reconnect to; the CLI replays context from transcript files on each resume.
+Auto-discovered and hook instances are **read-only** — they mirror conversations from session files on disk, but have no backing agent process to accept prompts. Tap **Take Over** to spawn a real agent process (`claude --resume`, `codex exec resume`, `gemini --resume`, `pi --session`, or `goose acp` with `session/load`) that resumes the session with full prompt capability. The existing conversation history is preserved in the new instance. This is the same resume mechanism used by the Claude Code VS Code extension when selecting a previous conversation — there is no long-lived process to reconnect to; the CLI replays context from transcript files on each resume.
 
 <p align="center">
   <img src="assets/codex-takeover.jpg" alt="Codex session with Take Over button" width="300">
@@ -475,7 +513,7 @@ Tap the paperclip icon to attach files from your phone. Supported types:
 
 Search past conversations across all supported agents directly from the dashboard. Type a query and tap the search button (or press Enter) to find matching messages.
 
-- **Multi-agent** — searches Claude (`~/.claude/projects/`), Codex (`~/.codex/sessions/`), Gemini (`~/.gemini/tmp/`), and Pi (`~/.pi/agent/sessions/`) session files
+- **Multi-agent** — searches Claude (`~/.claude/projects/`), Codex (`~/.codex/sessions/`), Gemini (`~/.gemini/tmp/`), Pi (`~/.pi/agent/sessions/`), and Goose (`~/.config/goose/sessions.db`) session files
 - **Clickable results** — tap a result to navigate to the active instance, resume a past session, or fetch and resume from history
 - **Performance** — subagent directories are skipped and files are sorted by modification time (newest first) to return results quickly even with large session histories
 - **Security** — symbolic links are skipped and file paths are validated via `realpath` to prevent path traversal; concurrent searches are rate-limited
@@ -526,7 +564,7 @@ Skills are stored at `~/.agents/skills/` and symlinked into `~/.claude/skills/` 
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/sessions` | List discovered sessions (`?source=claude\|codex\|gemini\|opencode\|pi\|all`) |
+| GET | `/api/sessions` | List discovered sessions (`?source=claude\|codex\|gemini\|opencode\|pi\|goose\|all`) |
 | GET | `/api/sessions/:id/history` | Get conversation history from JSONL |
 | POST | `/api/sessions/:id/resume` | Resume a session (spawns wrapped agent) |
 | POST | `/api/sessions/new` | Create a new session (`{ agentType, cwd, name?, model? }`) |
@@ -576,7 +614,7 @@ Connect to `ws://<host>:<port>?role=agent&instanceId=<id>` as an agent.
 npm test
 ```
 
-Runs unit tests with Node's built-in test runner. Tests cover authentication (token, PIN, TOTP, sessions, middleware), instance manager, tunnel provider logic, session JSONL/JSON parsing, JSONL/JSON file watcher (messages, status events, dedup), session scanner (Claude/Codex/Gemini/Pi auto-discovery, idle detection, project watching), Codex agent (event translation, hub messages, multi-turn), OpenCode agent (event translation, delta accumulation), Pi agent (RPC event handling, delta accumulation, tool call streaming), Codex scanner (Codex session discovery), Pi scanner (Pi session discovery, slug parsing), agent factory (agent type routing), and skills API (frontmatter parsing, search output parsing, input validation).
+Runs unit tests with Node's built-in test runner. Tests cover authentication (token, PIN, TOTP, sessions, middleware), instance manager, tunnel provider logic, session JSONL/JSON parsing, JSONL/JSON file watcher (messages, status events, dedup), session scanner (Claude/Codex/Gemini/Pi auto-discovery, idle detection, project watching), Codex agent (event translation, hub messages, multi-turn), OpenCode agent (event translation, delta accumulation), Pi agent (RPC event handling, delta accumulation, tool call streaming), Codex scanner (Codex session discovery), Pi scanner (Pi session discovery, slug parsing), agent factory (agent type routing), skills API (frontmatter parsing, search output parsing, input validation), and Goose agent (ACP JSON-RPC, streaming, tool calls, session management, factory routing).
 
 ## System Overview
 
@@ -600,7 +638,9 @@ graph TD
     (stream-json)"]
     Pi["pi --mode rpc
     (stdin/stdout JSON)"]
-    VSCode["Claude Code / Codex / Gemini / Pi
+    Goose["goose acp
+    (JSON-RPC 2.0)"]
+    VSCode["Claude Code / Codex / Gemini / Pi / Goose
     (VS Code / terminal)"]
     MCP["MCP Permission
     Server"]
@@ -612,6 +652,8 @@ graph TD
     JSON files"]
     PiJSONL["~/.pi/agent/sessions/
     JSONL files"]
+    GooseDB["~/.config/goose/
+    sessions.db"]
 
     Phone -->|"cellular / internet"| Tunnel
     Phone -->|"VPN / LAN"| Hub
@@ -624,25 +666,30 @@ graph TD
     Factory -->|"codex agent"| Codex
     Factory -->|"gemini agent"| Gemini
     Factory -->|"pi agent"| Pi
+    Factory -->|"goose agent"| Goose
     Scanner -->|"auto-discover"| ClaudeJSONL
     Scanner -->|"auto-discover"| CodexJSONL
     Scanner -->|"auto-discover"| GeminiJSON
     Scanner -->|"auto-discover"| PiJSONL
+    Scanner -->|"auto-discover"| GooseDB
     Hooks -->|"approvals + prompts"| VSCode
     VSCode -->|"writes"| ClaudeJSONL
     VSCode -->|"writes"| CodexJSONL
     VSCode -->|"writes"| GeminiJSON
     VSCode -->|"writes"| PiJSONL
+    VSCode -->|"writes"| GooseDB
     Hub -->|"JSONL watcher"| ClaudeJSONL
     Hub -->|"Codex adapter"| CodexJSONL
     Hub -->|"Gemini adapter"| GeminiJSON
     Hub -->|"Pi adapter"| PiJSONL
+    Hub -->|"Goose scanner"| GooseDB
     Claude --> MCP
     MCP -->|"phone approval"| Hub
     Browser -->|"reads"| ClaudeJSONL
     Browser -->|"reads"| CodexJSONL
     Browser -->|"reads"| GeminiJSON
     Browser -->|"reads"| PiJSONL
+    Browser -->|"reads"| GooseDB
 ```
 
 See [docs/diagrams.md](docs/diagrams.md) for auth, tunnel, session, auto-discovery, takeover, and hook flow diagrams.
