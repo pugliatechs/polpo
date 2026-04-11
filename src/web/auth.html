@@ -104,11 +104,7 @@
   <script>
   (function() {
     var params = new URLSearchParams(location.search);
-    var mode = params.get('mode') || 'pin';
-    var digits = mode === 'paranoid' ? 6 : 4;
-    var endpoint = mode === 'paranoid' ? '/api/auth/verify-totp' : '/api/auth/verify-pin';
-    var maxAttempts = mode === 'paranoid' ? null : 3;
-    var attempts = 0;
+    var urlMode = params.get('mode');
 
     var $subtitle = document.getElementById('subtitle');
     var $codeInput = document.getElementById('code-input');
@@ -117,12 +113,33 @@
     var $attempts = document.getElementById('attempts');
 
     // Session expired in token-only mode — show re-scan message
-    if (mode === 'expired') {
+    if (urlMode === 'expired') {
       $subtitle.textContent = 'Your session has expired. Scan the QR code from your terminal again to reconnect.';
       $codeInput.style.display = 'none';
       $btnVerify.style.display = 'none';
       return;
     }
+
+    // Fetch the actual auth mode from server to avoid URL param caching issues
+    function initWithMode(mode) {
+      setupForm(mode);
+    }
+
+    if (urlMode) {
+      initWithMode(urlMode);
+    } else {
+      fetch('/api/auth/mode').then(function(r) { return r.json(); }).then(function(data) {
+        initWithMode(data.mode || 'pin');
+      }).catch(function() {
+        initWithMode('pin');
+      });
+    }
+
+    function setupForm(mode) {
+    var digits = mode === 'paranoid' ? 6 : 4;
+    var endpoint = mode === 'paranoid' ? '/api/auth/verify-totp' : '/api/auth/verify-pin';
+    var maxAttempts = mode === 'paranoid' ? null : 3;
+    var attempts = 0;
 
     $subtitle.textContent = mode === 'paranoid'
       ? 'Enter the 6-digit code from your authenticator app'
@@ -257,6 +274,7 @@
         $btnVerify.disabled = false;
       });
     }
+    } // end setupForm
   })();
   </script>
 </body>

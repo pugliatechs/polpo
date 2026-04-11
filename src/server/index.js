@@ -110,6 +110,11 @@ function createServer(options = {}) {
     res.json({ status: 'ok', version: pkgVersion, instances: instanceManager.getAll().length });
   });
 
+  // Auth mode endpoint (public, no auth required)
+  app.get('/api/auth/mode', (req, res) => {
+    res.json({ mode: authState.mode || null, mfaEnabled: authState.mfaEnabled });
+  });
+
   // Auth page and its assets (served to unauthenticated users)
   app.get('/auth.html', (req, res) => {
     res.sendFile(path.join(__dirname, '..', 'web', 'auth.html'));
