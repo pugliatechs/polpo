@@ -115,7 +115,12 @@
   const $sessionsList = document.getElementById('sessions-list');
   const $btnRefreshSessions = document.getElementById('btn-refresh-sessions');
   const $takeoverBanner = document.getElementById('takeover-banner');
+  const $takeoverHint = document.getElementById('takeover-hint');
+  const $takeoverActions = document.getElementById('takeover-actions');
+  const $takeoverBusyActions = document.getElementById('takeover-busy-actions');
   const $btnTakeover = document.getElementById('btn-takeover');
+  const $btnTakeoverAbort = document.getElementById('btn-takeover-abort');
+  const $btnTakeoverWait = document.getElementById('btn-takeover-wait');
   const $inputArea = document.getElementById('input-area');
   const $btnAttach = document.getElementById('btn-attach');
   const $fileInput = document.getElementById('file-input');
@@ -975,6 +980,16 @@
     if (!canPrompt && inst.sessionId) {
       $takeoverBanner.classList.remove('hidden');
       $inputArea.classList.add('hidden');
+      // Show different UI based on whether agent is busy
+      if (inst.status === 'busy') {
+        $takeoverHint.textContent = 'This session is busy in your terminal. Abort the current task first, or wait for it to finish.';
+        $takeoverActions.classList.add('hidden');
+        $takeoverBusyActions.classList.remove('hidden');
+      } else {
+        $takeoverHint.textContent = 'This session is running in your terminal. To send prompts from here, take over.';
+        $takeoverActions.classList.remove('hidden');
+        $takeoverBusyActions.classList.add('hidden');
+      }
     } else {
       $takeoverBanner.classList.add('hidden');
       $inputArea.classList.remove('hidden');
@@ -1788,6 +1803,40 @@
 
   $btnTakeover.addEventListener('click', function () {
     if (activeInstanceId) takeover(activeInstanceId);
+  });
+
+  $btnTakeoverAbort.addEventListener('click', function () {
+    if (!activeInstanceId) return;
+    $btnTakeoverAbort.disabled = true;
+    $btnTakeoverAbort.textContent = 'Aborting...';
+    // Try to abort the running task, then take over regardless.
+    // For auto-discovered instances the abort may fail (no agent socket),
+    // but takeover with --resume will start a new process anyway.
+    authFetch('/api/instances/' + activeInstanceId + '/abort', { method: 'POST' })
+      .finally(function () {
+        setTimeout(function () {
+          takeover(activeInstanceId);
+        }, 1000);
+      });
+  });
+
+  $btnTakeoverWait.addEventListener('click', function () {
+    if (!activeInstanceId) return;
+    var instId = activeInstanceId;
+    $btnTakeoverWait.disabled = true;
+    $btnTakeoverWait.textContent = 'Waiting...';
+    // Poll until idle, then auto-takeover
+    var waitTimer = setInterval(function () {
+      var inst = instances.get(instId);
+      if (!inst || inst.status !== 'busy') {
+        clearInterval(waitTimer);
+        $btnTakeoverWait.disabled = false;
+        $btnTakeoverWait.textContent = 'Wait for Idle';
+        if (inst && instId === activeInstanceId) {
+          takeover(instId);
+        }
+      }
+    }, 1000);
   });
 
   $btnAbort.addEventListener('click', function () {

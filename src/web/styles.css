@@ -1563,6 +1563,15 @@ h5.plan-h { font-size: 13px; }
   color: var(--text-dim);
   line-height: 1.4;
 }
+#takeover-busy-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+}
+#takeover-busy-actions .btn {
+  flex: 1;
+  max-width: 200px;
+}
 
 .input-area {
   display: flex;

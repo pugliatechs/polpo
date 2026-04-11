@@ -184,8 +184,14 @@
 
     <!-- Takeover Banner (for hook bridge instances) -->
     <div id="takeover-banner" class="takeover-banner hidden">
-      <p class="takeover-hint">This session is running in your terminal. To send prompts from here, take over.</p>
-      <button id="btn-takeover" class="btn btn-approve">Take Over Session</button>
+      <p id="takeover-hint" class="takeover-hint">This session is running in your terminal. To send prompts from here, take over.</p>
+      <div id="takeover-actions">
+        <button id="btn-takeover" class="btn btn-approve">Take Over Session</button>
+      </div>
+      <div id="takeover-busy-actions" class="hidden">
+        <button id="btn-takeover-abort" class="btn btn-danger">Abort Task & Take Over</button>
+        <button id="btn-takeover-wait" class="btn btn-approve">Wait for Idle</button>
+      </div>
     </div>
 
     <!-- Input Area -->
