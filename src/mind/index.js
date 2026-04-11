@@ -4,12 +4,15 @@
  * The mind registers itself as a regular instance in InstanceManager
  * (agentType: 'mind') and appears in the dashboard. Users send goals
  * to it by selecting it and typing prompts. The mind observes all
- * other agents via WorldModel and coordinates their work.
+ * other agents via WorldModel, plans via Reasoner, and coordinates
+ * work via Coordinator.
  *
  * Opt-in: only loads when POLPO_MIND=1 is set.
  */
 
 const { WorldModel } = require('./world-model');
+const { Reasoner } = require('./reasoner');
+const { Coordinator } = require('./coordinator');
 
 /**
  * Create the Alien Mind module.
@@ -18,7 +21,7 @@ const { WorldModel } = require('./world-model');
  * @param {boolean} [options.verbose] - Enable verbose logging
  * @param {number} [options.serverPort] - Hub port for agent connections
  * @param {string} [options.authToken] - Auth token for agent registration
- * @returns {{ worldModel: WorldModel, instanceId: string, destroy: () => void }}
+ * @returns {{ worldModel: WorldModel, coordinator: Coordinator, instanceId: string, destroy: () => void }}
  */
 function createMind(instanceManager, options) {
   if (!options) options = {};
@@ -38,6 +41,19 @@ function createMind(instanceManager, options) {
 
   // Create world model (observes all other agents)
   var worldModel = new WorldModel(instanceManager, mindId);
+
+  // Create reasoner (LLM-backed planning)
+  var reasoner = new Reasoner({
+    model: process.env.POLPO_MIND_MODEL || null,
+  });
+
+  // Create coordinator (goal/task lifecycle)
+  var coordinator = new Coordinator({
+    instanceManager: instanceManager,
+    worldModel: worldModel,
+    reasoner: reasoner,
+    mindInstanceId: mindId,
+  });
 
   // Log agent events in verbose mode
   if (options.verbose) {
@@ -64,16 +80,70 @@ function createMind(instanceManager, options) {
     var msg = data.message;
     if (!msg || msg.role !== 'user' || msg.source === 'mind') return;
 
-    // For Phase 1: respond with a world state summary
-    var summary = worldModel.getSummary();
-    var response = 'I can see the following agents:\n\n' + summary +
-      '\n\nCoordination capabilities are being built. ' +
-      'For now, I observe all agent activity in real-time.';
+    var text = (msg.content || '').trim();
+    if (!text) return;
 
-    instanceManager.addMessage(mindId, {
-      role: 'assistant',
-      content: response,
-      source: 'mind',
+    // Special commands
+    if (text === '/status' || text === '/agents') {
+      instanceManager.addMessage(mindId, {
+        role: 'assistant',
+        content: worldModel.getSummary(),
+        source: 'mind',
+      });
+      return;
+    }
+
+    if (text === '/goals') {
+      var goals = coordinator.getActiveGoals();
+      if (goals.length === 0) {
+        instanceManager.addMessage(mindId, {
+          role: 'assistant',
+          content: 'No active goals.',
+          source: 'mind',
+        });
+      } else {
+        var lines = goals.map(function (g) {
+          var taskSummary = g.plan
+            ? g.plan.tasks.map(function (t) { return '  - ' + t.description + ' [' + t.status + ']'; }).join('\n')
+            : '  (no plan)';
+          return '**' + g.status + '**: ' + g.prompt + '\n' + taskSummary;
+        });
+        instanceManager.addMessage(mindId, {
+          role: 'assistant',
+          content: lines.join('\n\n'),
+          source: 'mind',
+        });
+      }
+      return;
+    }
+
+    if (text.startsWith('/cancel')) {
+      var goals = coordinator.getActiveGoals().filter(function (g) {
+        return g.status === 'running' || g.status === 'planning';
+      });
+      if (goals.length === 0) {
+        instanceManager.addMessage(mindId, {
+          role: 'assistant',
+          content: 'No active goals to cancel.',
+          source: 'mind',
+        });
+      } else {
+        goals.forEach(function (g) { coordinator.cancelGoal(g.id); });
+      }
+      return;
+    }
+
+    // Everything else is a goal
+    instanceManager.updateStatus(mindId, 'busy');
+    coordinator.submitGoal(text).then(function () {
+      instanceManager.updateStatus(mindId, 'idle');
+    }).catch(function (err) {
+      instanceManager.addMessage(mindId, {
+        role: 'assistant',
+        content: 'Error: ' + err.message,
+        source: 'mind',
+      });
+      instanceManager.updateStatus(mindId, 'idle');
     });
   };
 
@@ -83,10 +153,13 @@ function createMind(instanceManager, options) {
 
   return {
     worldModel: worldModel,
+    coordinator: coordinator,
     instanceId: mindId,
 
     destroy: function () {
       instanceManager.removeListener('instance:message', messageHandler);
+      coordinator.destroy();
+      reasoner.destroy();
       worldModel.destroy();
       instanceManager.unregister(mindId);
     },

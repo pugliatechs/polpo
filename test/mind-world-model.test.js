@@ -242,14 +242,14 @@ describe('createMind', () => {
     mind.destroy();
   });
 
-  it('responds to user prompts with world summary', () => {
+  it('responds to /agents command with world summary', () => {
     const mind = createMind(im, {});
     im.register({ id: 'a1', name: 'Claude Worker', agentType: 'claude' });
 
-    // Simulate user sending a prompt to the mind
-    im.addMessage(mind.instanceId, { role: 'user', content: 'what agents are running?' });
+    // Simulate user sending /agents command to the mind
+    im.addMessage(mind.instanceId, { role: 'user', content: '/agents' });
 
-    // Mind should have responded
+    // Mind should have responded with agent summary
     const conv = im.getConversation(mind.instanceId, 10);
     const assistantMsgs = conv.filter(function (m) { return m.role === 'assistant'; });
     assert.ok(assistantMsgs.length > 0);
