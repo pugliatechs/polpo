@@ -141,6 +141,33 @@ src/mind/
   reasoner.js        # LLM planning via Claude Code process
   task-runner.js     # DAG executor: parallel + sequential tasks
   agent-pool.js      # Agent reuse/spawning logic
+  watcher.js         # Passive monitoring: stuck agents, stale approvals
+  policies.js        # Configurable autonomy levels (conservative/balanced/autonomous)
+```
+
+## Autonomous Monitoring (Watcher)
+
+The watcher passively monitors all agents every 30 seconds and alerts the user in the mind's conversation when it detects:
+
+- **Stuck agents**: busy for longer than the policy threshold (default 15 min) without status change
+- **Stale approvals**: agents waiting for approval that hasn't been addressed
+- **Alert deduplication**: each issue is reported once, cleared when resolved, re-reported if it recurs
+
+The watcher only observes and suggests. It never takes action on its own (unless `POLPO_MIND_POLICY=autonomous`, which enables auto-initiated goals in future versions).
+
+## Policies
+
+Three autonomy levels control the mind's behavior:
+
+| Policy | Auto-approve spawned | Max concurrent | Max spawned | Task timeout | Stuck threshold |
+|--------|---------------------|----------------|-------------|--------------|-----------------|
+| `conservative` | No | 2 | 2 | 5 min | 10 min |
+| `balanced` (default) | Yes | 4 | 4 | 10 min | 15 min |
+| `autonomous` | Yes | 8 | 6 | 15 min | 20 min |
+
+Set via environment variable:
+```bash
+POLPO_MIND_POLICY=conservative POLPO_MIND=1 node bin/polpo.js server
 ```
 
 ## Security

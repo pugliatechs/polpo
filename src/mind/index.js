@@ -13,6 +13,8 @@
 const { WorldModel } = require('./world-model');
 const { Reasoner } = require('./reasoner');
 const { Coordinator } = require('./coordinator');
+const { Watcher } = require('./watcher');
+const { loadPolicy } = require('./policies');
 
 /**
  * Create the Alien Mind module.
@@ -149,7 +151,18 @@ function createMind(instanceManager, options) {
 
   instanceManager.on('instance:message', messageHandler);
 
-  console.log('[mind] Alien Mind active (instance: ' + mindId + ')');
+  // Load policy and start watcher
+  var policy = loadPolicy();
+
+  var watcher = new Watcher({
+    worldModel: worldModel,
+    instanceManager: instanceManager,
+    mindInstanceId: mindId,
+    policy: policy,
+  });
+  watcher.start();
+
+  console.log('[mind] Alien Mind active (policy: ' + policy.name + ', instance: ' + mindId + ')');
 
   return {
     worldModel: worldModel,
@@ -157,6 +170,7 @@ function createMind(instanceManager, options) {
     instanceId: mindId,
 
     destroy: function () {
+      watcher.destroy();
       instanceManager.removeListener('instance:message', messageHandler);
       coordinator.destroy();
       reasoner.destroy();
