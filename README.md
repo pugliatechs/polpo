@@ -461,6 +461,26 @@ Goose must be configured with a provider (run `goose configure` to set up).
 
 Auto-discovery requires `sqlite3` CLI (`apt install sqlite3` / `brew install sqlite3`).
 
+## Alien Mind (Multi-Agent Coordination)
+
+The Alien Mind is an optional meta-agent that orchestrates multiple agents simultaneously. Inspired by the octopus's distributed brain, it decomposes complex goals into tasks, assigns them to the right agents, handles dependencies, and runs independent work in parallel.
+
+```bash
+# Enable the mind
+POLPO_MIND=1 node bin/polpo.js server
+```
+
+The mind appears as a purple "Mind" instance in the dashboard. Send it a goal like "Refactor the auth module and update the tests" and it will:
+
+1. Plan the work by decomposing it into tasks with dependencies
+2. Assign each task to the best available idle agent (matching project/cwd)
+3. Run independent tasks in parallel, sequential tasks in order
+4. Monitor completion and report results in real-time
+
+The mind supports DAG-based task plans: parallel, sequential, and diamond dependency patterns. It reuses idle agents when possible and can spawn new ones (up to a configurable limit). All progress is visible in the mind's conversation in the dashboard.
+
+See [docs/alien-mind.md](docs/alien-mind.md) for full documentation, architecture, commands, and configuration.
+
 ## Terminal Sync (Hooks)
 
 Hooks are **optional** — auto-discovery handles session detection and conversation sync without them. Hooks add two capabilities:
@@ -692,7 +712,7 @@ graph TD
     Browser -->|"reads"| GooseDB
 ```
 
-See [docs/diagrams.md](docs/diagrams.md) for auth, tunnel, session, auto-discovery, takeover, and hook flow diagrams.
+See [docs/diagrams.md](docs/diagrams.md) for auth, tunnel, session, auto-discovery, takeover, and hook flow diagrams. See [docs/alien-mind.md](docs/alien-mind.md) for Alien Mind coordination documentation.
 
 ## Disclaimer
 
