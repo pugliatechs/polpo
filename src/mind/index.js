@@ -28,11 +28,13 @@ const { loadPolicy } = require('./policies');
 function createMind(instanceManager, options) {
   if (!options) options = {};
 
-  // Register the mind as a regular instance
+  // Register the mind as a regular instance.
+  // Project is 'polpo' because the mind IS polpo's distributed brain,
+  // not a separate project.
   var instance = instanceManager.register({
     name: 'Alien Mind',
     type: 'terminal',
-    project: 'polpo-mind',
+    project: 'polpo',
     cwd: process.cwd(),
     agentType: 'mind',
     canReceivePrompts: true,

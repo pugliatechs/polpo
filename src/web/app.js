@@ -752,10 +752,12 @@
             escapeHtml(inst.pendingApproval.description || 'Action requires approval') +
             '</div>';
         }
-        // Use first prompt as title; show spinner while loading
+        // Use first prompt as title, fall back to instance name, show spinner only if neither
         var title = inst._firstPrompt
           ? truncate(inst._firstPrompt, 60)
-          : null;
+          : inst.name
+            ? truncate(inst.name, 60)
+            : null;
         var safeId = escapeHtml(inst.id);
         var safeAgentType = VALID_AGENT_TYPES.indexOf(inst.agentType) !== -1 ? inst.agentType : 'claude';
         return (
@@ -949,8 +951,9 @@
     var inst = instances.get(activeInstanceId);
     if (!inst) return;
 
-    if (inst._firstPrompt) {
-      $detailName.textContent = truncate(inst._firstPrompt, 80);
+    var detailTitle = inst._firstPrompt || inst.name || '';
+    if (detailTitle) {
+      $detailName.textContent = truncate(detailTitle, 80);
       $detailName.classList.remove('detail-name-loading');
     } else {
       $detailName.textContent = '';
