@@ -672,6 +672,44 @@
     el.innerHTML = '<div class="loading-message">' + escapeHtml(text) + '</div>';
   }
 
+  // ---- Render: Instance card HTML ----
+  function renderInstanceCard(inst) {
+    var badgeClass = 'badge badge-' + inst.status;
+    var cardClass = 'instance-card ' + inst.status;
+    var isPinned = pinnedIds.indexOf(inst.id) !== -1;
+    var approvalHtml = '';
+    if (inst.pendingApproval) {
+      approvalHtml =
+        '<div class="card-approval">⚠ ' +
+        escapeHtml(inst.pendingApproval.description || 'Action requires approval') +
+        '</div>';
+    }
+    // Use first prompt as title, fall back to instance name, show spinner only if neither
+    var title = inst._firstPrompt
+      ? truncate(inst._firstPrompt, 60)
+      : inst.name
+        ? truncate(inst.name, 60)
+        : null;
+    var safeId = escapeHtml(inst.id);
+    var safeAgentType = VALID_AGENT_TYPES.indexOf(inst.agentType) !== -1 ? inst.agentType : 'claude';
+    return (
+      '<div class="' + cardClass + '" data-id="' + safeId + '">' +
+        '<div class="card-top">' +
+          (title
+            ? '<span class="card-name">' + escapeHtml(title) + '</span>'
+            : '<span class="card-name card-name-loading"><span class="inline-spinner"></span></span>') +
+          '<button class="btn-pin' + (isPinned ? ' pinned' : '') + '" data-pin-id="' + safeId + '" title="' + (isPinned ? 'Unpin' : 'Pin') + '">' + (isPinned ? '&#9733;' : '&#9734;') + '</button>' +
+          '<span class="' + badgeClass + '">' + (inst.status === 'busy' ? '<span class="pulse-dot"></span>' : '') + escapeHtml(inst.status) + '</span>' +
+        '</div>' +
+        '<div class="card-meta">' +
+          '<span>' + escapeHtml(inst.project || '') + '</span>' +
+          '<span class="agent-badge agent-' + safeAgentType + '">' + agentLabel(safeAgentType) + '</span>' +
+        '</div>' +
+        approvalHtml +
+      '</div>'
+    );
+  }
+
   // ---- Render: Instance List ----
   function renderList() {
     var arr = Array.from(instances.values()).filter(function (i) {
@@ -740,52 +778,44 @@
       return 0;
     });
 
-    $instanceList.innerHTML = arr
-      .map(function (inst) {
-        var badgeClass = 'badge badge-' + inst.status;
-        var cardClass = 'instance-card ' + inst.status;
-        var isPinned = pinnedIds.indexOf(inst.id) !== -1;
-        var approvalHtml = '';
-        if (inst.pendingApproval) {
-          approvalHtml =
-            '<div class="card-approval">⚠ ' +
-            escapeHtml(inst.pendingApproval.description || 'Action requires approval') +
-            '</div>';
-        }
-        // Use first prompt as title, fall back to instance name, show spinner only if neither
-        var title = inst._firstPrompt
-          ? truncate(inst._firstPrompt, 60)
-          : inst.name
-            ? truncate(inst.name, 60)
-            : null;
-        var safeId = escapeHtml(inst.id);
-        var safeAgentType = VALID_AGENT_TYPES.indexOf(inst.agentType) !== -1 ? inst.agentType : 'claude';
-        return (
-          '<div class="' + cardClass + '" data-id="' + safeId + '">' +
-            '<div class="card-top">' +
-              (title
-                ? '<span class="card-name">' + escapeHtml(title) + '</span>'
-                : '<span class="card-name card-name-loading"><span class="inline-spinner"></span></span>') +
-              '<button class="btn-pin' + (isPinned ? ' pinned' : '') + '" data-pin-id="' + safeId + '" title="' + (isPinned ? 'Unpin' : 'Pin') + '">' + (isPinned ? '&#9733;' : '&#9734;') + '</button>' +
-              '<span class="' + badgeClass + '">' + (inst.status === 'busy' ? '<span class="pulse-dot"></span>' : '') + escapeHtml(inst.status) + '</span>' +
-            '</div>' +
-            '<div class="card-meta">' +
-              '<span>' + escapeHtml(inst.project || '') + '</span>' +
-              '<span class="agent-badge agent-' + safeAgentType + '">' + agentLabel(safeAgentType) + '</span>' +
-            '</div>' +
-            approvalHtml +
-          '</div>'
-        );
-      })
-      .join('');
+    // Split into mind group (Alien Mind + its arms) and regular instances
+    var mindGroup = [];
+    var regular = [];
+    for (var m = 0; m < arr.length; m++) {
+      var inst = arr[m];
+      if (inst.agentType === 'mind' || (inst.name && inst.name.indexOf('Arm: ') === 0)) {
+        mindGroup.push(inst);
+      } else {
+        regular.push(inst);
+      }
+    }
 
-    // Attach click handlers
-    var cards = $instanceList.querySelectorAll('.instance-card');
-    for (var i = 0; i < cards.length; i++) {
-      cards[i].addEventListener('click', onCardClick);
+    // Within the mind group: mind itself first, then arms
+    mindGroup.sort(function (a, b) {
+      if (a.agentType === 'mind' && b.agentType !== 'mind') return -1;
+      if (a.agentType !== 'mind' && b.agentType === 'mind') return 1;
+      return 0;
+    });
+
+    var $mindSection = document.getElementById('mind-section');
+    var $mindList = document.getElementById('mind-list');
+    if (mindGroup.length > 0) {
+      $mindSection.classList.remove('hidden');
+      $mindList.innerHTML = mindGroup.map(renderInstanceCard).join('');
+    } else {
+      $mindSection.classList.add('hidden');
+      $mindList.innerHTML = '';
+    }
+
+    $instanceList.innerHTML = regular.map(renderInstanceCard).join('');
+
+    // Attach click handlers to ALL cards (mind section + regular)
+    var allCards = document.querySelectorAll('#mind-list .instance-card, #instance-list .instance-card');
+    for (var i = 0; i < allCards.length; i++) {
+      allCards[i].addEventListener('click', onCardClick);
     }
     // Attach pin handlers
-    var pins = $instanceList.querySelectorAll('.btn-pin');
+    var pins = document.querySelectorAll('#mind-list .btn-pin, #instance-list .btn-pin');
     for (var i = 0; i < pins.length; i++) {
       pins[i].addEventListener('click', function (e) {
         e.stopPropagation();
