@@ -238,7 +238,12 @@ function createServer(options = {}) {
   if (process.env.POLPO_MIND === '1') {
     try {
       const { createMind } = require('../mind/index');
-      mind = createMind(instanceManager, { verbose, serverPort: port });
+      const mindAuthToken = authState.enabled ? authState.token : null;
+      mind = createMind(instanceManager, {
+        verbose: true, // Always verbose for mind debugging
+        serverPort: port,
+        authToken: mindAuthToken,
+      });
     } catch (e) {
       console.error('[polpo] Mind module failed to load:', e.message);
     }

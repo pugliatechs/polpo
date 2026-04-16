@@ -16,6 +16,7 @@ class AgentPool {
    * @param {number} [opts.serverPort] - Hub port for agent WebSocket connection
    * @param {string} [opts.authToken] - Auth token for agent registration
    * @param {number} [opts.maxSpawned=4] - Maximum agents the mind can spawn
+   * @param {boolean} [opts.autoApprove=true] - Auto-approve tool calls for spawned agents
    */
   constructor(opts) {
     this.instanceManager = opts.instanceManager;
@@ -23,6 +24,7 @@ class AgentPool {
     this.serverPort = opts.serverPort || 7890;
     this.authToken = opts.authToken || null;
     this.maxSpawned = opts.maxSpawned || 4;
+    this.autoApprove = opts.autoApprove !== false;
 
     this._spawned = new Map(); // agentId -> agent instance
     this._assigned = new Map(); // agentId -> taskId
@@ -78,9 +80,17 @@ class AgentPool {
       this._assigned.set(agentId, task.id);
       return agentId;
     } catch (err) {
-      console.error('[mind-pool] Failed to spawn agent:', err.message);
+      console.error('[mind-pool] Failed to spawn agent:', err.message, err.stack);
+      this._lastSpawnError = err.message;
       return null;
     }
+  }
+
+  /**
+   * Get the last spawn error message, if any.
+   */
+  getLastSpawnError() {
+    return this._lastSpawnError || null;
   }
 
   /**
@@ -125,14 +135,16 @@ class AgentPool {
       token: this.authToken,
       type: 'terminal',
       project: require('path').basename(cwd),
-      permissionMode: 'bypass', // Mind-spawned agents auto-approve
+      // Respect autoApprove policy: bypass only when enabled
+      permissionMode: this.autoApprove ? 'bypass' : 'default',
     });
 
     await agent.start();
     this._spawned.set(agent.instanceId, agent);
 
-    // Auto-approve for mind-spawned agents
-    this.instanceManager.setAutoApprove(agent.instanceId, true);
+    if (this.autoApprove) {
+      this.instanceManager.setAutoApprove(agent.instanceId, true);
+    }
 
     return agent.instanceId;
   }

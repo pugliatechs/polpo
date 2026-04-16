@@ -62,6 +62,7 @@ function createMind(instanceManager, options) {
     serverPort: options.serverPort || 7890,
     authToken: options.authToken || null,
     maxSpawned: policy.maxSpawnedAgents,
+    autoApprove: policy.autoApproveSpawned,
   });
 
   // Create coordinator (goal/task lifecycle)

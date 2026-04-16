@@ -201,9 +201,14 @@ class Coordinator extends EventEmitter {
    */
   _onAgentAcquired(task, agentId) {
     if (!agentId) {
+      var reason = 'No agent available';
+      if (this.agentPool && this.agentPool.getLastSpawnError) {
+        var spawnErr = this.agentPool.getLastSpawnError();
+        if (spawnErr) reason = 'Failed to spawn agent: ' + spawnErr;
+      }
       task.status = 'failed';
-      task.result = { success: false, summary: 'No agent available (pool empty, spawn failed or at capacity)' };
-      this._report('Task failed (no agent available): ' + task.description);
+      task.result = { success: false, summary: reason };
+      this._report('Task failed: ' + task.description + '\n' + reason);
       this._checkGoalCompletion(task.goalId);
       return;
     }
