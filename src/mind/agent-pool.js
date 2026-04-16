@@ -146,6 +146,28 @@ class AgentPool {
       this.instanceManager.setAutoApprove(agent.instanceId, true);
     }
 
+    // Wait for the agent's WebSocket to be connected to the hub before
+    // returning. start() resolves after register+connectToHub, but the
+    // WebSocket 'open' event is async. Poll up to 5s for agentSocket to
+    // be OPEN in InstanceManager.
+    var self = this;
+    await new Promise(function (resolve, reject) {
+      var deadline = Date.now() + 5000;
+      var check = function () {
+        var inst = self.instanceManager.get(agent.instanceId);
+        if (inst && inst.agentSocket && inst.agentSocket.readyState === 1) {
+          resolve();
+          return;
+        }
+        if (Date.now() > deadline) {
+          reject(new Error('Agent WebSocket did not connect within 5s'));
+          return;
+        }
+        setTimeout(check, 100);
+      };
+      check();
+    });
+
     return agent.instanceId;
   }
 

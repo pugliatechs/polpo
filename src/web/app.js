@@ -713,7 +713,12 @@
   // ---- Render: Instance List ----
   function renderList() {
     var arr = Array.from(instances.values()).filter(function (i) {
-      return i.status !== 'disconnected';
+      if (i.status === 'disconnected') return false;
+      // Hide the Alien Mind's reasoning process (auto-discovered by scanner).
+      // Its first prompt always starts with the reasoner system prompt.
+      var fp = i._firstPrompt || i.firstPrompt || '';
+      if (fp.indexOf('You are the coordination brain of Polpo') === 0) return false;
+      return true;
     });
 
     // Also show recently disconnected (last 30s), then purge stale ones
