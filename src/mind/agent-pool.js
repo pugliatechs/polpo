@@ -119,7 +119,7 @@ class AgentPool {
     var cwd = task.targetCwd || process.cwd();
 
     var agent = createAgent(agentType, {
-      name: 'Mind Worker (' + (task.description || agentType).slice(0, 30) + ')',
+      name: 'Arm: ' + (task.description || agentType).slice(0, 50),
       cwd: cwd,
       serverUrl: 'ws://127.0.0.1:' + this.serverPort,
       token: this.authToken,
