@@ -14,6 +14,7 @@ const { WorldModel } = require('./world-model');
 const { Reasoner } = require('./reasoner');
 const { Coordinator } = require('./coordinator');
 const { Watcher } = require('./watcher');
+const { AgentPool } = require('./agent-pool');
 const { loadPolicy } = require('./policies');
 
 /**
@@ -51,11 +52,24 @@ function createMind(instanceManager, options) {
     model: process.env.POLPO_MIND_MODEL || null,
   });
 
+  // Load policy early for agent pool config
+  var policy = loadPolicy();
+
+  // Create agent pool (handles idle match, type match, spawn new)
+  var agentPool = new AgentPool({
+    instanceManager: instanceManager,
+    worldModel: worldModel,
+    serverPort: options.serverPort || 7890,
+    authToken: options.authToken || null,
+    maxSpawned: policy.maxSpawnedAgents,
+  });
+
   // Create coordinator (goal/task lifecycle)
   var coordinator = new Coordinator({
     instanceManager: instanceManager,
     worldModel: worldModel,
     reasoner: reasoner,
+    agentPool: agentPool,
     mindInstanceId: mindId,
   });
 
@@ -153,9 +167,7 @@ function createMind(instanceManager, options) {
 
   instanceManager.on('instance:message', messageHandler);
 
-  // Load policy and start watcher
-  var policy = loadPolicy();
-
+  // Start watcher (policy already loaded above for agent pool)
   var watcher = new Watcher({
     worldModel: worldModel,
     instanceManager: instanceManager,
@@ -175,6 +187,7 @@ function createMind(instanceManager, options) {
       watcher.destroy();
       instanceManager.removeListener('instance:message', messageHandler);
       coordinator.destroy();
+      agentPool.destroy();
       reasoner.destroy();
       worldModel.destroy();
       instanceManager.unregister(mindId);

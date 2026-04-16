@@ -14,6 +14,7 @@ class Coordinator extends EventEmitter {
    * @param {object} opts.instanceManager
    * @param {object} opts.worldModel - WorldModel instance
    * @param {object} opts.reasoner - Reasoner instance
+   * @param {object} [opts.agentPool] - AgentPool for spawning agents when no idle ones
    * @param {string} opts.mindInstanceId - The mind's own instance ID for reporting
    */
   constructor(opts) {
@@ -21,6 +22,7 @@ class Coordinator extends EventEmitter {
     this.instanceManager = opts.instanceManager;
     this.worldModel = opts.worldModel;
     this.reasoner = opts.reasoner;
+    this.agentPool = opts.agentPool || null;
     this.mindInstanceId = opts.mindInstanceId;
 
     this._goals = new Map(); // goalId -> Goal
@@ -139,13 +141,27 @@ class Coordinator extends EventEmitter {
   }
 
   /**
-   * Assign a task to an idle agent.
+   * Assign a task to an agent (via AgentPool if available, else legacy match).
    */
   _assignTask(task) {
-    // Find a suitable idle agent
-    var idleAgents = this.worldModel.getIdleAgents();
+    var self = this;
 
-    // Prefer agents matching the target cwd or project
+    if (this.agentPool) {
+      // Use AgentPool: handles idle match, type match, spawn new
+      task.status = 'acquiring';
+      this.agentPool.acquire(task).then(function (agentId) {
+        self._onAgentAcquired(task, agentId);
+      }).catch(function (err) {
+        task.status = 'failed';
+        task.result = { success: false, summary: 'Agent acquisition failed: ' + err.message };
+        self._report('Task failed (agent acquisition): ' + task.description);
+        self._checkGoalCompletion(task.goalId);
+      });
+      return;
+    }
+
+    // Legacy path: find idle agent directly from WorldModel
+    var idleAgents = this.worldModel.getIdleAgents();
     var bestAgent = null;
     if (task.targetCwd) {
       var targetLower = task.targetCwd.toLowerCase();
@@ -157,8 +173,6 @@ class Coordinator extends EventEmitter {
         }
       }
     }
-
-    // Fall back to any idle agent of the right type
     if (!bestAgent) {
       for (var j = 0; j < idleAgents.length; j++) {
         if (idleAgents[j].agentType === task.agentType) {
@@ -167,8 +181,6 @@ class Coordinator extends EventEmitter {
         }
       }
     }
-
-    // Fall back to any idle agent
     if (!bestAgent && idleAgents.length > 0) {
       bestAgent = idleAgents[0];
     }
@@ -181,10 +193,25 @@ class Coordinator extends EventEmitter {
       return;
     }
 
+    this._onAgentAcquired(task, bestAgent.id);
+  }
+
+  /**
+   * Handle an agent being assigned to a task (from pool or legacy match).
+   */
+  _onAgentAcquired(task, agentId) {
+    if (!agentId) {
+      task.status = 'failed';
+      task.result = { success: false, summary: 'No agent available (pool empty, spawn failed or at capacity)' };
+      this._report('Task failed (no agent available): ' + task.description);
+      this._checkGoalCompletion(task.goalId);
+      return;
+    }
+
     task.status = 'running';
-    task.agentId = bestAgent.id;
+    task.agentId = agentId;
     task.startedAt = Date.now();
-    this._taskToAgent.set(bestAgent.id, task.id);
+    this._taskToAgent.set(agentId, task.id);
 
     // Set timeout
     var self = this;
@@ -194,7 +221,7 @@ class Coordinator extends EventEmitter {
     this._timeouts.set(task.id, timeout);
 
     // Send prompt to the agent
-    var sent = this.instanceManager.sendToAgent(bestAgent.id, {
+    var sent = this.instanceManager.sendToAgent(agentId, {
       type: 'prompt',
       text: task.prompt,
     });
@@ -202,22 +229,25 @@ class Coordinator extends EventEmitter {
     if (!sent) {
       task.status = 'failed';
       task.result = { success: false, summary: 'Failed to send prompt to agent' };
-      this._taskToAgent.delete(bestAgent.id);
+      this._taskToAgent.delete(agentId);
       clearTimeout(timeout);
       this._timeouts.delete(task.id);
+      if (this.agentPool) this.agentPool.release(agentId);
       this._report('Task failed (agent unreachable): ' + task.description);
       this._checkGoalCompletion(task.goalId);
       return;
     }
 
-    // Record the prompt as a user message in the mind's conversation
-    this.instanceManager.addMessage(bestAgent.id, {
+    // Record the prompt as a user message
+    this.instanceManager.addMessage(agentId, {
       role: 'user',
       content: task.prompt,
       source: 'mind',
     });
 
-    this._report('Assigned to ' + bestAgent.name + ': ' + task.description);
+    var inst = this.instanceManager.get(agentId);
+    var name = inst ? (inst.name || agentId) : agentId;
+    this._report('Assigned to ' + name + ': ' + task.description);
   }
 
   /**
