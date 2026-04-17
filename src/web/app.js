@@ -1071,6 +1071,9 @@
         }
       }
     }
+
+    // Reflect instance status in send button enable state
+    updateSendButton();
   }
 
   function renderConversation(skipScroll) {
@@ -1649,7 +1652,10 @@
     clearAttachments();
     $promptInput.value = '';
     $promptInput.style.height = 'auto';
-    updateSendButton();
+    // Immediately disable send button to prevent double-send while we wait
+    // for the server to mark the instance busy. Gets re-enabled via
+    // updateSendButton() on the next renderDetail() trigger.
+    $btnSend.disabled = true;
     scrollToBottom(true);
   }
 
@@ -1715,7 +1721,12 @@
   });
 
   function updateSendButton() {
-    $btnSend.disabled = !$promptInput.value.trim() && pendingAttachments.length === 0;
+    var hasContent = $promptInput.value.trim() || pendingAttachments.length > 0;
+    // Also disable while the active instance is busy processing,
+    // to prevent accidental double-sends during long operations.
+    var inst = activeInstanceId ? instances.get(activeInstanceId) : null;
+    var instBusy = inst && (inst.status === 'busy' || inst.status === 'waiting');
+    $btnSend.disabled = !hasContent || instBusy;
   }
 
   function takeover(instanceId) {
