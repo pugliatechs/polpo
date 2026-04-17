@@ -457,9 +457,18 @@
     };
   }
 
+  // Pending reconnect timer — cancelled on forceReconnect/connect to
+  // prevent double-connections (which duplicate every broadcast message).
+  var reconnectTimer = null;
+
   function forceReconnect() {
     if (isReconnecting) return;
     reconnectDelay = 1000;
+    // Clear any pending reconnect to avoid two concurrent connect() calls
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
     if (ws) {
       try { ws.close(); } catch (e) {}
     }
@@ -468,6 +477,11 @@
 
   function connect() {
     if (isReconnecting) return;
+    // Clear any pending scheduled reconnect — we're connecting now
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
     isReconnecting = true;
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const url = `${proto}//${location.host}?role=dashboard`;
@@ -493,7 +507,13 @@
         return;
       }
       setConnectionState(wasConnected ? 'reconnecting' : 'disconnected');
-      setTimeout(connect, reconnectDelay);
+      // Store the pending reconnect handle so forceReconnect/connect
+      // can cancel it and avoid concurrent connection attempts.
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(function () {
+        reconnectTimer = null;
+        connect();
+      }, reconnectDelay);
       reconnectDelay = Math.min(reconnectDelay * 1.5, 8000);
     };
 
