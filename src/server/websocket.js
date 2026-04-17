@@ -142,6 +142,16 @@ function setupWebSocket(server, instanceManager, getAuthState, pushManager) {
   instanceManager.on('instance:session_info', (data) => {
     broadcastToDashboards({ type: 'instance:session_info', ...data });
 
+    // If the scanner already registered a duplicate for this sessionId
+    // (race: scanner discovered the JSONL before agent's session_info arrived),
+    // unregister the scanner's instance and replace it with the agent-owned one.
+    if (data.sessionId && sessionToInstance.has(data.sessionId)) {
+      const prevId = sessionToInstance.get(data.sessionId);
+      if (prevId && prevId !== data.id) {
+        instanceManager.unregister(prevId);
+      }
+    }
+
     // Record in sessionToInstance so the auto-discovery scanner
     // won't register a duplicate instance for the same session
     if (data.sessionId) {
