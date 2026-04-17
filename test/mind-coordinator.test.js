@@ -266,4 +266,141 @@ describe('Coordinator with dependencies', () => {
     assert.equal(allPrompts.length, 2);
     assert.ok(allPrompts[1].msg.text.includes('do second'));
   });
+
+  it('injects predecessor output as context for dependent tasks', async () => {
+    const plan = {
+      tasks: [
+        { description: 'Research step', agentType: 'claude', targetCwd: '', prompt: 'research the topic', dependsOn: [] },
+        { description: 'Build step', agentType: 'claude', targetCwd: '', prompt: 'build based on research', dependsOn: [0] },
+      ],
+    };
+    const reasoner = createMockReasoner(plan);
+    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, mindInstanceId: MIND_ID });
+
+    im.register({ id: 'agent-1', name: 'Worker 1', agentType: 'claude' });
+
+    await coordinator.submitGoal('Two-step goal');
+
+    // Simulate the first arm producing output, then completing
+    im.addMessage('agent-1', { role: 'assistant', content: 'Found that X uses Y library', contentType: 'text' });
+    im.updateStatus('agent-1', 'busy');
+    im.updateStatus('agent-1', 'idle');
+
+    // The second task should have been dispatched with the first's output as context
+    const prompts = im._sent.filter(function (s) { return s.msg.type === 'prompt'; });
+    assert.equal(prompts.length, 2);
+    const secondPrompt = prompts[1].msg.text;
+    assert.ok(secondPrompt.includes('<previous_task_results>'), 'expected context block in dependent prompt');
+    assert.ok(secondPrompt.includes('Found that X uses Y library'), 'expected predecessor output in context');
+    assert.ok(secondPrompt.includes('build based on research'), 'expected task prompt still present');
+    // The context block should come BEFORE the task prompt
+    const ctxIdx = secondPrompt.indexOf('<previous_task_results>');
+    const taskIdx = secondPrompt.indexOf('build based on research');
+    assert.ok(ctxIdx < taskIdx, 'expected context to come before task prompt');
+  });
+
+  it('first task has no predecessor context', async () => {
+    const plan = {
+      tasks: [
+        { description: 'Standalone', agentType: 'claude', targetCwd: '', prompt: 'do it', dependsOn: [] },
+      ],
+    };
+    const reasoner = createMockReasoner(plan);
+    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, mindInstanceId: MIND_ID });
+
+    im.register({ id: 'agent-1', name: 'Worker 1', agentType: 'claude' });
+
+    await coordinator.submitGoal('Single task');
+
+    const prompts = im._sent.filter(function (s) { return s.msg.type === 'prompt'; });
+    assert.equal(prompts.length, 1);
+    assert.ok(!prompts[0].msg.text.includes('<previous_task_results>'));
+  });
+
+  it('multiple predecessors each provide context', async () => {
+    const plan = {
+      tasks: [
+        { description: 'Research A', agentType: 'claude', targetCwd: '', prompt: 'research A', dependsOn: [] },
+        { description: 'Research B', agentType: 'claude', targetCwd: '', prompt: 'research B', dependsOn: [] },
+        { description: 'Synthesize', agentType: 'claude', targetCwd: '', prompt: 'synthesize findings', dependsOn: [0, 1] },
+      ],
+    };
+    const reasoner = createMockReasoner(plan);
+    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, mindInstanceId: MIND_ID });
+
+    im.register({ id: 'agent-1', name: 'Worker 1', agentType: 'claude' });
+    im.register({ id: 'agent-2', name: 'Worker 2', agentType: 'claude' });
+
+    await coordinator.submitGoal('Diamond task');
+
+    // Simulate both parallel tasks completing with different outputs
+    im.addMessage('agent-1', { role: 'assistant', content: 'Finding A: alpha', contentType: 'text' });
+    im.updateStatus('agent-1', 'busy');
+    im.updateStatus('agent-1', 'idle');
+
+    im.addMessage('agent-2', { role: 'assistant', content: 'Finding B: beta', contentType: 'text' });
+    im.updateStatus('agent-2', 'busy');
+    im.updateStatus('agent-2', 'idle');
+
+    // Synthesis task should now be dispatched with both outputs as context
+    const prompts = im._sent.filter(function (s) { return s.msg.type === 'prompt'; });
+    assert.equal(prompts.length, 3);
+    const synthPrompt = prompts[2].msg.text;
+    assert.ok(synthPrompt.includes('Finding A: alpha'), 'expected predecessor A output');
+    assert.ok(synthPrompt.includes('Finding B: beta'), 'expected predecessor B output');
+  });
+
+  it('truncates long predecessor outputs', async () => {
+    const plan = {
+      tasks: [
+        { description: 'Big output', agentType: 'claude', targetCwd: '', prompt: 'produce lots', dependsOn: [] },
+        { description: 'Consume', agentType: 'claude', targetCwd: '', prompt: 'use output', dependsOn: [0] },
+      ],
+    };
+    const reasoner = createMockReasoner(plan);
+    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, mindInstanceId: MIND_ID });
+
+    im.register({ id: 'agent-1', name: 'Worker 1', agentType: 'claude' });
+
+    await coordinator.submitGoal('Big context');
+
+    const hugeOutput = 'x'.repeat(20000);
+    im.addMessage('agent-1', { role: 'assistant', content: hugeOutput, contentType: 'text' });
+    im.updateStatus('agent-1', 'busy');
+    im.updateStatus('agent-1', 'idle');
+
+    const prompts = im._sent.filter(function (s) { return s.msg.type === 'prompt'; });
+    const secondPrompt = prompts[1].msg.text;
+    assert.ok(secondPrompt.includes('output truncated'), 'expected truncation marker');
+    assert.ok(secondPrompt.length < 15000, 'expected prompt to be bounded');
+  });
+
+  it('_extractAgentOutput pulls consecutive trailing assistant messages', async () => {
+    const plan = { tasks: [
+      { description: 'Step 1', agentType: 'claude', targetCwd: '', prompt: 'first', dependsOn: [] },
+      { description: 'Step 2', agentType: 'claude', targetCwd: '', prompt: 'second', dependsOn: [0] },
+    ] };
+    const reasoner = createMockReasoner(plan);
+    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, mindInstanceId: MIND_ID });
+
+    im.register({ id: 'agent-1', name: 'Worker 1', agentType: 'claude' });
+
+    await coordinator.submitGoal('Multi-message');
+
+    // Add a mix of messages: user, assistant, tool, assistant, assistant
+    im.addMessage('agent-1', { role: 'user', content: 'earlier user msg' });
+    im.addMessage('agent-1', { role: 'assistant', content: 'earlier answer', contentType: 'text' });
+    im.addMessage('agent-1', { role: 'tool', content: 'tool stuff', contentType: 'tool_result' });
+    im.addMessage('agent-1', { role: 'assistant', content: 'final 1', contentType: 'text' });
+    im.addMessage('agent-1', { role: 'assistant', content: 'final 2', contentType: 'text' });
+    im.updateStatus('agent-1', 'busy');
+    im.updateStatus('agent-1', 'idle');
+
+    const prompts = im._sent.filter(function (s) { return s.msg.type === 'prompt'; });
+    const secondPrompt = prompts[1].msg.text;
+    // Should include the trailing consecutive assistant messages, not earlier ones
+    assert.ok(secondPrompt.includes('final 1'));
+    assert.ok(secondPrompt.includes('final 2'));
+    assert.ok(!secondPrompt.includes('earlier answer'), 'should not include assistant msg before tool result');
+  });
 });

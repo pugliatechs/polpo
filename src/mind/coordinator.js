@@ -99,6 +99,7 @@ class Coordinator extends EventEmitter {
         status: 'pending',
         agentId: null,
         result: null,
+        output: null, // Last assistant text from the arm (captured on completion)
         timeoutMs: 300000, // 5 min default
         startedAt: null,
         completedAt: null,
@@ -106,6 +107,82 @@ class Coordinator extends EventEmitter {
     });
 
     return { tasks: tasks };
+  }
+
+  /**
+   * Build a context block from completed predecessor tasks, to prepend
+   * to a dependent task's prompt. This is how arms share findings:
+   * the mind brokers information between them.
+   *
+   * @param {object} task - the task about to be dispatched
+   * @param {Array} allTasks - all tasks in the plan
+   * @returns {string} context block (may be empty)
+   */
+  _buildPredecessorContext(task, allTasks) {
+    if (!task.dependsOn || task.dependsOn.length === 0) return '';
+
+    var blocks = [];
+    for (var i = 0; i < task.dependsOn.length; i++) {
+      var depIdx = task.dependsOn[i];
+      if (depIdx < 0 || depIdx >= allTasks.length) continue;
+      var dep = allTasks[depIdx];
+      if (dep.status !== 'completed' || !dep.output) continue;
+
+      // Truncate each predecessor's output to keep the combined prompt
+      // within reasonable token bounds (~8k chars total for all deps).
+      var maxPerDep = Math.floor(8000 / task.dependsOn.length);
+      var output = dep.output.length > maxPerDep
+        ? dep.output.slice(0, maxPerDep) + '\n... (output truncated)'
+        : dep.output;
+
+      blocks.push(
+        '<task index="' + depIdx + '" description="' + this._escapeAttr(dep.description) + '">\n' +
+        output + '\n' +
+        '</task>'
+      );
+    }
+
+    if (blocks.length === 0) return '';
+
+    return '<previous_task_results>\n' +
+      'The following tasks completed before yours. Their outputs are provided as context.\n' +
+      'Use them to inform your work on the current task.\n\n' +
+      blocks.join('\n\n') + '\n' +
+      '</previous_task_results>\n\n';
+  }
+
+  /**
+   * Escape a string for use inside an XML attribute.
+   */
+  _escapeAttr(str) {
+    if (typeof str !== 'string') return '';
+    return str.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  /**
+   * Extract the final assistant text output from an agent's conversation.
+   * This captures what the arm actually produced, used as context for
+   * dependent tasks.
+   */
+  _extractAgentOutput(agentId) {
+    var conversation = this.worldModel.getAgentConversation(agentId, 20);
+    if (!conversation || conversation.length === 0) return '';
+
+    // Walk backwards and collect consecutive assistant text messages
+    // until we hit a non-assistant message. This captures the arm's
+    // final response (which may span multiple text blocks).
+    var assistantTexts = [];
+    for (var i = conversation.length - 1; i >= 0; i--) {
+      var m = conversation[i];
+      if (m.role === 'assistant' && (!m.contentType || m.contentType === 'text') && m.content) {
+        assistantTexts.unshift(m.content);
+      } else if (assistantTexts.length > 0) {
+        // Stop once we've hit a non-assistant message after finding some
+        break;
+      }
+    }
+
+    return assistantTexts.join('\n\n').trim();
   }
 
   /**
@@ -160,8 +237,13 @@ class Coordinator extends EventEmitter {
       return;
     }
 
-    // Legacy path: find idle agent directly from WorldModel
-    var idleAgents = this.worldModel.getIdleAgents();
+    // Legacy path: find idle agent directly from WorldModel (test/no-pool path).
+    // Exclude agents already assigned to another running task to avoid
+    // sending two prompts to the same agent in parallel.
+    var self2 = this;
+    var idleAgents = this.worldModel.getIdleAgents().filter(function (a) {
+      return !self2._taskToAgent.has(a.id);
+    });
     var bestAgent = null;
     if (task.targetCwd) {
       var targetLower = task.targetCwd.toLowerCase();
@@ -218,6 +300,14 @@ class Coordinator extends EventEmitter {
     task.startedAt = Date.now();
     this._taskToAgent.set(agentId, task.id);
 
+    // Build the final prompt: predecessor context + task prompt.
+    // This is how the mind brokers information between arms.
+    var goal = this._goals.get(task.goalId);
+    var contextBlock = goal && goal.plan
+      ? this._buildPredecessorContext(task, goal.plan.tasks)
+      : '';
+    var finalPrompt = contextBlock + task.prompt;
+
     // Set timeout
     var self = this;
     var timeout = setTimeout(function () {
@@ -228,7 +318,7 @@ class Coordinator extends EventEmitter {
     // Send prompt to the agent
     var sent = this.instanceManager.sendToAgent(agentId, {
       type: 'prompt',
-      text: task.prompt,
+      text: finalPrompt,
     });
 
     if (!sent) {
@@ -243,7 +333,8 @@ class Coordinator extends EventEmitter {
       return;
     }
 
-    // Record the prompt as a user message
+    // Record the prompt as a user message (the original prompt, not the
+    // full context-injected one — that would make the convo noisy)
     this.instanceManager.addMessage(agentId, {
       role: 'user',
       content: task.prompt,
@@ -283,6 +374,10 @@ class Coordinator extends EventEmitter {
     task.status = 'completed';
     task.completedAt = Date.now();
     task.result = { success: true, summary: 'Completed' };
+
+    // Capture the arm's output text so dependent tasks can use it as context.
+    // This is the 'brokering' that lets the mind share findings between arms.
+    task.output = this._extractAgentOutput(task.agentId);
 
     var duration = task.completedAt - (task.startedAt || task.completedAt);
     var durationStr = duration < 60000

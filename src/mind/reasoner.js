@@ -29,6 +29,12 @@ var SYSTEM_PROMPT = [
   '- dependsOn is an array of task indices (0-based) that must complete before this task starts.',
   '- Tasks with no dependencies can run in parallel.',
   '- If no suitable agent exists, use agentType "claude" as default.',
+  '',
+  'Task dependencies and context sharing:',
+  '- When task B depends on task A (dependsOn: [0] where A is index 0), B will automatically receive A\'s output as context in a <previous_task_results> XML block prepended to its prompt.',
+  '- Use dependencies when a later task needs information the earlier task produced (e.g., research first, then build based on findings).',
+  '- The dependent task\'s prompt should reference what will come from the previous task (e.g., "Based on the research above, build a prototype that...") rather than restating the work.',
+  '- Prefer splitting research + action into two dependent tasks rather than combining them into one.',
 ].join('\n');
 
 var EVALUATE_PROMPT = [
