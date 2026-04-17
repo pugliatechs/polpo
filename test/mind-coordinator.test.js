@@ -50,9 +50,10 @@ function createMockIM() {
 }
 
 // Mock Reasoner that returns a canned plan
-function createMockReasoner(plan) {
+function createMockReasoner(plan, replanResponse) {
   return {
     plan: async function () { return plan || { tasks: [{ description: 'Do the thing', agentType: 'claude', targetCwd: '/tmp', prompt: 'Please do the thing', dependsOn: [] }] }; },
+    replan: async function () { return replanResponse || { action: 'abandon', reason: 'mock default' }; },
     evaluate: async function () { return { success: true, summary: 'Looks good' }; },
     destroy: function () {},
   };
@@ -402,5 +403,154 @@ describe('Coordinator with dependencies', () => {
     assert.ok(secondPrompt.includes('final 1'));
     assert.ok(secondPrompt.includes('final 2'));
     assert.ok(!secondPrompt.includes('earlier answer'), 'should not include assistant msg before tool result');
+  });
+});
+
+describe('Coordinator re-planning on failure', () => {
+  let im;
+  let wm;
+  let coordinator;
+  const MIND_ID = 'mind-001';
+
+  beforeEach(() => {
+    im = createMockIM();
+    im.register({ id: MIND_ID, name: 'Alien Mind', agentType: 'mind' });
+    wm = new WorldModel(im, MIND_ID);
+  });
+
+  afterEach(() => {
+    if (coordinator) coordinator.destroy();
+    wm.destroy();
+  });
+
+  it('retries task with revised prompt when reasoner says retry', async () => {
+    const plan = { tasks: [
+      { description: 'Risky task', agentType: 'claude', targetCwd: '', prompt: 'original prompt', dependsOn: [] },
+    ] };
+    const reasoner = createMockReasoner(plan, { action: 'retry', prompt: 'revised prompt' });
+    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, mindInstanceId: MIND_ID });
+
+    im.register({ id: 'agent-1', name: 'Worker', agentType: 'claude' });
+
+    const result = await coordinator.submitGoal('Try something');
+    // First dispatch sends 'original prompt'
+    let prompts = im._sent.filter(function (s) { return s.msg.type === 'prompt'; });
+    assert.equal(prompts.length, 1);
+    assert.ok(prompts[0].msg.text.includes('original prompt'));
+
+    // Fail the task
+    coordinator._failTask(coordinator.getActiveGoals()[0].plan.tasks[0].id, 'Something went wrong');
+    await new Promise(function (r) { setTimeout(r, 20); }); // let async replan settle
+
+    // Should have re-dispatched with revised prompt
+    prompts = im._sent.filter(function (s) { return s.msg.type === 'prompt'; });
+    assert.equal(prompts.length, 2);
+    assert.ok(prompts[1].msg.text.includes('revised prompt'));
+
+    // Task should be running again (not failed)
+    const task = coordinator.getActiveGoals()[0].plan.tasks[0];
+    assert.equal(task.replanCount, 1);
+  });
+
+  it('splits task into replacement subtasks when reasoner says split', async () => {
+    const plan = { tasks: [
+      { description: 'Complex task', agentType: 'claude', targetCwd: '', prompt: 'do complex', dependsOn: [] },
+    ] };
+    const reasoner = createMockReasoner(plan, {
+      action: 'split',
+      tasks: [
+        { description: 'Subtask A', prompt: 'simpler A', agentType: 'claude' },
+        { description: 'Subtask B', prompt: 'simpler B', agentType: 'claude' },
+      ],
+    });
+    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, mindInstanceId: MIND_ID });
+
+    im.register({ id: 'agent-1', name: 'Worker', agentType: 'claude' });
+
+    await coordinator.submitGoal('Complex goal');
+    coordinator._failTask(coordinator.getActiveGoals()[0].plan.tasks[0].id, 'Too complex');
+    await new Promise(function (r) { setTimeout(r, 20); });
+
+    // Should now have 3 tasks: original (completed as replaced) + 2 replacements
+    const tasks = coordinator.getActiveGoals()[0].plan.tasks;
+    assert.equal(tasks.length, 3);
+    assert.equal(tasks[0].status, 'completed');
+    assert.ok(tasks[0].result.summary.includes('Replaced'));
+    assert.equal(tasks[1].description, 'Subtask A');
+    assert.equal(tasks[2].description, 'Subtask B');
+    // Subtask B should depend on Subtask A (sequential chain)
+    assert.deepEqual(tasks[2].dependsOn, [1]);
+  });
+
+  it('abandons task when reasoner says abandon', async () => {
+    const plan = { tasks: [
+      { description: 'Unsolvable', agentType: 'claude', targetCwd: '', prompt: 'cannot do', dependsOn: [] },
+    ] };
+    const reasoner = createMockReasoner(plan, { action: 'abandon', reason: 'Not feasible' });
+    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, mindInstanceId: MIND_ID });
+
+    im.register({ id: 'agent-1', name: 'Worker', agentType: 'claude' });
+
+    await coordinator.submitGoal('Impossible');
+    coordinator._failTask(coordinator.getActiveGoals()[0].plan.tasks[0].id, 'Cannot proceed');
+    await new Promise(function (r) { setTimeout(r, 20); });
+
+    const task = coordinator.getActiveGoals()[0].plan.tasks[0];
+    assert.equal(task.status, 'failed');
+    assert.ok(task.result.summary.includes('Abandoned'));
+    assert.ok(task.result.summary.includes('Not feasible'));
+  });
+
+  it('respects MAX_REPLANS limit', async () => {
+    const plan = { tasks: [
+      { description: 'Flaky', agentType: 'claude', targetCwd: '', prompt: 'flaky prompt', dependsOn: [] },
+    ] };
+    const reasoner = createMockReasoner(plan, { action: 'retry', prompt: 'retry prompt' });
+    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, mindInstanceId: MIND_ID });
+
+    im.register({ id: 'agent-1', name: 'Worker', agentType: 'claude' });
+
+    await coordinator.submitGoal('Flaky goal');
+    const taskId = coordinator.getActiveGoals()[0].plan.tasks[0].id;
+
+    // Fail MAX_REPLANS + 1 times
+    for (let i = 0; i <= coordinator.MAX_REPLANS; i++) {
+      coordinator._failTask(taskId, 'fails again #' + i);
+      await new Promise(function (r) { setTimeout(r, 20); });
+    }
+
+    const task = coordinator.getActiveGoals()[0].plan.tasks[0];
+    assert.equal(task.status, 'failed');
+    assert.ok(task.result.summary.includes('fails again'));
+    // replanCount should be exactly MAX_REPLANS (the last failure skips replan)
+    assert.equal(task.replanCount, coordinator.MAX_REPLANS);
+  });
+
+  it('split: dependents of original task are redirected to last replacement', async () => {
+    const plan = { tasks: [
+      { description: 'A', agentType: 'claude', targetCwd: '', prompt: 'do A', dependsOn: [] },
+      { description: 'B depends on A', agentType: 'claude', targetCwd: '', prompt: 'do B', dependsOn: [0] },
+    ] };
+    const reasoner = createMockReasoner(plan, {
+      action: 'split',
+      tasks: [
+        { description: 'A1', prompt: 'a1' },
+        { description: 'A2', prompt: 'a2' },
+      ],
+    });
+    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, mindInstanceId: MIND_ID });
+
+    im.register({ id: 'agent-1', name: 'Worker', agentType: 'claude' });
+
+    await coordinator.submitGoal('Multi-step');
+    const taskA = coordinator.getActiveGoals()[0].plan.tasks[0];
+    coordinator._failTask(taskA.id, 'A failed');
+    await new Promise(function (r) { setTimeout(r, 20); });
+
+    const allTasks = coordinator.getActiveGoals()[0].plan.tasks;
+    // Original A at index 0 (replaced), B at index 1, A1 at 2, A2 at 3
+    const taskB = allTasks.find(function (t) { return t.description === 'B depends on A'; });
+    // B's dependency should now point to the last replacement (A2 at index 3)
+    assert.deepEqual(taskB.dependsOn, [3]);
   });
 });

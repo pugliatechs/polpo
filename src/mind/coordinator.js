@@ -103,11 +103,17 @@ class Coordinator extends EventEmitter {
         timeoutMs: 300000, // 5 min default
         startedAt: null,
         completedAt: null,
+        replanCount: 0, // Number of times this task has been re-planned
       };
     });
 
     return { tasks: tasks };
   }
+
+  /**
+   * Maximum re-plans per task (to prevent infinite loops).
+   */
+  get MAX_REPLANS() { return 2; }
 
   /**
    * Build a context block from completed predecessor tasks, to prepend
@@ -408,13 +414,13 @@ class Coordinator extends EventEmitter {
     var task = this._findTask(taskId);
     if (!task || task.status !== 'running') return;
 
-    task.status = 'failed';
-    task.completedAt = Date.now();
-    task.result = { success: false, summary: reason };
+    // Capture any partial output before clearing state (used for re-planning)
+    var partialOutput = task.agentId ? this._extractAgentOutput(task.agentId) : '';
 
-    // Clean up
+    // Clean up task state
     if (task.agentId) {
       this._taskToAgent.delete(task.agentId);
+      if (this.agentPool) this.agentPool.release(task.agentId);
     }
     var timeout = this._timeouts.get(taskId);
     if (timeout) {
@@ -422,7 +428,150 @@ class Coordinator extends EventEmitter {
       this._timeouts.delete(taskId);
     }
 
-    this._report('Failed: ' + task.description + '\n  ' + reason);
+    // Try to re-plan before giving up, up to MAX_REPLANS times
+    if (task.replanCount < this.MAX_REPLANS) {
+      this._attemptReplan(task, reason, partialOutput);
+      return;
+    }
+
+    // Out of retries: mark task as failed
+    task.status = 'failed';
+    task.completedAt = Date.now();
+    task.result = { success: false, summary: reason };
+
+    this._report('Failed (no more retries): ' + task.description + '\n  ' + reason);
+    this._checkGoalCompletion(task.goalId);
+  }
+
+  /**
+   * Ask the reasoner how to recover from a failed task, then apply
+   * the recovery strategy (retry, split into replacement tasks, or abandon).
+   */
+  async _attemptReplan(task, failureReason, partialOutput) {
+    var self = this;
+    var goal = this._goals.get(task.goalId);
+    if (!goal || !goal.plan) {
+      return this._markAbandoned(task, failureReason);
+    }
+
+    task.replanCount++;
+    // Transitional state so goal completion check waits for the recovery decision
+    task.status = 'replanning';
+
+    this._report('Re-planning (attempt ' + task.replanCount + '/' + this.MAX_REPLANS + '): ' + task.description + '\n  Reason: ' + failureReason);
+
+    var completedTasks = goal.plan.tasks.filter(function (t) { return t.status === 'completed'; });
+
+    try {
+      var recovery = await this.reasoner.replan({
+        goalPrompt: goal.prompt,
+        failedTask: {
+          description: task.description,
+          prompt: task.prompt,
+          agentType: task.agentType,
+          targetCwd: task.targetCwd,
+        },
+        failureReason: failureReason,
+        partialOutput: partialOutput,
+        completedTasks: completedTasks,
+      });
+
+      if (recovery.action === 'retry' && recovery.prompt) {
+        // Replace the task's prompt with the revised one, re-queue it
+        task.prompt = recovery.prompt;
+        task.status = 'pending';
+        task.agentId = null;
+        task.result = null;
+        task.startedAt = null;
+        task.completedAt = null;
+        this._report('Retrying with revised approach: ' + task.description);
+        this._dispatchReadyTasks(task.goalId);
+        return;
+      }
+
+      if (recovery.action === 'split' && recovery.tasks && recovery.tasks.length > 0) {
+        this._applySplit(task, recovery.tasks);
+        this._report('Split into ' + recovery.tasks.length + ' subtasks:\n' +
+          recovery.tasks.map(function (t, i) { return '  ' + (i + 1) + '. ' + t.description; }).join('\n'));
+        this._dispatchReadyTasks(task.goalId);
+        return;
+      }
+
+      // abandon
+      return this._markAbandoned(task, recovery.reason || failureReason);
+
+    } catch (err) {
+      return this._markAbandoned(task, 'Re-plan failed: ' + err.message);
+    }
+  }
+
+  /**
+   * Replace a failed task with N replacement tasks. The replacements inherit
+   * the original's dependents (tasks that depended on the original now depend
+   * on the last replacement in the chain, so they run sequentially).
+   */
+  _applySplit(originalTask, newTaskSpecs) {
+    var goal = this._goals.get(originalTask.goalId);
+    if (!goal || !goal.plan) return;
+
+    var originalIdx = originalTask.index;
+    // Mark the original as completed (its replacements will carry the work forward).
+    // We don't mark it 'failed' because that would cascade to its dependents.
+    originalTask.status = 'completed';
+    originalTask.completedAt = Date.now();
+    originalTask.result = { success: false, summary: 'Replaced by ' + newTaskSpecs.length + ' recovery subtasks' };
+    originalTask.output = null;
+
+    // Create replacement tasks: first depends on originalTask's deps, subsequent
+    // depend on the previous replacement. This chain runs sequentially.
+    var replacements = [];
+    for (var i = 0; i < newTaskSpecs.length; i++) {
+      var spec = newTaskSpecs[i];
+      var replIdx = goal.plan.tasks.length + i;
+      var deps = i === 0
+        ? originalTask.dependsOn.slice()
+        : [goal.plan.tasks.length + i - 1];
+      replacements.push({
+        id: 'task-' + uuidv4().slice(0, 8),
+        index: replIdx,
+        goalId: originalTask.goalId,
+        description: spec.description,
+        agentType: spec.agentType || originalTask.agentType,
+        targetCwd: spec.targetCwd || originalTask.targetCwd,
+        prompt: spec.prompt,
+        dependsOn: deps,
+        status: 'pending',
+        agentId: null,
+        result: null,
+        output: null,
+        timeoutMs: originalTask.timeoutMs,
+        startedAt: null,
+        completedAt: null,
+        replanCount: 0,
+      });
+    }
+
+    // Append replacements to the plan. Any task that previously depended on
+    // originalIdx now needs to wait for the LAST replacement, so retarget
+    // those deps from originalIdx to (last replacement's index).
+    var lastReplIdx = goal.plan.tasks.length + replacements.length - 1;
+    for (var j = 0; j < goal.plan.tasks.length; j++) {
+      var t = goal.plan.tasks[j];
+      if (t === originalTask) continue;
+      if (!t.dependsOn) continue;
+      for (var k = 0; k < t.dependsOn.length; k++) {
+        if (t.dependsOn[k] === originalIdx) t.dependsOn[k] = lastReplIdx;
+      }
+    }
+
+    goal.plan.tasks = goal.plan.tasks.concat(replacements);
+  }
+
+  _markAbandoned(task, reason) {
+    task.status = 'failed';
+    task.completedAt = Date.now();
+    task.result = { success: false, summary: 'Abandoned: ' + reason };
+    this._report('Abandoned: ' + task.description + '\n  ' + reason);
     this._checkGoalCompletion(task.goalId);
   }
 
@@ -438,7 +587,7 @@ class Coordinator extends EventEmitter {
     var anyFailed = false;
 
     for (var i = 0; i < tasks.length; i++) {
-      if (tasks[i].status === 'pending' || tasks[i].status === 'running' || tasks[i].status === 'assigned') {
+      if (tasks[i].status === 'pending' || tasks[i].status === 'running' || tasks[i].status === 'assigned' || tasks[i].status === 'acquiring' || tasks[i].status === 'replanning') {
         allDone = false;
       }
       if (tasks[i].status === 'failed') {

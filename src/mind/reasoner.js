@@ -45,6 +45,29 @@ var EVALUATE_PROMPT = [
   '{ "success": true/false, "summary": "brief explanation" }',
 ].join('\n');
 
+var REPLAN_PROMPT = [
+  'You are the coordination brain of Polpo. A task failed during execution and you must decide how to recover.',
+  '',
+  'Possible outcomes (respond with ONE of these JSON shapes):',
+  '',
+  '1) Retry with a revised prompt (same task, different approach):',
+  '{ "action": "retry", "prompt": "...new prompt..." }',
+  '',
+  '2) Split the failed task into smaller replacement tasks:',
+  '{ "action": "split", "tasks": [{ "description": "...", "prompt": "...", "agentType": "claude", "targetCwd": "..." }, ...] }',
+  '',
+  '3) Abandon the task (cannot recover):',
+  '{ "action": "abandon", "reason": "brief explanation" }',
+  '',
+  'Rules:',
+  '- Choose "retry" when the failure looks like a transient issue or the prompt was ambiguous',
+  '- Choose "split" when the task was too complex or too broad for a single arm',
+  '- Choose "abandon" when the task is fundamentally unachievable or would require human intervention',
+  '- Keep replacement prompts specific and actionable',
+  '- Do NOT produce more than 3 replacement tasks when splitting',
+  '- Respond ONLY with valid JSON. No markdown, no code fences.',
+].join('\n');
+
 class Reasoner {
   /**
    * @param {object} options
@@ -94,6 +117,79 @@ class Reasoner {
 
     var response = await this._ask(prompt);
     return this._parseEvaluation(response);
+  }
+
+  /**
+   * Decide how to recover from a failed task.
+   * @param {object} opts
+   * @param {string} opts.goalPrompt - Original user goal
+   * @param {object} opts.failedTask - { description, prompt, agentType, targetCwd }
+   * @param {string} opts.failureReason - Why the task failed
+   * @param {string} [opts.partialOutput] - Anything the arm produced before failing
+   * @param {Array} [opts.completedTasks] - Already-completed tasks for context
+   * @returns {Promise<{ action: 'retry'|'split'|'abandon', prompt?, tasks?, reason? }>}
+   */
+  async replan(opts) {
+    var ctxLines = [];
+    if (opts.completedTasks && opts.completedTasks.length > 0) {
+      ctxLines.push('Completed tasks so far:');
+      for (var i = 0; i < opts.completedTasks.length; i++) {
+        var c = opts.completedTasks[i];
+        ctxLines.push('- ' + c.description);
+      }
+      ctxLines.push('');
+    }
+
+    var prompt = REPLAN_PROMPT + '\n\n' +
+      'Original goal: ' + (opts.goalPrompt || '(unknown)') + '\n\n' +
+      (ctxLines.length > 0 ? ctxLines.join('\n') + '\n' : '') +
+      'Failed task:\n' +
+      '  description: ' + opts.failedTask.description + '\n' +
+      '  prompt: ' + (opts.failedTask.prompt || '').slice(0, 2000) + '\n' +
+      '  agentType: ' + (opts.failedTask.agentType || 'claude') + '\n' +
+      '  targetCwd: ' + (opts.failedTask.targetCwd || '') + '\n\n' +
+      'Failure reason: ' + opts.failureReason + '\n\n' +
+      (opts.partialOutput
+        ? 'Partial output from the arm before failure:\n' +
+          opts.partialOutput.slice(0, 3000) + '\n\n'
+        : '') +
+      'Respond with JSON only:';
+
+    var response = await this._ask(prompt);
+    return this._parseReplan(response);
+  }
+
+  _parseReplan(response) {
+    var json = this._extractJson(response);
+    if (!json || typeof json.action !== 'string') {
+      return { action: 'abandon', reason: 'Reasoner produced invalid recovery plan' };
+    }
+    if (json.action === 'retry') {
+      return {
+        action: 'retry',
+        prompt: typeof json.prompt === 'string' && json.prompt.trim() ? json.prompt : null,
+      };
+    }
+    if (json.action === 'split') {
+      var tasks = Array.isArray(json.tasks) ? json.tasks : [];
+      // Cap at 3 replacement tasks and normalize fields
+      var normalized = tasks.slice(0, 3).map(function (t) {
+        return {
+          description: t.description || 'Recovery task',
+          agentType: t.agentType || 'claude',
+          targetCwd: t.targetCwd || '',
+          prompt: t.prompt || t.description || '',
+        };
+      });
+      if (normalized.length === 0) {
+        return { action: 'abandon', reason: 'Reasoner returned empty split plan' };
+      }
+      return { action: 'split', tasks: normalized };
+    }
+    if (json.action === 'abandon') {
+      return { action: 'abandon', reason: json.reason || 'Reasoner chose to abandon' };
+    }
+    return { action: 'abandon', reason: 'Unknown action: ' + json.action };
   }
 
   /**
