@@ -15,6 +15,7 @@ const { Reasoner } = require('./reasoner');
 const { Coordinator } = require('./coordinator');
 const { Watcher } = require('./watcher');
 const { AgentPool } = require('./agent-pool');
+const { Memory } = require('./memory');
 const { loadPolicy } = require('./policies');
 
 /**
@@ -65,12 +66,24 @@ function createMind(instanceManager, options) {
     autoApprove: policy.autoApproveSpawned,
   });
 
+  // Long-term memory (JSONL at ~/.config/polpo/mind-memory.jsonl)
+  var memory = new Memory();
+  try {
+    memory.load();
+    if (options.verbose) {
+      console.log('[mind] Memory loaded (' + memory.size() + ' past goals)');
+    }
+  } catch (err) {
+    console.error('[mind] Memory load failed:', err.message);
+  }
+
   // Create coordinator (goal/task lifecycle)
   var coordinator = new Coordinator({
     instanceManager: instanceManager,
     worldModel: worldModel,
     reasoner: reasoner,
     agentPool: agentPool,
+    memory: memory,
     mindInstanceId: mindId,
   });
 

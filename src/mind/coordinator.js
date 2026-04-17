@@ -15,6 +15,7 @@ class Coordinator extends EventEmitter {
    * @param {object} opts.worldModel - WorldModel instance
    * @param {object} opts.reasoner - Reasoner instance
    * @param {object} [opts.agentPool] - AgentPool for spawning agents when no idle ones
+   * @param {object} [opts.memory] - Memory instance for long-term goal history
    * @param {string} opts.mindInstanceId - The mind's own instance ID for reporting
    */
   constructor(opts) {
@@ -23,6 +24,7 @@ class Coordinator extends EventEmitter {
     this.worldModel = opts.worldModel;
     this.reasoner = opts.reasoner;
     this.agentPool = opts.agentPool || null;
+    this.memory = opts.memory || null;
     this.mindInstanceId = opts.mindInstanceId;
 
     this._goals = new Map(); // goalId -> Goal
@@ -61,6 +63,14 @@ class Coordinator extends EventEmitter {
 
     try {
       var worldSummary = this.worldModel.getSummary();
+      // Inject relevant memories from past goals into the context
+      if (this.memory) {
+        var results = this.memory.search(prompt, 5);
+        if (results.length > 0) {
+          var memoryBlock = this.memory.formatForContext(results);
+          worldSummary = worldSummary + '\n\n' + memoryBlock;
+        }
+      }
       var plan = await this.reasoner.plan(worldSummary, prompt);
       goal.plan = this._buildTaskPlan(goalId, plan);
       goal.status = 'running';
@@ -605,7 +615,56 @@ class Coordinator extends EventEmitter {
         ? 'Goal completed: ' + goal.prompt
         : 'Goal partially failed: ' + goal.prompt);
 
+      // Persist to memory so future goals can benefit from past work
+      this._persistGoalToMemory(goal);
+
       this.emit('goal:completed', { goalId: goalId, status: goal.status });
+    }
+  }
+
+  /**
+   * Write a completed goal to long-term memory.
+   */
+  _persistGoalToMemory(goal) {
+    if (!this.memory) return;
+    try {
+      var summaries = [];
+      if (goal.plan && Array.isArray(goal.plan.tasks)) {
+        for (var i = 0; i < goal.plan.tasks.length; i++) {
+          var t = goal.plan.tasks[i];
+          var status = t.status === 'completed' ? '✓' : t.status === 'failed' ? '✗' : '·';
+          // Prefer the evaluation summary over the raw output (shorter, distilled)
+          var detail = (t.result && t.result.summary) || '';
+          var line = status + ' ' + t.description;
+          if (detail) line += ' — ' + detail;
+          summaries.push(line);
+        }
+      }
+
+      var outcome = goal.status === 'completed' ? 'completed'
+        : goal.status === 'failed' ? 'failed'
+        : 'partial';
+
+      var durationMs = 0;
+      if (goal.plan && goal.plan.tasks.length > 0) {
+        var starts = goal.plan.tasks.map(function (t) { return t.startedAt || 0; }).filter(function (n) { return n > 0; });
+        var ends = goal.plan.tasks.map(function (t) { return t.completedAt || 0; }).filter(function (n) { return n > 0; });
+        if (starts.length > 0 && ends.length > 0) {
+          durationMs = Math.max.apply(null, ends) - Math.min.apply(null, starts);
+        }
+      }
+
+      this.memory.save({
+        type: 'goal',
+        goalPrompt: goal.prompt,
+        outcome: outcome,
+        taskCount: goal.plan ? goal.plan.tasks.length : 0,
+        taskSummaries: summaries,
+        durationMs: durationMs,
+      });
+    } catch (err) {
+      // Memory persistence is non-critical — log and continue
+      console.error('[mind-coordinator] Failed to persist goal to memory:', err.message);
     }
   }
 

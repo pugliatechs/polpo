@@ -35,6 +35,11 @@ var SYSTEM_PROMPT = [
   '- Use dependencies when a later task needs information the earlier task produced (e.g., research first, then build based on findings).',
   '- The dependent task\'s prompt should reference what will come from the previous task (e.g., "Based on the research above, build a prototype that...") rather than restating the work.',
   '- Prefer splitting research + action into two dependent tasks rather than combining them into one.',
+  '',
+  'Past work context:',
+  '- The world state may include a "Relevant past work (from memory)" section listing previously completed goals.',
+  '- Use it to avoid redoing work, respect established conventions, and build on prior decisions.',
+  '- If a past goal addressed the same or similar problem, reference it in your task prompts (e.g., "Following the approach from the past auth refactor...").',
 ].join('\n');
 
 var EVALUATE_PROMPT = [
