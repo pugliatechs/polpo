@@ -38,41 +38,34 @@ class AgentPool {
    * @returns {Promise<string|null>} agentId, or null if none available
    */
   async acquire(task) {
-    // 1. Try idle agents matching target cwd
-    var idle = this.worldModel.getIdleAgents();
-    var targetLower = (task.targetCwd || '').toLowerCase();
-
-    if (targetLower) {
-      for (var i = 0; i < idle.length; i++) {
-        if (!this._assigned.has(idle[i].id) &&
-            ((idle[i].cwd || '').toLowerCase().includes(targetLower) ||
-             (idle[i].project || '').toLowerCase().includes(targetLower))) {
-          this._assigned.set(idle[i].id, task.id);
-          return idle[i].id;
-        }
+    // Only reuse mind-spawned arms that are idle and unassigned.
+    // User-started sessions are not hijacked -- the user expects to control
+    // their own agents. If we need capacity, we spawn new arms.
+    var self = this;
+    var reusable = null;
+    for (var entry of this._spawned) {
+      var armId = entry[0];
+      if (self._assigned.has(armId)) continue;
+      var inst = self.instanceManager.get(armId);
+      if (!inst || inst.status !== 'idle') continue;
+      // Prefer match by target cwd
+      var targetLower = (task.targetCwd || '').toLowerCase();
+      if (targetLower && (inst.cwd || '').toLowerCase().includes(targetLower)) {
+        reusable = armId;
+        break;
       }
+      if (!reusable) reusable = armId;
     }
 
-    // 2. Try idle agents of matching type
-    for (var j = 0; j < idle.length; j++) {
-      if (!this._assigned.has(idle[j].id) &&
-          idle[j].agentType === (task.agentType || 'claude')) {
-        this._assigned.set(idle[j].id, task.id);
-        return idle[j].id;
-      }
+    if (reusable) {
+      this._assigned.set(reusable, task.id);
+      return reusable;
     }
 
-    // 3. Try any idle agent
-    for (var k = 0; k < idle.length; k++) {
-      if (!this._assigned.has(idle[k].id)) {
-        this._assigned.set(idle[k].id, task.id);
-        return idle[k].id;
-      }
-    }
-
-    // 4. Spawn a new agent if under limit
+    // Spawn a new arm if under limit
     if (this._spawned.size >= this.maxSpawned) {
-      return null; // At capacity
+      this._lastSpawnError = 'Max spawned agents reached (' + this.maxSpawned + ')';
+      return null;
     }
 
     try {

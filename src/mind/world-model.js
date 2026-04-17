@@ -16,6 +16,22 @@
 
 const EventEmitter = require('events');
 
+// Reasoner's system prompt prefix — used to identify auto-discovered
+// reasoner sessions that should be hidden from the WorldModel.
+var REASONER_PROMPT_PREFIX = 'You are the coordination brain of Polpo';
+
+/**
+ * Check if an instance is a reasoner session (auto-discovered from the
+ * Claude Code process the Reasoner spawned internally).
+ */
+function isReasonerInstance(inst) {
+  if (!inst) return false;
+  var fp = inst.firstPrompt || inst._firstPrompt || '';
+  if (fp.indexOf(REASONER_PROMPT_PREFIX) === 0) return true;
+  if (inst.name && inst.name.indexOf(REASONER_PROMPT_PREFIX) === 0) return true;
+  return false;
+}
+
 class WorldModel extends EventEmitter {
   /**
    * @param {object} instanceManager - Polpo InstanceManager
@@ -35,17 +51,20 @@ class WorldModel extends EventEmitter {
 
     this._handlers.registered = function (inst) {
       if (inst.id === self.mindInstanceId) return;
+      if (isReasonerInstance(inst)) return;
       self.emit('agent:added', { id: inst.id, name: inst.name, agentType: inst.agentType });
     };
 
     this._handlers.disconnected = function (inst) {
       if (inst.id === self.mindInstanceId) return;
+      if (isReasonerInstance(inst)) return;
       self.emit('agent:removed', { id: inst.id });
     };
 
     this._handlers.status = function (data) {
       if (data.id === self.mindInstanceId) return;
       var inst = self.instanceManager.get(data.id);
+      if (isReasonerInstance(inst)) return;
       var name = inst ? (inst.name || inst.project || data.id) : data.id;
       var project = inst ? (inst.project || '') : '';
 
@@ -83,6 +102,7 @@ class WorldModel extends EventEmitter {
     var all = this.instanceManager.getAll();
     for (var i = 0; i < all.length; i++) {
       if (all[i].id === this.mindInstanceId) continue;
+      if (isReasonerInstance(all[i])) continue;
       if (all[i].status === 'busy' || all[i].status === 'waiting') return false;
     }
     return true;
@@ -96,7 +116,7 @@ class WorldModel extends EventEmitter {
     var self = this;
     var all = this.instanceManager.getAll();
     var agents = all
-      .filter(function (inst) { return inst.id !== self.mindInstanceId; })
+      .filter(function (inst) { return inst.id !== self.mindInstanceId && !isReasonerInstance(inst); })
       .map(function (inst) {
         return {
           id: inst.id,
