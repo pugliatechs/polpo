@@ -1742,11 +1742,7 @@
 
   function updateSendButton() {
     var hasContent = $promptInput.value.trim() || pendingAttachments.length > 0;
-    // Also disable while the active instance is busy processing,
-    // to prevent accidental double-sends during long operations.
-    var inst = activeInstanceId ? instances.get(activeInstanceId) : null;
-    var instBusy = inst && (inst.status === 'busy' || inst.status === 'waiting');
-    $btnSend.disabled = !hasContent || instBusy;
+    $btnSend.disabled = !hasContent;
   }
 
   function takeover(instanceId) {
