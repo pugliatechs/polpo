@@ -1,6 +1,6 @@
 {
   "name": "polpo",
-  "version": "1.1.8",
+  "version": "1.1.9",
   "description": "Control multiple Claude Code instances from your mobile device. Like an octopus managing its tentacles.",
   "main": "src/server/index.js",
   "bin": {
