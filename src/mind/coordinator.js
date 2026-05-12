@@ -16,6 +16,7 @@ class Coordinator extends EventEmitter {
    * @param {object} opts.reasoner - Reasoner instance
    * @param {object} [opts.agentPool] - AgentPool for spawning agents when no idle ones
    * @param {object} [opts.memory] - Memory instance for long-term goal history
+   * @param {object} [opts.goalStore] - GoalStore for in-flight goal persistence
    * @param {string} opts.mindInstanceId - The mind's own instance ID for reporting
    */
   constructor(opts) {
@@ -25,6 +26,7 @@ class Coordinator extends EventEmitter {
     this.reasoner = opts.reasoner;
     this.agentPool = opts.agentPool || null;
     this.memory = opts.memory || null;
+    this.goalStore = opts.goalStore || null;
     this.mindInstanceId = opts.mindInstanceId;
 
     this._goals = new Map(); // goalId -> Goal
@@ -58,6 +60,7 @@ class Coordinator extends EventEmitter {
       createdAt: Date.now(),
     };
     this._goals.set(goalId, goal);
+    this._persistGoalState(goal);
 
     this._report('Planning: ' + prompt);
 
@@ -74,6 +77,7 @@ class Coordinator extends EventEmitter {
       var plan = await this.reasoner.plan(worldSummary, prompt);
       goal.plan = this._buildTaskPlan(goalId, plan);
       goal.status = 'running';
+      this._persistGoalState(goal);
 
       this._report('Plan ready (' + goal.plan.tasks.length + ' task' +
         (goal.plan.tasks.length !== 1 ? 's' : '') + '):\n' +
@@ -87,6 +91,7 @@ class Coordinator extends EventEmitter {
     } catch (err) {
       goal.status = 'failed';
       goal.result = 'Planning failed: ' + err.message;
+      this._persistGoalState(goal);
       this._report('Planning failed: ' + err.message);
       return { goalId: goalId };
     }
@@ -605,6 +610,9 @@ class Coordinator extends EventEmitter {
       }
     }
 
+    // Snapshot task-level progress so recovery can report partial completion
+    this._persistGoalState(goal);
+
     if (allDone) {
       goal.status = anyFailed ? 'failed' : 'completed';
       goal.result = anyFailed
@@ -617,6 +625,9 @@ class Coordinator extends EventEmitter {
 
       // Persist to memory so future goals can benefit from past work
       this._persistGoalToMemory(goal);
+
+      // Remove from the in-flight store (no longer pending across restart)
+      this._persistGoalState(goal);
 
       this.emit('goal:completed', { goalId: goalId, status: goal.status });
     }
@@ -710,7 +721,29 @@ class Coordinator extends EventEmitter {
 
     goal.status = 'failed';
     goal.result = 'Cancelled by user';
+    this._persistGoalState(goal);
     this._report('Goal cancelled: ' + goal.prompt);
+  }
+
+  /**
+   * Public hook for the watcher: declare that the task currently running on
+   * an arm should be considered failed (e.g. because the arm is stuck).
+   * Aborts the arm, then triggers the normal failure path which may re-plan.
+   *
+   * @param {string} agentId
+   * @param {string} reason
+   * @returns {boolean} true if a task was found and failed
+   */
+  failAgentTask(agentId, reason) {
+    if (!agentId) return false;
+    var taskId = this._taskToAgent.get(agentId);
+    if (!taskId) return false;
+    var task = this._findTask(taskId);
+    if (!task || task.status !== 'running') return false;
+    // Tell the arm to stop; the existing failure path will release/re-plan
+    try { this.instanceManager.sendToAgent(agentId, { type: 'abort' }); } catch (err) {}
+    this._failTask(taskId, reason || 'Auto-cancelled by watcher');
+    return true;
   }
 
   /**
@@ -722,6 +755,72 @@ class Coordinator extends EventEmitter {
       goals.push(entry[1]);
     }
     return goals;
+  }
+
+  /**
+   * Persist the goal to the in-flight store, or remove it if terminal.
+   * No-op if no store was configured.
+   */
+  _persistGoalState(goal) {
+    if (!this.goalStore || !goal) return;
+    try {
+      if (goal.status === 'completed' || goal.status === 'failed') {
+        this.goalStore.remove(goal.id);
+      } else {
+        this.goalStore.upsert(goal);
+      }
+    } catch (err) {
+      console.error('[mind-coordinator] Goal store write failed:', err.message);
+    }
+  }
+
+  /**
+   * Recover goals that were in-flight at the time of the last shutdown.
+   * Arms cannot survive a restart, so we mark each as 'interrupted',
+   * write a summary to long-term memory, notify the user, and clear
+   * the store. Returns the list of recovered goal IDs.
+   */
+  recoverInterruptedGoals() {
+    if (!this.goalStore) return [];
+    var stored = this.goalStore.getAll();
+    if (stored.length === 0) return [];
+
+    var self = this;
+    var recovered = [];
+    stored.forEach(function (snap) {
+      if (!snap || !snap.prompt) return;
+      // Mark a synthetic goal as failed/interrupted so memory captures it
+      var ghost = {
+        id: snap.id,
+        prompt: snap.prompt,
+        status: 'failed',
+        plan: snap.plan,
+        result: 'Interrupted by server restart',
+        createdAt: snap.createdAt || Date.now(),
+      };
+      try {
+        self._persistGoalToMemory(ghost);
+      } catch (err) {
+        console.error('[mind-coordinator] Failed to log interrupted goal:', err.message);
+      }
+      recovered.push(snap.id);
+    });
+
+    // Build a single user-facing report rather than one per goal
+    var lines = stored.map(function (snap) {
+      var taskInfo = '';
+      if (snap.plan && Array.isArray(snap.plan.tasks)) {
+        var done = snap.plan.tasks.filter(function (t) { return t.status === 'completed'; }).length;
+        taskInfo = ' (' + done + '/' + snap.plan.tasks.length + ' tasks completed)';
+      }
+      return '- ' + snap.prompt + taskInfo;
+    });
+    this._report('Recovered ' + stored.length + ' interrupted goal' +
+      (stored.length !== 1 ? 's' : '') + ' from before restart:\n' + lines.join('\n') +
+      '\n\nArms could not be resumed; resubmit if you want to retry.');
+
+    this.goalStore.clear();
+    return recovered;
   }
 
   /**

@@ -554,3 +554,183 @@ describe('Coordinator re-planning on failure', () => {
     assert.deepEqual(taskB.dependsOn, [3]);
   });
 });
+
+// ---- In-flight goal persistence + recovery ----
+
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { GoalStore } = require('../src/mind/goal-store');
+const { Memory } = require('../src/mind/memory');
+
+function tempGoalStorePath() {
+  return path.join(os.tmpdir(), 'polpo-coord-goalstore-' + Date.now() + '-' + Math.random().toString(36).slice(2) + '.json');
+}
+
+function tempMemoryPath() {
+  return path.join(os.tmpdir(), 'polpo-coord-memory-' + Date.now() + '-' + Math.random().toString(36).slice(2) + '.jsonl');
+}
+
+describe('Coordinator goal persistence', () => {
+  let im, wm, coordinator, goalStorePath, memoryPath;
+  const MIND_ID = 'mind-persist';
+
+  beforeEach(() => {
+    im = createMockIM();
+    im.register({ id: MIND_ID, name: 'Alien Mind', agentType: 'mind' });
+    wm = new WorldModel(im, MIND_ID);
+    goalStorePath = tempGoalStorePath();
+    memoryPath = tempMemoryPath();
+  });
+
+  afterEach(() => {
+    if (coordinator) coordinator.destroy();
+    wm.destroy();
+    try { fs.unlinkSync(goalStorePath); } catch {}
+    try { fs.unlinkSync(memoryPath); } catch {}
+  });
+
+  it('persists a goal to the store while running', async () => {
+    const reasoner = createMockReasoner();
+    const goalStore = new GoalStore({ path: goalStorePath });
+    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, goalStore, mindInstanceId: MIND_ID });
+
+    im.register({ id: 'agent-1', name: 'Worker', agentType: 'claude' });
+    await coordinator.submitGoal('Persistent goal');
+
+    // Should be in the store while running (task assigned, agent busy)
+    const store2 = new GoalStore({ path: goalStorePath });
+    store2.load();
+    assert.equal(store2.size(), 1);
+    assert.equal(store2.getAll()[0].prompt, 'Persistent goal');
+    assert.equal(store2.getAll()[0].status, 'running');
+  });
+
+  it('removes the goal from the store on completion', async () => {
+    const reasoner = createMockReasoner();
+    const goalStore = new GoalStore({ path: goalStorePath });
+    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, goalStore, mindInstanceId: MIND_ID });
+
+    im.register({ id: 'agent-1', name: 'Worker', agentType: 'claude' });
+    await coordinator.submitGoal('Goal that finishes');
+    const task = coordinator.getActiveGoals()[0].plan.tasks[0];
+    // Simulate agent going busy then idle
+    im.updateStatus('agent-1', 'busy');
+    im.updateStatus('agent-1', 'idle');
+    // Coordinator awaits reasoner.evaluate asynchronously
+    await new Promise(function (r) { setTimeout(r, 30); });
+
+    const store2 = new GoalStore({ path: goalStorePath });
+    store2.load();
+    assert.equal(store2.size(), 0, 'completed goal should be removed from the store');
+  });
+
+  it('removes the goal from the store on cancel', async () => {
+    const reasoner = createMockReasoner();
+    const goalStore = new GoalStore({ path: goalStorePath });
+    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, goalStore, mindInstanceId: MIND_ID });
+
+    im.register({ id: 'agent-1', name: 'Worker', agentType: 'claude' });
+    await coordinator.submitGoal('Doomed goal');
+    const goalId = coordinator.getActiveGoals()[0].id;
+    coordinator.cancelGoal(goalId);
+
+    const store2 = new GoalStore({ path: goalStorePath });
+    store2.load();
+    assert.equal(store2.size(), 0);
+  });
+
+  it('persists task-level progress snapshots', async () => {
+    const reasoner = createMockReasoner({
+      tasks: [
+        { description: 'Step 1', agentType: 'claude', targetCwd: '/tmp', prompt: 'p1', dependsOn: [] },
+        { description: 'Step 2', agentType: 'claude', targetCwd: '/tmp', prompt: 'p2', dependsOn: [0] },
+      ],
+    });
+    const goalStore = new GoalStore({ path: goalStorePath });
+    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, goalStore, mindInstanceId: MIND_ID });
+
+    im.register({ id: 'agent-1', name: 'Worker', agentType: 'claude' });
+    await coordinator.submitGoal('Two steps');
+    // Complete step 1
+    const t1 = coordinator.getActiveGoals()[0].plan.tasks[0];
+    im.updateStatus('agent-1', 'busy');
+    im.updateStatus('agent-1', 'idle');
+    await new Promise(function (r) { setTimeout(r, 30); });
+
+    const store2 = new GoalStore({ path: goalStorePath });
+    store2.load();
+    // Goal is still running (step 2 not yet done), and step 1 should be persisted as completed
+    assert.equal(store2.size(), 1);
+    const persistedTasks = store2.getAll()[0].plan.tasks;
+    assert.equal(persistedTasks[0].status, 'completed');
+  });
+
+  it('recoverInterruptedGoals marks stored goals as interrupted and clears the store', async () => {
+    // Pre-seed the store as if from a previous run
+    const seedStore = new GoalStore({ path: goalStorePath });
+    seedStore.upsert({
+      id: 'goal-seed',
+      prompt: 'Old work',
+      status: 'running',
+      createdAt: Date.now() - 60000,
+      plan: { tasks: [
+        { id: 't1', description: 'done step', status: 'completed', result: null },
+        { id: 't2', description: 'in flight step', status: 'running', result: null },
+      ] },
+    });
+
+    const reasoner = createMockReasoner();
+    const memory = new Memory({ path: memoryPath });
+    const goalStore = new GoalStore({ path: goalStorePath });
+    goalStore.load();
+    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, memory, goalStore, mindInstanceId: MIND_ID });
+
+    const recovered = coordinator.recoverInterruptedGoals();
+    assert.equal(recovered.length, 1);
+    assert.equal(recovered[0], 'goal-seed');
+
+    // Store should now be empty
+    const check = new GoalStore({ path: goalStorePath });
+    check.load();
+    assert.equal(check.size(), 0);
+
+    // Memory should have a record of the interrupted goal
+    assert.equal(memory.size(), 1);
+    const recent = memory.getRecent(1)[0];
+    assert.equal(recent.goalPrompt, 'Old work');
+    assert.equal(recent.outcome, 'failed');
+
+    // Mind should have received a recovery report
+    const mindMessages = im.get(MIND_ID).conversation;
+    const reportMsg = mindMessages.find(function (m) { return m.content && m.content.indexOf('Recovered') === 0; });
+    assert.ok(reportMsg, 'mind should report recovery to the user');
+    assert.ok(reportMsg.content.indexOf('Old work') !== -1);
+    assert.ok(reportMsg.content.indexOf('1/2') !== -1, 'report should show task progress (1/2 completed)');
+  });
+
+  it('recoverInterruptedGoals is a no-op when the store is empty', () => {
+    const reasoner = createMockReasoner();
+    const goalStore = new GoalStore({ path: goalStorePath });
+    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, goalStore, mindInstanceId: MIND_ID });
+
+    const recovered = coordinator.recoverInterruptedGoals();
+    assert.deepEqual(recovered, []);
+    // No report message should have been emitted
+    const mindMessages = im.get(MIND_ID).conversation;
+    const reportMsg = mindMessages.find(function (m) { return m.content && m.content.indexOf('Recovered') === 0; });
+    assert.equal(reportMsg, undefined);
+  });
+
+  it('works without a goalStore (graceful degradation)', async () => {
+    const reasoner = createMockReasoner();
+    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, mindInstanceId: MIND_ID });
+
+    im.register({ id: 'agent-1', name: 'Worker', agentType: 'claude' });
+    await coordinator.submitGoal('No store goal');
+
+    // Recovery with no store should also be safe
+    const recovered = coordinator.recoverInterruptedGoals();
+    assert.deepEqual(recovered, []);
+  });
+});

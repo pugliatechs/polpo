@@ -17,15 +17,18 @@ class Watcher {
    * @param {object} opts.instanceManager
    * @param {string} opts.mindInstanceId - Mind's instance ID for reporting
    * @param {object} opts.policy - Policy object with thresholds
+   * @param {object} [opts.coordinator] - Coordinator (enables autonomous task cancellation)
    */
   constructor(opts) {
     this.worldModel = opts.worldModel;
     this.instanceManager = opts.instanceManager;
     this.mindInstanceId = opts.mindInstanceId;
     this.policy = opts.policy;
+    this.coordinator = opts.coordinator || null;
 
     this._timer = null;
     this._alerted = new Set(); // agentIds we already alerted about (avoid spam)
+    this._acted = new Set(); // agentIds we already auto-cancelled (one action per stuck episode)
     this._lastCheck = Date.now();
   }
 
@@ -66,11 +69,21 @@ class Watcher {
 
   /**
    * Detect agents that have been busy for longer than the threshold.
+   * Two stages, gated by policy:
+   *   1. Alert: warn the user once the stuckThreshold is crossed.
+   *   2. Act:   if autoActOnStuck is true and the agent is running a
+   *             coordinator-owned task, cancel that task once busy time
+   *             exceeds stuckThreshold * stuckActionMultiplier. The
+   *             coordinator's normal failure path will then re-plan or
+   *             abandon based on the reasoner's judgment.
    */
   _checkStuckAgents() {
     var snapshot = this.worldModel.getSnapshot();
     var now = Date.now();
     var threshold = this.policy.stuckThresholdMs || 15 * 60 * 1000;
+    var autoAct = !!this.policy.autoActOnStuck && this.coordinator !== null;
+    var multiplier = this.policy.stuckActionMultiplier > 0 ? this.policy.stuckActionMultiplier : 1;
+    var actionThreshold = threshold * multiplier;
 
     for (var i = 0; i < snapshot.agents.length; i++) {
       var agent = snapshot.agents[i];
@@ -80,6 +93,8 @@ class Watcher {
       if (!inst || !inst.lastActivity) continue;
 
       var busyDuration = now - inst.lastActivity;
+
+      // Stage 1: alert
       if (busyDuration > threshold && !this._alerted.has('stuck:' + agent.id)) {
         var minutes = Math.round(busyDuration / 60000);
         this._suggest(
@@ -88,6 +103,21 @@ class Watcher {
           'Consider aborting it or checking its output in the dashboard.'
         );
         this._alerted.add('stuck:' + agent.id);
+      }
+
+      // Stage 2: act (only once per stuck episode)
+      if (autoAct && busyDuration > actionThreshold && !this._acted.has(agent.id)) {
+        var failed = this.coordinator.failAgentTask(
+          agent.id,
+          'Auto-cancelled by watcher after ' + Math.round(busyDuration / 60000) + ' minutes of no activity'
+        );
+        if (failed) {
+          this._acted.add(agent.id);
+          this._suggest(
+            '🛑 Auto-cancelled the task on **' + agent.name + '** (stuck for ' +
+            Math.round(busyDuration / 60000) + ' min). The mind will retry, split, or abandon based on context.'
+          );
+        }
       }
     }
   }
@@ -129,6 +159,8 @@ class Watcher {
         var inst = this.instanceManager.get(agentId);
         if (inst && inst.status !== 'busy') {
           this._alerted.delete(alertKey);
+          // Also clear the acted flag so a future stuck episode can re-trigger
+          this._acted.delete(agentId);
         }
       }
       // Clear approval alert if no longer waiting
@@ -158,6 +190,7 @@ class Watcher {
   destroy() {
     this.stop();
     this._alerted.clear();
+    this._acted.clear();
   }
 }
 

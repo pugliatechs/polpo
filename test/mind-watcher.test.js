@@ -217,12 +217,181 @@ describe('Policies', () => {
   });
 
   it('all policies have required fields', () => {
-    var required = ['name', 'autoApproveSpawned', 'maxConcurrentTasks', 'maxSpawnedAgents', 'taskTimeoutMs', 'stuckThresholdMs', 'watcherIntervalMs'];
+    var required = ['name', 'autoApproveSpawned', 'maxConcurrentTasks', 'maxSpawnedAgents', 'taskTimeoutMs', 'stuckThresholdMs', 'watcherIntervalMs', 'autoActOnStuck', 'stuckActionMultiplier'];
     for (var key in POLICIES) {
       var p = POLICIES[key];
       for (var i = 0; i < required.length; i++) {
         assert.ok(p[required[i]] !== undefined, key + ' missing ' + required[i]);
       }
     }
+  });
+});
+
+// ---- Autonomous action ----
+
+describe('Watcher autonomous action on stuck agents', () => {
+  let im;
+  let wm;
+  let watcher;
+
+  beforeEach(() => {
+    im = createMockIM();
+    im.register({ id: MIND_ID, name: 'Mind', agentType: 'mind' });
+    wm = new WorldModel(im, MIND_ID);
+  });
+
+  afterEach(() => {
+    if (watcher) watcher.destroy();
+    wm.destroy();
+  });
+
+  function createMockCoordinator() {
+    return {
+      _calls: [],
+      _taskAgents: new Set(),
+      registerTask: function (agentId) { this._taskAgents.add(agentId); },
+      failAgentTask: function (agentId, reason) {
+        this._calls.push({ agentId: agentId, reason: reason });
+        if (this._taskAgents.has(agentId)) {
+          this._taskAgents.delete(agentId);
+          return true;
+        }
+        return false;
+      },
+    };
+  }
+
+  it('does NOT act when policy.autoActOnStuck is false', () => {
+    var policy = { stuckThresholdMs: 100, watcherIntervalMs: 30000, autoActOnStuck: false, stuckActionMultiplier: 2 };
+    var coordinator = createMockCoordinator();
+    watcher = new Watcher({ worldModel: wm, instanceManager: im, mindInstanceId: MIND_ID, policy: policy, coordinator: coordinator });
+
+    im.register({ id: 'a1', name: 'Stuck' });
+    coordinator.registerTask('a1');
+    im.updateStatus('a1', 'busy');
+    im.get('a1').lastActivity = Date.now() - 10000; // very stuck
+
+    watcher._check();
+
+    assert.equal(coordinator._calls.length, 0, 'coordinator should not be called when autoActOnStuck is false');
+  });
+
+  it('alerts but does NOT act before the action threshold (multiplier window)', () => {
+    var policy = { stuckThresholdMs: 100, watcherIntervalMs: 30000, autoActOnStuck: true, stuckActionMultiplier: 5 };
+    var coordinator = createMockCoordinator();
+    watcher = new Watcher({ worldModel: wm, instanceManager: im, mindInstanceId: MIND_ID, policy: policy, coordinator: coordinator });
+
+    im.register({ id: 'a1', name: 'Briefly stuck' });
+    coordinator.registerTask('a1');
+    im.updateStatus('a1', 'busy');
+    // Past the alert threshold (100ms) but well before action threshold (500ms)
+    im.get('a1').lastActivity = Date.now() - 200;
+
+    watcher._check();
+
+    var alerts = im.getConversation(MIND_ID, 10).filter(function (m) { return m.source === 'mind-watcher'; });
+    assert.equal(alerts.length, 1, 'should alert in stage 1');
+    assert.equal(coordinator._calls.length, 0, 'should NOT have acted yet');
+  });
+
+  it('acts when busy duration exceeds threshold * multiplier', () => {
+    var policy = { stuckThresholdMs: 100, watcherIntervalMs: 30000, autoActOnStuck: true, stuckActionMultiplier: 2 };
+    var coordinator = createMockCoordinator();
+    watcher = new Watcher({ worldModel: wm, instanceManager: im, mindInstanceId: MIND_ID, policy: policy, coordinator: coordinator });
+
+    im.register({ id: 'a1', name: 'Very stuck' });
+    coordinator.registerTask('a1');
+    im.updateStatus('a1', 'busy');
+    im.get('a1').lastActivity = Date.now() - 500; // > 100 * 2
+
+    watcher._check();
+
+    assert.equal(coordinator._calls.length, 1);
+    assert.equal(coordinator._calls[0].agentId, 'a1');
+    assert.ok(coordinator._calls[0].reason.indexOf('Auto-cancelled') !== -1);
+
+    var actionMsgs = im.getConversation(MIND_ID, 10).filter(function (m) {
+      return m.source === 'mind-watcher' && m.content.indexOf('Auto-cancelled') !== -1;
+    });
+    assert.equal(actionMsgs.length, 1, 'should report the cancellation');
+  });
+
+  it('only acts once per stuck episode', () => {
+    var policy = { stuckThresholdMs: 100, watcherIntervalMs: 30000, autoActOnStuck: true, stuckActionMultiplier: 2 };
+    var coordinator = createMockCoordinator();
+    watcher = new Watcher({ worldModel: wm, instanceManager: im, mindInstanceId: MIND_ID, policy: policy, coordinator: coordinator });
+
+    im.register({ id: 'a1', name: 'Stubborn' });
+    coordinator.registerTask('a1');
+    im.updateStatus('a1', 'busy');
+    im.get('a1').lastActivity = Date.now() - 500;
+
+    watcher._check();
+    watcher._check();
+    watcher._check();
+
+    assert.equal(coordinator._calls.length, 1, 'should only call coordinator once');
+  });
+
+  it('skips agents without an active coordinator task', () => {
+    var policy = { stuckThresholdMs: 100, watcherIntervalMs: 30000, autoActOnStuck: true, stuckActionMultiplier: 2 };
+    var coordinator = createMockCoordinator();
+    watcher = new Watcher({ worldModel: wm, instanceManager: im, mindInstanceId: MIND_ID, policy: policy, coordinator: coordinator });
+
+    // User session, not a mind task
+    im.register({ id: 'user-sess', name: 'User Session' });
+    im.updateStatus('user-sess', 'busy');
+    im.get('user-sess').lastActivity = Date.now() - 500;
+
+    watcher._check();
+
+    // Coordinator was called but returned false (no task) — no action message emitted
+    assert.equal(coordinator._calls.length, 1);
+    var actionMsgs = im.getConversation(MIND_ID, 10).filter(function (m) {
+      return m.source === 'mind-watcher' && m.content.indexOf('Auto-cancelled') !== -1;
+    });
+    assert.equal(actionMsgs.length, 0, 'no action message for a task we did not own');
+  });
+
+  it('does not act without a coordinator reference', () => {
+    var policy = { stuckThresholdMs: 100, watcherIntervalMs: 30000, autoActOnStuck: true, stuckActionMultiplier: 2 };
+    // No coordinator passed
+    watcher = new Watcher({ worldModel: wm, instanceManager: im, mindInstanceId: MIND_ID, policy: policy });
+
+    im.register({ id: 'a1', name: 'Stuck no coord' });
+    im.updateStatus('a1', 'busy');
+    im.get('a1').lastActivity = Date.now() - 500;
+
+    // Should not throw; alert only
+    watcher._check();
+
+    var alerts = im.getConversation(MIND_ID, 10).filter(function (m) { return m.source === 'mind-watcher'; });
+    assert.equal(alerts.length, 1);
+    assert.ok(alerts[0].content.indexOf('busy for') !== -1);
+  });
+
+  it('re-arms after the agent stops being busy', () => {
+    var policy = { stuckThresholdMs: 100, watcherIntervalMs: 30000, autoActOnStuck: true, stuckActionMultiplier: 2 };
+    var coordinator = createMockCoordinator();
+    watcher = new Watcher({ worldModel: wm, instanceManager: im, mindInstanceId: MIND_ID, policy: policy, coordinator: coordinator });
+
+    im.register({ id: 'a1', name: 'Round 1' });
+    coordinator.registerTask('a1');
+    im.updateStatus('a1', 'busy');
+    im.get('a1').lastActivity = Date.now() - 500;
+    watcher._check();
+    assert.equal(coordinator._calls.length, 1);
+
+    // Agent recovers
+    im.updateStatus('a1', 'idle');
+    watcher._check(); // cleanup pass clears the alerted/acted flags
+
+    // New stuck episode
+    coordinator.registerTask('a1');
+    im.updateStatus('a1', 'busy');
+    im.get('a1').lastActivity = Date.now() - 500;
+    watcher._check();
+
+    assert.equal(coordinator._calls.length, 2, 'should be able to act on a fresh stuck episode');
   });
 });

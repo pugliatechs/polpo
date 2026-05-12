@@ -16,6 +16,7 @@ const { Coordinator } = require('./coordinator');
 const { Watcher } = require('./watcher');
 const { AgentPool } = require('./agent-pool');
 const { Memory } = require('./memory');
+const { GoalStore } = require('./goal-store');
 const { loadPolicy } = require('./policies');
 
 /**
@@ -77,6 +78,15 @@ function createMind(instanceManager, options) {
     console.error('[mind] Memory load failed:', err.message);
   }
 
+  // Durable goal store for in-flight recovery across server restarts.
+  // Arms can't survive a restart, so recovery reports interrupted goals
+  // and writes them to long-term memory (it does not resume them).
+  var goalStore = new GoalStore();
+  goalStore.load();
+  if (options.verbose && goalStore.size() > 0) {
+    console.log('[mind] Goal store has ' + goalStore.size() + ' in-flight goal(s) to recover');
+  }
+
   // Create coordinator (goal/task lifecycle)
   var coordinator = new Coordinator({
     instanceManager: instanceManager,
@@ -84,8 +94,17 @@ function createMind(instanceManager, options) {
     reasoner: reasoner,
     agentPool: agentPool,
     memory: memory,
+    goalStore: goalStore,
     mindInstanceId: mindId,
   });
+
+  // Recover any goals that were in-flight at the time of the last shutdown.
+  // Must run after the mind is registered so the report appears in its chat.
+  try {
+    coordinator.recoverInterruptedGoals();
+  } catch (err) {
+    console.error('[mind] Goal recovery failed:', err.message);
+  }
 
   // Log agent events in verbose mode
   if (options.verbose) {
@@ -187,6 +206,7 @@ function createMind(instanceManager, options) {
     instanceManager: instanceManager,
     mindInstanceId: mindId,
     policy: policy,
+    coordinator: coordinator,
   });
   watcher.start();
 
