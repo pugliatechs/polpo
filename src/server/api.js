@@ -7,9 +7,13 @@ const { execFile } = require('child_process');
 const { scanSessions, loadHistory } = require('./sessions');
 const { createAgent } = require('../agent/agent-factory');
 const { CostTracker } = require('./cost-tracker');
+const {
+  UPLOAD_DIR,
+  DASHBOARD_MAX_UPLOAD_SIZE,
+  SAFE_INLINE_IMAGE_EXTS,
+} = require('./upload-constants');
 
-const UPLOAD_DIR = path.join(os.tmpdir(), 'polpo-uploads');
-const MAX_UPLOAD_SIZE = 10 * 1024 * 1024; // 10MB decoded
+const MAX_UPLOAD_SIZE = DASHBOARD_MAX_UPLOAD_SIZE; // back-compat local alias
 const GEMINI_TMP_DIR = path.join(os.homedir(), '.gemini', 'tmp');
 
 /**
@@ -141,12 +145,14 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
     if (!fs.existsSync(filePath)) {
       return res.status(404).json({ error: 'File not found' });
     }
-    // Prevent stored XSS: only serve images inline, force-download everything else
+    // Prevent stored XSS: only serve images inline, force-download everything else.
+    // The inline-safe whitelist is shared with the gateway via upload-constants.js
+    // so adding a format (e.g. .avif) updates both surfaces at once.
     const ext = path.extname(filePath).toLowerCase();
-    const safeImageExts = ['.jpg', '.jpeg', '.png', '.gif', '.webp'];
-    if (!safeImageExts.includes(ext)) {
+    if (!SAFE_INLINE_IMAGE_EXTS.includes(ext)) {
       res.set('Content-Disposition', 'attachment');
     }
+    res.set('X-Content-Type-Options', 'nosniff');
     res.sendFile(filePath);
   });
 

@@ -78,6 +78,78 @@ function timingSafeEqual(a, b) {
   return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
 }
 
+/**
+ * Stable fingerprint of a bearer token for rate-limit bucketing and
+ * upload ownership scoping. SHA-256 hex, full 64 chars.
+ *
+ * Why hash: storing tokens raw on the server (in a Map keyed by token)
+ * would mean every rate-limit lookup compares secrets. Hashing
+ * narrows the blast radius if the in-memory map is ever observed and
+ * forward-compatible with persisting bucket state.
+ */
+function tokenFingerprint(token) {
+  if (typeof token !== 'string' || token.length === 0) return null;
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+/**
+ * Create a per-token rate limiter middleware. Buckets are keyed by
+ * sha256(bearer-token). Returns 429 with Retry-After when the cap is
+ * exceeded. Independent of IP, which is useless behind a shared
+ * gateway key.
+ *
+ * @param {object} opts
+ * @param {number} opts.windowMs
+ * @param {number} opts.max - requests allowed per window per token
+ * @param {() => number} [opts.now] - injectable clock for tests
+ */
+function createPerTokenRateLimit(opts) {
+  const windowMs = opts && opts.windowMs;
+  const max = opts && opts.max;
+  if (!Number.isFinite(windowMs) || windowMs <= 0) {
+    throw new Error('createPerTokenRateLimit: windowMs must be > 0');
+  }
+  if (!Number.isFinite(max) || max <= 0) {
+    throw new Error('createPerTokenRateLimit: max must be > 0');
+  }
+  const now = (opts && opts.now) || Date.now;
+  const buckets = new Map(); // fp -> { count, resetAt }
+
+  // Periodic cleanup so buckets don't grow unbounded.
+  const cleanup = setInterval(() => {
+    const t = now();
+    for (const [k, b] of buckets) {
+      if (t > b.resetAt) buckets.delete(k);
+    }
+  }, Math.max(windowMs, 60_000));
+  if (typeof cleanup.unref === 'function') cleanup.unref();
+
+  const middleware = (req, res, next) => {
+    const token = extractBearerToken(req);
+    if (!token) {
+      // The auth middleware will reject this; pass through so the 401
+      // is consistent. Don't bucket-charge an unauth'd call.
+      return next();
+    }
+    const fp = tokenFingerprint(token);
+    const t = now();
+    let b = buckets.get(fp);
+    if (!b || t > b.resetAt) {
+      b = { count: 0, resetAt: t + windowMs };
+      buckets.set(fp, b);
+    }
+    b.count++;
+    if (b.count > max) {
+      res.set('Retry-After', String(Math.ceil((b.resetAt - t) / 1000)));
+      return res.status(429).json({ error: 'rate_limited', retryAfterMs: b.resetAt - t });
+    }
+    next();
+  };
+  middleware._buckets = buckets;     // test introspection
+  middleware._cleanup = cleanup;     // test cleanup
+  return middleware;
+}
+
 function extractBearerToken(req) {
   const header = req.headers && req.headers['authorization'];
   if (typeof header !== 'string') return null;
@@ -113,4 +185,6 @@ module.exports = {
   extractBearerToken,
   createGatewayAuthMiddleware,
   timingSafeEqual,
+  tokenFingerprint,
+  createPerTokenRateLimit,
 };

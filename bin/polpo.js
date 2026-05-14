@@ -63,6 +63,12 @@ function printHelp() {
                     (printed on first start, persisted to
                     ~/.config/polpo/gateway.json).
 
+  GATEWAY ENV VARS (only relevant with --gateway or polpo gateway)
+    POLPO_GATEWAY_KEY            Override the persisted API key.
+    POLPO_GATEWAY_MAX_CONCURRENT Max in-flight tasks (default 4).
+    POLPO_GATEWAY_MAX_TIMEOUT_MS Hard cap per-task timeout (default 30min).
+    POLPO_GATEWAY_MAX_UPLOAD_SIZE Per-upload byte cap (default 25MB).
+
   AGENT OPTIONS
     --name <name>       Display name for this instance
     --type <type>       Instance type: terminal | vscode (default: terminal)

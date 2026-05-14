@@ -228,24 +228,38 @@ function createServer(options = {}) {
   if (options.gateway) {
     const { loadOrCreateGatewayKey } = require('./gateway-auth');
     const { GatewayTaskManager } = require('./gateway-tasks');
+    const { GatewayUploadStore } = require('./gateway-uploads');
+    const { GatewayArtifactStore } = require('./gateway-artifacts');
     const { createGatewayRouter } = require('./gateway');
 
     const keyInfo = loadOrCreateGatewayKey({
       key: options.gateway.key || undefined,
       configPath: options.gateway.configPath || undefined,
     });
+
+    // File-transfer stores (v1.2.0). Both have their own root dirs in
+    // tmpdir; GC for uploads runs every 5 min, scoped per process.
+    const uploadStore = new GatewayUploadStore({
+      maxBytes: parseInt(process.env.POLPO_GATEWAY_MAX_UPLOAD_SIZE, 10) || undefined,
+      autoStartGc: true,
+    });
+    const artifactStore = new GatewayArtifactStore({});
+
     const taskManager = new GatewayTaskManager({
       instanceManager,
       hubPort: port,
       hubToken: authState.enabled ? authState.token : null,
       maxConcurrent: options.gateway.maxConcurrent || parseInt(process.env.POLPO_GATEWAY_MAX_CONCURRENT, 10) || 4,
       maxTimeoutMs: options.gateway.maxTimeoutMs || parseInt(process.env.POLPO_GATEWAY_MAX_TIMEOUT_MS, 10) || undefined,
+      uploadStore,
+      artifactStore,
     });
     app.use('/v1', createGatewayRouter({
       taskManager,
       getKey: () => keyInfo.key,
+      uploadStore,
     }));
-    gatewayState = { keyInfo, taskManager };
+    gatewayState = { keyInfo, taskManager, uploadStore, artifactStore };
   }
 
   // SPA fallback — serve index.html for non-API/non-gateway routes
@@ -299,8 +313,9 @@ function createServer(options = {}) {
     },
     stop() {
       if (mind) { try { mind.destroy(); } catch {} }
-      if (gatewayState && gatewayState.taskManager) {
+      if (gatewayState) {
         try { gatewayState.taskManager.destroy(); } catch {}
+        if (gatewayState.uploadStore) try { gatewayState.uploadStore.destroy(); } catch {}
       }
       return new Promise((resolve) => {
         if (wss.scanner) wss.scanner.stop();

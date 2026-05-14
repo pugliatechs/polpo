@@ -110,6 +110,37 @@ describe('GatewayTaskManager: validation', () => {
     );
   });
 
+  it('rejects relative cwd', async () => {
+    await assert.rejects(
+      () => tm.createTask({ agentType: 'claude', cwd: './relative/path', prompt: 'x' }),
+      /cwd_must_be_absolute/
+    );
+  });
+
+  it('rejects cwd that does not exist on the host', async () => {
+    const ghostPath = '/tmp/polpo-test-nonexistent-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+    await assert.rejects(
+      () => tm.createTask({ agentType: 'claude', cwd: ghostPath, prompt: 'x' }),
+      (err) => err.code === 'cwd_does_not_exist' && err.detail === ghostPath
+    );
+  });
+
+  it('rejects cwd that points to a file, not a directory', async () => {
+    const fs = require('fs');
+    const path = require('path');
+    const os = require('os');
+    const filePath = path.join(os.tmpdir(), 'polpo-test-file-' + Date.now());
+    fs.writeFileSync(filePath, 'hi');
+    try {
+      await assert.rejects(
+        () => tm.createTask({ agentType: 'claude', cwd: filePath, prompt: 'x' }),
+        /cwd_not_a_directory/
+      );
+    } finally {
+      try { fs.unlinkSync(filePath); } catch {}
+    }
+  });
+
   it('rejects missing prompt', async () => {
     await assert.rejects(
       () => tm.createTask({ agentType: 'claude', cwd: '/tmp', prompt: '   ' }),
@@ -334,5 +365,288 @@ describe('GatewayTaskManager: lifecycle', () => {
     tm.destroy();
     // Instance should be unregistered
     assert.equal(im.get(aid), null);
+  });
+});
+
+// ---- Bidirectional file transfer: attachments + artifacts ----
+
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const crypto = require('crypto');
+const { GatewayUploadStore } = require('../src/server/gateway-uploads');
+const { GatewayArtifactStore } = require('../src/server/gateway-artifacts');
+const { UPLOAD_DIR } = require('../src/server/upload-constants');
+
+function tempRoot(label) {
+  return path.join(os.tmpdir(), 'polpo-' + label + '-' + Date.now() + '-' + Math.random().toString(36).slice(2));
+}
+
+const FP_A = crypto.createHash('sha256').update('A-key').digest('hex');
+const FP_B = crypto.createHash('sha256').update('B-key').digest('hex');
+
+describe('GatewayTaskManager: validateInput for attachments + captureArtifacts', () => {
+  let im, tm;
+  beforeEach(() => {
+    im = createMockIM();
+    tm = new GatewayTaskManager({
+      instanceManager: im, hubPort: 7890,
+      createAgent: (type, opts) => createFakeAgent(im, type, opts),
+      waitForSocket: async () => {},
+    });
+  });
+  afterEach(() => tm.destroy());
+
+  it('rejects attachments that is not an array', async () => {
+    await assert.rejects(
+      () => tm.createTask({ agentType: 'claude', cwd: '/tmp', prompt: 'x', attachments: 'nope' }),
+      /invalid_attachments/);
+  });
+
+  it('rejects malformed uploadId', async () => {
+    await assert.rejects(
+      () => tm.createTask({ agentType: 'claude', cwd: '/tmp', prompt: 'x', attachments: [{ uploadId: 'bad' }] }),
+      /invalid_upload_id/);
+  });
+
+  it('rejects duplicate uploadIds', async () => {
+    const dup = 'u-' + crypto.randomUUID();
+    await assert.rejects(
+      () => tm.createTask({ agentType: 'claude', cwd: '/tmp', prompt: 'x',
+        attachments: [{ uploadId: dup }, { uploadId: dup }] }),
+      /duplicate_attachment/);
+  });
+
+  it('rejects more than 20 attachments', async () => {
+    const many = Array.from({ length: 21 }, () => ({ uploadId: 'u-' + crypto.randomUUID() }));
+    await assert.rejects(
+      () => tm.createTask({ agentType: 'claude', cwd: '/tmp', prompt: 'x', attachments: many }),
+      /too_many_attachments/);
+  });
+
+  it('rejects non-boolean captureArtifacts', async () => {
+    await assert.rejects(
+      () => tm.createTask({ agentType: 'claude', cwd: '/tmp', prompt: 'x', captureArtifacts: 'yes' }),
+      /invalid_capture_artifacts/);
+  });
+
+  it('rejects captureArtifacts when no artifact store wired', async () => {
+    await assert.rejects(
+      () => tm.createTask({ agentType: 'claude', cwd: '/tmp', prompt: 'x', captureArtifacts: true }),
+      /artifacts_not_supported/);
+  });
+
+  it('rejects attachments when no upload store wired', async () => {
+    await assert.rejects(
+      () => tm.createTask({ agentType: 'claude', cwd: '/tmp', prompt: 'x',
+        attachments: [{ uploadId: 'u-' + crypto.randomUUID() }] }),
+      /uploads_not_supported/);
+  });
+});
+
+describe('GatewayTaskManager: with attachments', () => {
+  let im, tm, uploadStore, uploadRoot;
+  beforeEach(() => {
+    im = createMockIM();
+    uploadRoot = tempRoot('uploads');
+    uploadStore = new GatewayUploadStore({ root: uploadRoot });
+    tm = new GatewayTaskManager({
+      instanceManager: im, hubPort: 7890,
+      uploadStore,
+      createAgent: (type, opts) => createFakeAgent(im, type, opts),
+      waitForSocket: async () => {},
+    });
+  });
+  afterEach(() => {
+    tm.destroy();
+    uploadStore.destroy();
+    try { fs.rmSync(uploadRoot, { recursive: true, force: true }); } catch {}
+    // Also clean up any task-scoped copies that escaped
+    try {
+      for (const f of fs.readdirSync(UPLOAD_DIR)) {
+        if (f.startsWith('gtask-')) {
+          try { fs.unlinkSync(path.join(UPLOAD_DIR, f)); } catch {}
+        }
+      }
+    } catch {}
+  });
+
+  it('copies upload into UPLOAD_DIR and passes path through to sendToAgent', async () => {
+    const up = uploadStore.put({
+      buffer: Buffer.from('hello attachment', 'utf8'),
+      filename: 'note.txt', mediaType: 'text/plain', tokenFingerprint: FP_A,
+    });
+    const { taskId } = await tm.createTask({
+      agentType: 'claude', cwd: '/tmp', prompt: 'use the attached file',
+      attachments: [{ uploadId: up.uploadId }],
+    }, { tokenFingerprint: FP_A });
+
+    const promptSent = im._sent.find(s => s.message.type === 'prompt');
+    assert.ok(promptSent);
+    assert.equal(promptSent.message.attachments.length, 1);
+    const att = promptSent.message.attachments[0];
+    assert.ok(att.path.startsWith(UPLOAD_DIR + path.sep), 'attachment path must be under UPLOAD_DIR');
+    assert.ok(att.path.includes(taskId), 'task-scoped name');
+    assert.equal(att.filename, 'note.txt');
+    // The file actually exists with correct content
+    const onDisk = fs.readFileSync(att.path, 'utf8');
+    assert.equal(onDisk, 'hello attachment');
+  });
+
+  it('refuses to bind another caller\'s upload (cross-token)', async () => {
+    const up = uploadStore.put({
+      buffer: Buffer.from('A-private', 'utf8'),
+      filename: 'a.txt', mediaType: 'text/plain', tokenFingerprint: FP_A,
+    });
+    await assert.rejects(
+      () => tm.createTask({
+        agentType: 'claude', cwd: '/tmp', prompt: 'x',
+        attachments: [{ uploadId: up.uploadId }],
+      }, { tokenFingerprint: FP_B }),
+      (err) => err.code === 'upload_forbidden');
+  });
+
+  it('returns upload_not_found for unknown uploadId', async () => {
+    await assert.rejects(
+      () => tm.createTask({
+        agentType: 'claude', cwd: '/tmp', prompt: 'x',
+        attachments: [{ uploadId: 'u-' + crypto.randomUUID() }],
+      }, { tokenFingerprint: FP_A }),
+      (err) => err.code === 'upload_not_found');
+  });
+
+  it('pins uploads while task is running and releases on finalize', async () => {
+    const up = uploadStore.put({
+      buffer: Buffer.from('x'), filename: 'x.txt', mediaType: 'text/plain', tokenFingerprint: FP_A,
+    });
+    const { taskId } = await tm.createTask({
+      agentType: 'claude', cwd: '/tmp', prompt: 'x',
+      attachments: [{ uploadId: up.uploadId }],
+    }, { tokenFingerprint: FP_A });
+    assert.ok(uploadStore._pinned.has(up.uploadId));
+
+    const aid = tm.getTask(taskId).agentInstanceId;
+    im.updateStatus(aid, 'busy');
+    im.updateStatus(aid, 'idle');
+    assert.equal(tm.getTask(taskId).status, 'completed');
+    assert.equal(uploadStore._pinned.has(up.uploadId), false, 'pin released on finalize');
+  });
+
+  it('removes task-scoped UPLOAD_DIR copies on finalize', async () => {
+    const up = uploadStore.put({
+      buffer: Buffer.from('x'), filename: 'x.txt', mediaType: 'text/plain', tokenFingerprint: FP_A,
+    });
+    const { taskId } = await tm.createTask({
+      agentType: 'claude', cwd: '/tmp', prompt: 'x',
+      attachments: [{ uploadId: up.uploadId }],
+    }, { tokenFingerprint: FP_A });
+    const copyPath = im._sent[0].message.attachments[0].path;
+    assert.equal(fs.existsSync(copyPath), true);
+
+    const aid = tm.getTask(taskId).agentInstanceId;
+    im.updateStatus(aid, 'busy');
+    im.updateStatus(aid, 'idle');
+    assert.equal(fs.existsSync(copyPath), false, 'attachment copy removed after finalize');
+  });
+});
+
+describe('GatewayTaskManager: with captureArtifacts', () => {
+  let im, tm, artifactStore, artifactRoot;
+  beforeEach(() => {
+    im = createMockIM();
+    artifactRoot = tempRoot('artifacts');
+    artifactStore = new GatewayArtifactStore({ root: artifactRoot });
+    tm = new GatewayTaskManager({
+      instanceManager: im, hubPort: 7890,
+      artifactStore,
+      createAgent: (type, opts) => createFakeAgent(im, type, opts),
+      waitForSocket: async () => {},
+    });
+  });
+  afterEach(() => {
+    tm.destroy();
+    try { fs.rmSync(artifactRoot, { recursive: true, force: true }); } catch {}
+  });
+
+  it('creates the artifacts dir and prepends the <polpo:artifacts> directive', async () => {
+    const { taskId } = await tm.createTask({
+      agentType: 'claude', cwd: '/tmp', prompt: 'do the thing',
+      captureArtifacts: true,
+    }, { tokenFingerprint: FP_A });
+
+    const promptSent = im._sent.find(s => s.message.type === 'prompt');
+    assert.ok(promptSent);
+    assert.ok(promptSent.message.text.startsWith('<polpo:artifacts'),
+      'directive must lead the prompt');
+    assert.ok(promptSent.message.text.includes('</polpo:artifacts>'));
+    assert.ok(promptSent.message.text.endsWith('do the thing'));
+    // Dir actually created
+    const dir = path.join(artifactRoot, taskId, 'write');
+    assert.ok(fs.statSync(dir).isDirectory());
+  });
+
+  it('seals artifacts on finalize and emits SSE artifacts event before done', async () => {
+    const { taskId } = await tm.createTask({
+      agentType: 'claude', cwd: '/tmp', prompt: 'p', captureArtifacts: true,
+    }, { tokenFingerprint: FP_A });
+    const aid = tm.getTask(taskId).agentInstanceId;
+    const writeDir = path.join(artifactRoot, taskId, 'write');
+
+    const events = [];
+    tm.subscribe(taskId, (e) => events.push(e));
+
+    // Agent runs, writes an output file, returns to idle
+    fs.writeFileSync(path.join(writeDir, 'summary.md'), '# done');
+    im.updateStatus(aid, 'busy');
+    im.updateStatus(aid, 'idle');
+
+    const artIdx = events.findIndex(e => e.type === 'artifacts');
+    const doneIdx = events.findIndex(e => e.type === 'done');
+    assert.ok(artIdx >= 0, 'artifacts event emitted');
+    assert.ok(doneIdx >= 0, 'done event emitted');
+    assert.ok(artIdx < doneIdx, 'artifacts must precede done');
+    assert.equal(events[artIdx].data.length, 1);
+    assert.equal(events[artIdx].data[0].name, 'summary.md');
+  });
+
+  it('listArtifacts/openArtifact enforce token-fingerprint match', async () => {
+    const { taskId } = await tm.createTask({
+      agentType: 'claude', cwd: '/tmp', prompt: 'p', captureArtifacts: true,
+    }, { tokenFingerprint: FP_A });
+    const aid = tm.getTask(taskId).agentInstanceId;
+    fs.writeFileSync(path.join(artifactRoot, taskId, 'write', 'r.txt'), 'data');
+    im.updateStatus(aid, 'busy');
+    im.updateStatus(aid, 'idle');
+
+    // Wrong token: forbidden
+    assert.throws(() => tm.listArtifacts(taskId, FP_B),
+      (err) => err.code === 'task_forbidden');
+    assert.throws(() => tm.openArtifact(taskId, 'r.txt', FP_B),
+      (err) => err.code === 'task_forbidden');
+
+    // Right token: works. Drain the stream so the fd closes before afterEach rmrf.
+    const list = tm.listArtifacts(taskId, FP_A);
+    assert.equal(list.length, 1);
+    const opened = tm.openArtifact(taskId, 'r.txt', FP_A);
+    for await (const _ of opened.stream) { /* drain */ }
+  });
+
+  it('refuses openArtifact while task is still running', async () => {
+    const { taskId } = await tm.createTask({
+      agentType: 'claude', cwd: '/tmp', prompt: 'p', captureArtifacts: true,
+    }, { tokenFingerprint: FP_A });
+    assert.throws(() => tm.openArtifact(taskId, 'x.txt', FP_A),
+      (err) => err.code === 'task_not_terminal');
+  });
+
+  it('seals an empty list when no files were written', async () => {
+    const { taskId } = await tm.createTask({
+      agentType: 'claude', cwd: '/tmp', prompt: 'p', captureArtifacts: true,
+    }, { tokenFingerprint: FP_A });
+    const aid = tm.getTask(taskId).agentInstanceId;
+    im.updateStatus(aid, 'busy');
+    im.updateStatus(aid, 'idle');
+    const list = tm.listArtifacts(taskId, FP_A);
+    assert.deepEqual(list, []);
   });
 });

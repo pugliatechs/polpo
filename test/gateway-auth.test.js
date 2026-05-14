@@ -11,6 +11,8 @@ const {
   extractBearerToken,
   createGatewayAuthMiddleware,
   timingSafeEqual,
+  tokenFingerprint,
+  createPerTokenRateLimit,
 } = require('../src/server/gateway-auth');
 
 function tempConfigPath() {
@@ -227,5 +229,107 @@ describe('gateway-auth: createGatewayAuthMiddleware', () => {
     mw({ headers: { authorization: 'Bearer old-key' } }, res2, () => { called = true; });
     assert.equal(called, false);
     assert.equal(res2.statusCode, 401);
+  });
+});
+
+describe('gateway-auth: tokenFingerprint', () => {
+  it('returns 64-char hex sha256', () => {
+    const fp = tokenFingerprint('the-key');
+    assert.equal(typeof fp, 'string');
+    assert.equal(fp.length, 64);
+    assert.match(fp, /^[0-9a-f]{64}$/);
+  });
+
+  it('is deterministic', () => {
+    assert.equal(tokenFingerprint('abc'), tokenFingerprint('abc'));
+  });
+
+  it('differs between tokens', () => {
+    assert.notEqual(tokenFingerprint('a'), tokenFingerprint('b'));
+  });
+
+  it('returns null for invalid inputs', () => {
+    assert.equal(tokenFingerprint(''), null);
+    assert.equal(tokenFingerprint(undefined), null);
+    assert.equal(tokenFingerprint(42), null);
+  });
+});
+
+describe('gateway-auth: createPerTokenRateLimit', () => {
+  function makeRes() {
+    return {
+      statusCode: 200, headers: {}, body: null,
+      status(code) { this.statusCode = code; return this; },
+      json(b) { this.body = b; return this; },
+      set(name, value) { this.headers[name] = value; return this; },
+    };
+  }
+
+  it('rejects bad options', () => {
+    assert.throws(() => createPerTokenRateLimit({ windowMs: 0, max: 1 }));
+    assert.throws(() => createPerTokenRateLimit({ windowMs: 100, max: 0 }));
+    assert.throws(() => createPerTokenRateLimit({}));
+  });
+
+  it('passes through requests with no bearer token (auth handles 401)', () => {
+    const mw = createPerTokenRateLimit({ windowMs: 1000, max: 1, now: () => 0 });
+    const res = makeRes();
+    let called = false;
+    mw({ headers: {} }, res, () => { called = true; });
+    assert.equal(called, true);
+    clearInterval(mw._cleanup);
+  });
+
+  it('allows requests up to max within the window', () => {
+    let now = 0;
+    const mw = createPerTokenRateLimit({ windowMs: 1000, max: 3, now: () => now });
+    const req = { headers: { authorization: 'Bearer my-key' } };
+    let callCount = 0;
+    const next = () => { callCount++; };
+    for (let i = 0; i < 3; i++) mw(req, makeRes(), next);
+    assert.equal(callCount, 3);
+    clearInterval(mw._cleanup);
+  });
+
+  it('returns 429 when max is exceeded, with Retry-After header', () => {
+    let now = 0;
+    const mw = createPerTokenRateLimit({ windowMs: 5000, max: 2, now: () => now });
+    const req = { headers: { authorization: 'Bearer my-key' } };
+    mw(req, makeRes(), () => {});
+    mw(req, makeRes(), () => {});
+    const res = makeRes();
+    mw(req, res, () => { assert.fail('should not pass'); });
+    assert.equal(res.statusCode, 429);
+    assert.equal(res.body.error, 'rate_limited');
+    assert.ok(res.headers['Retry-After']);
+    clearInterval(mw._cleanup);
+  });
+
+  it('buckets per token, not globally', () => {
+    let now = 0;
+    const mw = createPerTokenRateLimit({ windowMs: 1000, max: 1, now: () => now });
+    const reqA = { headers: { authorization: 'Bearer key-A' } };
+    const reqB = { headers: { authorization: 'Bearer key-B' } };
+    let okCount = 0;
+    mw(reqA, makeRes(), () => okCount++);
+    mw(reqB, makeRes(), () => okCount++);
+    assert.equal(okCount, 2, 'each token gets its own bucket');
+    clearInterval(mw._cleanup);
+  });
+
+  it('refills after the window expires', () => {
+    let now = 0;
+    const mw = createPerTokenRateLimit({ windowMs: 100, max: 1, now: () => now });
+    const req = { headers: { authorization: 'Bearer my-key' } };
+    mw(req, makeRes(), () => {});
+    const res2 = makeRes();
+    mw(req, res2, () => { assert.fail('should be limited'); });
+    assert.equal(res2.statusCode, 429);
+
+    now = 200; // past the window
+    let called = false;
+    mw(req, makeRes(), () => { called = true; });
+    assert.equal(called, true);
+    clearInterval(mw._cleanup);
   });
 });
