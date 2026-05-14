@@ -398,6 +398,19 @@ main {
   background: rgba(34,197,94,0.15);
   color: #22c55e;
 }
+.agent-mind {
+  background: rgba(168,85,247,0.15);
+  color: #a855f7;
+}
+
+#mind-section {
+  border-top: 1px solid rgba(168,85,247,0.15);
+  border-bottom: 1px solid rgba(168,85,247,0.15);
+  background: rgba(168,85,247,0.03);
+}
+#mind-section .section-header h3 {
+  color: #a855f7;
+}
 
 .card-approval {
   margin-top: 10px;

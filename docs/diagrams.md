@@ -218,3 +218,87 @@ sequenceDiagram
     Bridge->>Hook: approval_response
     Hook->>CC: allow / block
 ```
+
+## Gateway Flow (Bidirectional File Transfer)
+
+```mermaid
+sequenceDiagram
+    participant Caller as External Caller<br/>(script, bot, agent)
+    participant GW as Polpo Gateway<br/>/v1/*
+    participant US as UploadStore
+    participant AS as ArtifactStore
+    participant Arm as Spawned Agent
+    participant Phone as Phone Dashboard
+
+    Note over Caller,Phone: Bearer POLPO_GATEWAY_KEY on every request
+
+    Caller->>GW: POST /v1/uploads
+    GW->>US: put(buffer, tokenFingerprint)
+    US-->>GW: uploadId + sha256 + expiresAt
+    GW-->>Caller: 201
+
+    Caller->>GW: POST /v1/tasks { attachments, captureArtifacts:true }
+    GW->>US: get(uploadId, fingerprint)
+    Note over GW: Copies upload into UPLOAD_DIR<br/>(reuses dashboard trust boundary)
+    GW->>AS: createDir(taskId)
+    GW->>Arm: spawn + inject <polpo:artifacts> directive
+    GW-->>Caller: 201 taskId
+
+    Caller->>GW: GET /v1/tasks/:id/stream
+    Arm-->>GW: assistant output
+    GW-->>Caller: event: chunk
+
+    Note over Arm: Arm writes files<br/>into artifacts dir
+    Arm-->>GW: status: idle
+    GW->>AS: sealOnFinalize(taskId)
+    Note over AS: lstat + size caps + hardlink to sealed/<br/>+ chmod 0o400 (TOCTOU defence)
+    GW-->>Caller: event: artifacts
+    GW-->>Caller: event: done
+
+    Caller->>GW: GET /v1/tasks/:id/artifacts/:name
+    GW->>AS: openSealed(taskId, name, fingerprint)
+    GW-->>Caller: 200 + attachment + nosniff
+
+    Note over Phone: Phone sees the arm as<br/>"Gateway: &lt;client&gt;" — can<br/>observe or abort live
+```
+
+## Alien Mind Flow (Multi-Agent Coordination)
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Mind as Alien Mind<br/>(instance)
+    participant Reasoner as Reasoner<br/>(Claude subprocess)
+    participant Store as Memory + GoalStore
+    participant Pool as AgentPool
+    participant ArmA as Arm A
+    participant ArmB as Arm B
+
+    User->>Mind: Goal
+    Mind->>Store: snapshot (planning) + search past goals
+    Store-->>Mind: relevant memory
+    Mind->>Reasoner: plan(worldSummary + memory, goal)
+    Reasoner-->>Mind: { tasks: [A,B], deps: B→A }
+    Mind->>Store: snapshot (running)
+
+    Mind->>Pool: acquire(A)
+    Pool-->>ArmA: spawn
+    Mind->>ArmA: prompt
+    ArmA-->>Mind: busy → output → idle
+
+    Note over Mind: Inter-arm context:<br/>extract A's trailing output
+    Mind->>Pool: acquire(B)
+    Pool-->>ArmB: spawn
+    Mind->>ArmB: prompt + <previous_task_results>A</...>
+    ArmB-->>Mind: busy → output → idle
+
+    alt task fails
+        Mind->>Reasoner: replan(task, reason, partial)
+        Reasoner-->>Mind: retry | split | abandon
+    end
+
+    Mind->>Store: save completed goal + remove in-flight
+    Mind-->>User: result + summaries
+
+    Note over Mind: Watcher (30s) alerts on stuck arms.<br/>If policy.autoActOnStuck, calls<br/>coordinator.failAgentTask() at<br/>stuckThreshold × multiplier.
+```

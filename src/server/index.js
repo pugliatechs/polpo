@@ -223,15 +223,69 @@ function createServer(options = {}) {
   // API routes
   app.use('/api', createApiRouter(instanceManager, getAuthState, pushManager));
 
-  // SPA fallback — serve index.html for non-API routes
+  // Optional: programmatic gateway (/v1/*) for external callers
+  let gatewayState = null;
+  if (options.gateway) {
+    const { loadOrCreateGatewayKey } = require('./gateway-auth');
+    const { GatewayTaskManager } = require('./gateway-tasks');
+    const { GatewayUploadStore } = require('./gateway-uploads');
+    const { GatewayArtifactStore } = require('./gateway-artifacts');
+    const { createGatewayRouter } = require('./gateway');
+
+    const keyInfo = loadOrCreateGatewayKey({
+      key: options.gateway.key || undefined,
+      configPath: options.gateway.configPath || undefined,
+    });
+
+    // File-transfer stores (v1.2.0). Both have their own root dirs in
+    // tmpdir; GC for uploads runs every 5 min, scoped per process.
+    const uploadStore = new GatewayUploadStore({
+      maxBytes: parseInt(process.env.POLPO_GATEWAY_MAX_UPLOAD_SIZE, 10) || undefined,
+      autoStartGc: true,
+    });
+    const artifactStore = new GatewayArtifactStore({});
+
+    const taskManager = new GatewayTaskManager({
+      instanceManager,
+      hubPort: port,
+      hubToken: authState.enabled ? authState.token : null,
+      maxConcurrent: options.gateway.maxConcurrent || parseInt(process.env.POLPO_GATEWAY_MAX_CONCURRENT, 10) || 4,
+      maxTimeoutMs: options.gateway.maxTimeoutMs || parseInt(process.env.POLPO_GATEWAY_MAX_TIMEOUT_MS, 10) || undefined,
+      uploadStore,
+      artifactStore,
+    });
+    app.use('/v1', createGatewayRouter({
+      taskManager,
+      getKey: () => keyInfo.key,
+      uploadStore,
+    }));
+    gatewayState = { keyInfo, taskManager, uploadStore, artifactStore };
+  }
+
+  // SPA fallback — serve index.html for non-API/non-gateway routes
   app.get('*', (req, res) => {
-    if (!req.path.startsWith('/api')) {
-      res.sendFile(path.join(__dirname, '..', 'web', 'index.html'));
-    }
+    if (req.path.startsWith('/api') || req.path.startsWith('/v1')) return;
+    res.sendFile(path.join(__dirname, '..', 'web', 'index.html'));
   });
 
   // WebSocket
   const wss = setupWebSocket(server, instanceManager, getAuthState, pushManager);
+
+  // Alien Mind meta-agent (opt-in: POLPO_MIND=1)
+  let mind = null;
+  if (process.env.POLPO_MIND === '1') {
+    try {
+      const { createMind } = require('../mind/index');
+      const mindAuthToken = authState.enabled ? authState.token : null;
+      mind = createMind(instanceManager, {
+        verbose: true, // Always verbose for mind debugging
+        serverPort: port,
+        authToken: mindAuthToken,
+      });
+    } catch (e) {
+      console.error('[polpo] Mind module failed to load:', e.message);
+    }
+  }
 
   if (verbose) {
     instanceManager.on('instance:registered', (inst) => {
@@ -258,6 +312,11 @@ function createServer(options = {}) {
       });
     },
     stop() {
+      if (mind) { try { mind.destroy(); } catch {} }
+      if (gatewayState) {
+        try { gatewayState.taskManager.destroy(); } catch {}
+        if (gatewayState.uploadStore) try { gatewayState.uploadStore.destroy(); } catch {}
+      }
       return new Promise((resolve) => {
         if (wss.scanner) wss.scanner.stop();
         if (wss.geminiScanner) wss.geminiScanner.stop();
@@ -279,6 +338,9 @@ function createServer(options = {}) {
     },
     get authState() {
       return authState;
+    },
+    get gateway() {
+      return gatewayState;
     },
     instanceManager,
     server,
