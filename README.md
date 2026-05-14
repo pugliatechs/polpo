@@ -461,7 +461,9 @@ Goose must be configured with a provider (run `goose configure` to set up).
 
 Auto-discovery requires `sqlite3` CLI (`apt install sqlite3` / `brew install sqlite3`).
 
-## Alien Mind (Multi-Agent Coordination)
+## Alien Mind (Multi-Agent Coordination) — Experimental
+
+> ⚠️ **Experimental and still stabilizing.** The Alien Mind is fully functional but its planning quality, re-planning behaviour, and autonomous watcher actions can surprise you. Keep an eye on the dashboard, treat outputs as drafts, and report rough edges. The mind is opt-in (`POLPO_MIND=1`) and never interferes with the standard dashboard workflow.
 
 The Alien Mind is an optional meta-agent that orchestrates multiple agents simultaneously. Inspired by the octopus's distributed brain, it decomposes complex goals into tasks, assigns them to the right agents, handles dependencies, and runs independent work in parallel.
 
@@ -475,11 +477,42 @@ The mind appears as a purple "Mind" instance in the dashboard. Send it a goal li
 1. Plan the work by decomposing it into tasks with dependencies
 2. Assign each task to the best available idle agent (matching project/cwd)
 3. Run independent tasks in parallel, sequential tasks in order
-4. Monitor completion and report results in real-time
+4. Share findings between dependent arms automatically (inter-arm context)
+5. Re-plan failed tasks (retry / split / abandon) before giving up
+6. Remember past goals to bias future planning (long-term memory)
+7. Recover gracefully across server restarts (in-flight goal persistence)
+8. Optionally cancel stuck tasks autonomously (policy-gated watcher)
 
 The mind supports DAG-based task plans: parallel, sequential, and diamond dependency patterns. It reuses idle agents when possible and can spawn new ones (up to a configurable limit). All progress is visible in the mind's conversation in the dashboard.
 
 See [docs/alien-mind.md](docs/alien-mind.md) for full documentation, architecture, commands, and configuration.
+
+## Gateway Mode (Programmatic API)
+
+Polpo can also act as a **remote intelligent worker** for external software. The gateway exposes a stable REST + SSE API at `/v1/*` so machines (CI runners, bots, scripts, other AI orchestrators) can delegate one-shot agent tasks, push input files, and pull output files back.
+
+```bash
+# Hub + dashboard + gateway, on the same port
+polpo server --gateway
+
+# Or headless gateway-only
+polpo gateway
+```
+
+On first start polpo prints an API key once and persists it to `~/.config/polpo/gateway.json` (mode 0o600). Every `/v1/*` request must carry `Authorization: Bearer <that-key>` — distinct from the dashboard token.
+
+Typical use case: your laptop reaches a home PC over VPN, and an external orchestrator on the laptop delegates concrete work to the agents installed on the PC (read this PDF, generate that report, refactor this file). Files flow in both directions:
+
+```
+POST   /v1/uploads                       caller → host (base64 JSON, ≤ 25 MB)
+POST   /v1/tasks                         body: { agentType, cwd, prompt, attachments?, captureArtifacts? }
+GET    /v1/tasks/:id/stream              SSE: chunk → artifacts → done | error
+GET    /v1/tasks/:id/artifacts/:name     host → caller (sealed, signed-attachment, nosniff)
+```
+
+Gateway-spawned agents register in the dashboard with `source: 'gateway:<client>'`, so you can watch what the remote caller is doing from your phone and intervene if needed.
+
+Security: separate Bearer key, per-token rate limits, path-traversal defense at every fs touchpoint, sealed-artifact pattern that defeats TOCTOU, fail-closed approvals (no human-in-the-loop confirmation), and no new dependencies. Full reference: [docs/gateway.md](docs/gateway.md).
 
 ## Terminal Sync (Hooks)
 
@@ -610,6 +643,21 @@ Skills are stored at `~/.agents/skills/` and symlinked into `~/.claude/skills/` 
 | GET | `/api/skills/:name/content` | Get skill SKILL.md content |
 | GET | `/health` | Health check |
 
+#### Gateway (`/v1/*`, opt-in via `--gateway`, Bearer auth)
+
+Stable, machine-facing API. See [docs/gateway.md](docs/gateway.md) for the full reference.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/v1/health` | Gateway health + active task count |
+| POST | `/v1/uploads` | Push a file (JSON + base64). Returns `uploadId`, `sha256`, `expiresAt` |
+| POST | `/v1/tasks` | Create a one-shot task (`{agentType, cwd, prompt, attachments?, captureArtifacts?}`) |
+| GET | `/v1/tasks/:id/stream` | SSE: `chunk` → `artifacts` → `done` / `error` |
+| GET | `/v1/tasks/:id` | Task snapshot |
+| DELETE | `/v1/tasks/:id` | Abort + mark cancelled |
+| GET | `/v1/tasks/:id/artifacts` | List sealed artifacts |
+| GET | `/v1/tasks/:id/artifacts/:name` | Stream a sealed artifact (forced attachment, nosniff) |
+
 ### WebSocket
 
 Connect to `ws://<host>:<port>?role=dashboard` for real-time updates.
@@ -627,6 +675,12 @@ Connect to `ws://<host>:<port>?role=agent&instanceId=<id>` as an agent.
 | `POLPO_NAME` | auto from directory | Display name for the instance |
 | `POLPO_APPROVE` | `0` | Set to `1` for phone approval (hooks only) |
 | `POLPO_TIMEOUT` | `300000` | Approval timeout in ms (default 5 min) |
+| `POLPO_MIND` | `0` | Set to `1` to enable the Alien Mind (experimental) |
+| `POLPO_MIND_POLICY` | `balanced` | Mind autonomy level: `conservative` \| `balanced` \| `autonomous` |
+| `POLPO_GATEWAY_KEY` | persisted file | Override the gateway API key |
+| `POLPO_GATEWAY_MAX_CONCURRENT` | `4` | Max in-flight gateway tasks |
+| `POLPO_GATEWAY_MAX_TIMEOUT_MS` | `1800000` | Hard cap on per-task timeout (30 min) |
+| `POLPO_GATEWAY_MAX_UPLOAD_SIZE` | `26214400` | Per-upload byte cap (25 MB decoded) |
 
 ## Testing
 
@@ -712,7 +766,7 @@ graph TD
     Browser -->|"reads"| GooseDB
 ```
 
-See [docs/diagrams.md](docs/diagrams.md) for auth, tunnel, session, auto-discovery, takeover, and hook flow diagrams. See [docs/alien-mind.md](docs/alien-mind.md) for Alien Mind coordination documentation.
+See [docs/diagrams.md](docs/diagrams.md) for auth, tunnel, session, auto-discovery, takeover, hook, gateway, and Alien Mind flow diagrams. See [docs/alien-mind.md](docs/alien-mind.md) for Alien Mind coordination documentation and [docs/gateway.md](docs/gateway.md) for the programmatic gateway API reference.
 
 ## Disclaimer
 
