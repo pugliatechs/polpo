@@ -274,8 +274,10 @@ function createStaticAuthMiddleware(getAuthState) {
     const state = typeof getAuthState === 'function' ? getAuthState() : getAuthState;
     if (!state || !state.enabled) return next();
 
-    // Skip API paths — handled by the API auth middleware
-    if (req.path.startsWith('/api')) return next();
+    // Skip API + gateway paths — they have their own auth (Bearer token).
+    // Without this, paranoid-mode dashboard auth would redirect /v1 calls
+    // to /auth.html before the gateway router could validate the Bearer key.
+    if (req.path.startsWith('/api') || req.path.startsWith('/v1')) return next();
 
     // Allow auth page
     if (req.path === '/auth' || req.path === '/auth.html') return next();

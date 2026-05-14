@@ -365,6 +365,25 @@ describe('createStaticAuthMiddleware', () => {
     mw(req, mockRes(), () => { done(); });
   });
 
+  it('skips /v1 (gateway) paths regardless of auth state', (_, done) => {
+    // Regression: paranoid-mode dashboard auth must not redirect /v1 calls.
+    // The gateway has its own Bearer middleware; the static middleware
+    // should not preempt it with an auth.html redirect.
+    const state = new AuthState({ token: 'tok', mode: 'paranoid' });
+    state.tokenBurned = true;
+    const mw = createStaticAuthMiddleware(() => state);
+    const req = mockReq({ path: '/v1/tasks' });
+    mw(req, mockRes(), () => { done(); });
+  });
+
+  it('skips /v1 sub-paths too', (_, done) => {
+    const state = new AuthState({ token: 'tok', mode: 'pin' });
+    state.tokenBurned = true;
+    const mw = createStaticAuthMiddleware(() => state);
+    const req = mockReq({ path: '/v1/tasks/gtask-abc/stream' });
+    mw(req, mockRes(), () => { done(); });
+  });
+
   it('redirects to auth page for MFA after burn', () => {
     const state = new AuthState({ token: 'tok', mode: 'pin' });
     const mw = createStaticAuthMiddleware(() => state);
