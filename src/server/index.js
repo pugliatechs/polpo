@@ -223,11 +223,35 @@ function createServer(options = {}) {
   // API routes
   app.use('/api', createApiRouter(instanceManager, getAuthState, pushManager));
 
-  // SPA fallback — serve index.html for non-API routes
+  // Optional: programmatic gateway (/v1/*) for external callers
+  let gatewayState = null;
+  if (options.gateway) {
+    const { loadOrCreateGatewayKey } = require('./gateway-auth');
+    const { GatewayTaskManager } = require('./gateway-tasks');
+    const { createGatewayRouter } = require('./gateway');
+
+    const keyInfo = loadOrCreateGatewayKey({
+      key: options.gateway.key || undefined,
+      configPath: options.gateway.configPath || undefined,
+    });
+    const taskManager = new GatewayTaskManager({
+      instanceManager,
+      hubPort: port,
+      hubToken: authState.enabled ? authState.token : null,
+      maxConcurrent: options.gateway.maxConcurrent || parseInt(process.env.POLPO_GATEWAY_MAX_CONCURRENT, 10) || 4,
+      maxTimeoutMs: options.gateway.maxTimeoutMs || parseInt(process.env.POLPO_GATEWAY_MAX_TIMEOUT_MS, 10) || undefined,
+    });
+    app.use('/v1', createGatewayRouter({
+      taskManager,
+      getKey: () => keyInfo.key,
+    }));
+    gatewayState = { keyInfo, taskManager };
+  }
+
+  // SPA fallback — serve index.html for non-API/non-gateway routes
   app.get('*', (req, res) => {
-    if (!req.path.startsWith('/api')) {
-      res.sendFile(path.join(__dirname, '..', 'web', 'index.html'));
-    }
+    if (req.path.startsWith('/api') || req.path.startsWith('/v1')) return;
+    res.sendFile(path.join(__dirname, '..', 'web', 'index.html'));
   });
 
   // WebSocket
@@ -275,6 +299,9 @@ function createServer(options = {}) {
     },
     stop() {
       if (mind) { try { mind.destroy(); } catch {} }
+      if (gatewayState && gatewayState.taskManager) {
+        try { gatewayState.taskManager.destroy(); } catch {}
+      }
       return new Promise((resolve) => {
         if (wss.scanner) wss.scanner.stop();
         if (wss.geminiScanner) wss.geminiScanner.stop();
@@ -296,6 +323,9 @@ function createServer(options = {}) {
     },
     get authState() {
       return authState;
+    },
+    get gateway() {
+      return gatewayState;
     },
     instanceManager,
     server,

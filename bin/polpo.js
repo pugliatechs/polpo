@@ -32,6 +32,9 @@ function printHelp() {
 
   COMMANDS
     server      Start the Polpo hub server
+    gateway     Start polpo with the programmatic /v1 gateway exposed.
+                Same as: server --gateway. For remote callers (CI, bots,
+                scripts) that delegate one-shot agent tasks.
     session     Start a coding agent session controllable from your phone
     agent       Start a lightweight stdin/stdout agent (legacy)
     bridge      Start a hook bridge daemon for integration
@@ -55,6 +58,10 @@ function printHelp() {
     --trust-localhost  Skip auth for localhost connections (desktop browser)
                        Tunnel/remote connections still require full auth
     --verbose       Enable verbose logging
+    --gateway       Also expose the programmatic /v1 gateway API for
+                    external callers. Uses a separate POLPO_GATEWAY_KEY
+                    (printed on first start, persisted to
+                    ~/.config/polpo/gateway.json).
 
   AGENT OPTIONS
     --name <name>       Display name for this instance
@@ -169,11 +176,14 @@ async function runServer() {
     authOpts.trustLocalhost = true;
   }
 
+  const gatewayEnabled = !!flags.gateway;
+
   const server = createServer({
     port: parseInt(flags.port) || 7890,
     host: flags.host || '0.0.0.0',
     verbose: !!flags.verbose,
     auth: Object.keys(authOpts).length > 0 ? authOpts : undefined,
+    gateway: gatewayEnabled ? {} : undefined,
   });
 
   // Set up PIN callback for terminal display
@@ -222,6 +232,17 @@ async function runServer() {
 
   if (flags['trust-localhost']) {
     console.log('  🏠 Localhost trusted — desktop browser at http://localhost:' + (parseInt(flags.port) || 7890) + ' (no auth)');
+  }
+
+  if (gatewayEnabled && server.gateway) {
+    const { keyInfo } = server.gateway;
+    console.log('  🛰  Gateway API enabled at /v1');
+    if (keyInfo.isNew) {
+      console.log('     Generated new API key (persisted to ~/.config/polpo/gateway.json):');
+      console.log('     ' + keyInfo.key);
+    } else {
+      console.log('     Using ' + keyInfo.source + ' API key (see ~/.config/polpo/gateway.json)');
+    }
   }
 
   const port = parseInt(flags.port) || 7890;
@@ -441,10 +462,25 @@ function printHooks() {
   console.log(`  "command": "POLPO_APPROVE=1 node ${path.join(hooksDir, 'pre-tool-use.js')}"\n`);
 }
 
+async function runGateway() {
+  // Headless gateway: dashboard routes still exist (one process, one port)
+  // but we don't print the phone URL or open a tunnel. The dashboard
+  // continues to be reachable on localhost for local oversight.
+  flags.gateway = true;
+  await runServer();
+}
+
 switch (command) {
   case 'server':
     runServer().catch((err) => {
       console.error('Failed to start server:', err.message);
+      process.exit(1);
+    });
+    break;
+
+  case 'gateway':
+    runGateway().catch((err) => {
+      console.error('Failed to start gateway:', err.message);
       process.exit(1);
     });
     break;

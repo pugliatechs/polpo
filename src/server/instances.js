@@ -28,6 +28,9 @@ class InstanceManager extends EventEmitter {
       canReceivePrompts: info.canReceivePrompts !== undefined ? info.canReceivePrompts : true,
       firstPrompt: info.firstPrompt || null,
       agentType: info.agentType || 'claude',
+      // Origin tag, e.g. 'gateway:openclaw', 'mind', or null for user-started.
+      // Used by the dashboard to distinguish programmatic agents from manual ones.
+      source: info.source || null,
     };
     this.instances.set(id, instance);
     this.emit('instance:registered', instance);
@@ -64,6 +67,7 @@ class InstanceManager extends EventEmitter {
       canReceivePrompts: inst.canReceivePrompts,
       firstPrompt: inst.firstPrompt,
       agentType: inst.agentType,
+      source: inst.source,
     }));
   }
 
