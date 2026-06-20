@@ -321,6 +321,18 @@ async function loadHistory(sessionId) {
 /**
  * Load conversation history from a Claude Code JSONL file.
  */
+// Claude Code prepends `<system-reminder>...</system-reminder>` blocks
+// to user messages to inject ambient state (tool list, env, hooks). We
+// don't want those rendered as "user prompts" in history. The earlier
+// implementation used `!text.startsWith('<')` which also dropped any
+// legitimate user text that happened to begin with an angle bracket
+// (e.g. `<polpo:artifacts>` directives the mind injects, or XML the
+// user typed). Be precise: only strip the specific wrapper.
+function isSystemReminderText(text) {
+  if (typeof text !== 'string') return false;
+  return /^\s*<system-reminder\b/i.test(text);
+}
+
 function loadClaudeHistory(filePath) {
   return new Promise((resolve) => {
     const messages = [];
@@ -358,10 +370,26 @@ function loadClaudeHistory(filePath) {
         }
 
         if (obj.type === 'user') {
+          // Claude Code writes user messages in two shapes: a plain string
+          // (the common case for typed prompts) and an array of blocks
+          // (tool results, images, multi-part user messages). Both must
+          // make it into the rendered history, otherwise user prompts
+          // disappear from /v1/sessions/:id and /api/sessions/:id/history.
+          if (typeof content === 'string') {
+            if (!isSystemReminderText(content)) {
+              messages.push({
+                type: 'user',
+                role: 'user',
+                content,
+                timestamp,
+              });
+            }
+            return;
+          }
           if (!Array.isArray(content)) return;
 
           for (const block of content) {
-            if (block.type === 'text' && !block.text.startsWith('<')) {
+            if (block.type === 'text' && !isSystemReminderText(block.text)) {
               messages.push({
                 type: 'user',
                 role: 'user',
@@ -1274,4 +1302,13 @@ function loadPiHistory(filePath) {
   });
 }
 
-module.exports = { scanSessions, loadHistory };
+module.exports = {
+  scanSessions,
+  loadHistory,
+  // Exported for unit tests: takes an absolute path to a JSONL file
+  // and returns the parsed history array. The public `loadHistory`
+  // resolves a sessionId to the right file via CLAUDE_DIR — for tests
+  // that work against fixture files we call the parser directly.
+  loadClaudeHistory,
+  isSystemReminderText,
+};

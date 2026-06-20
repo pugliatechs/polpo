@@ -213,3 +213,123 @@ describe('session JSONL parsing', () => {
     });
   });
 });
+
+// ---- Regression: user prompts must appear in loadClaudeHistory output ----
+//
+// Claude Code writes user messages in two shapes: a plain string and an
+// array of blocks. An earlier version of loadClaudeHistory only handled
+// the array case, silently dropping every plain-string user prompt —
+// /v1/sessions/:id and /api/sessions/:id/history then returned only
+// assistant text and tool results, with the user's actual prompts missing.
+// This guards against a regression of that behaviour.
+
+const { loadClaudeHistory, isSystemReminderText } = require('../src/server/sessions');
+
+describe('loadClaudeHistory — user prompt preservation', () => {
+  const fixtureDir = path.join(os.tmpdir(), 'polpo-test-loadhistory-' + process.pid);
+
+  function writeFixture(name, lines) {
+    fs.mkdirSync(fixtureDir, { recursive: true });
+    const filePath = path.join(fixtureDir, name);
+    fs.writeFileSync(filePath, lines.map(l => JSON.stringify(l)).join('\n') + '\n');
+    return filePath;
+  }
+
+  afterEach(() => {
+    try { fs.rmSync(fixtureDir, { recursive: true, force: true }); } catch {}
+  });
+
+  it('includes plain-string user prompts (the common case)', async () => {
+    const file = writeFixture('string-user.jsonl', [
+      { type: 'user', message: { role: 'user', content: 'do the thing' }, timestamp: '2026-06-01T10:00:00Z' },
+      { type: 'assistant', message: { id: 'a1', content: [{ type: 'text', text: 'ok' }] }, timestamp: '2026-06-01T10:00:01Z' },
+    ]);
+    const messages = await loadClaudeHistory(file);
+    const userMsgs = messages.filter(m => m.role === 'user');
+    assert.equal(userMsgs.length, 1, 'plain-string user prompt must be preserved');
+    assert.equal(userMsgs[0].content, 'do the thing');
+    assert.equal(userMsgs[0].timestamp, '2026-06-01T10:00:00Z');
+  });
+
+  it('still includes array-form user prompts (the structured case)', async () => {
+    const file = writeFixture('array-user.jsonl', [
+      { type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'array form prompt' }] }, timestamp: 't' },
+    ]);
+    const messages = await loadClaudeHistory(file);
+    const userMsgs = messages.filter(m => m.role === 'user');
+    assert.equal(userMsgs.length, 1);
+    assert.equal(userMsgs[0].content, 'array form prompt');
+  });
+
+  it('preserves user prompts that begin with an angle bracket (no false positives)', async () => {
+    // The earlier startsWith('<') filter would have dropped these.
+    const file = writeFixture('bracket-user.jsonl', [
+      { type: 'user', message: { role: 'user', content: '<polpo:artifacts> reminder...' }, timestamp: 't1' },
+      { type: 'user', message: { role: 'user', content: [{ type: 'text', text: '<important> notes' }] }, timestamp: 't2' },
+    ]);
+    const messages = await loadClaudeHistory(file);
+    const userTexts = messages.filter(m => m.role === 'user').map(m => m.content);
+    assert.ok(userTexts.includes('<polpo:artifacts> reminder...'));
+    assert.ok(userTexts.includes('<important> notes'));
+  });
+
+  it('drops system-reminder blocks (the only thing the old filter wanted)', async () => {
+    const file = writeFixture('sysreminder.jsonl', [
+      { type: 'user', message: { role: 'user', content: '<system-reminder>tools: Bash, Edit</system-reminder>' }, timestamp: 't1' },
+      { type: 'user', message: { role: 'user', content: 'real prompt' }, timestamp: 't2' },
+      { type: 'user', message: { role: 'user', content: [
+        { type: 'text', text: '<system-reminder>env: x</system-reminder>' },
+        { type: 'text', text: 'continue please' },
+      ] }, timestamp: 't3' },
+    ]);
+    const messages = await loadClaudeHistory(file);
+    const userTexts = messages.filter(m => m.role === 'user').map(m => m.content);
+    assert.deepEqual(userTexts.sort(), ['continue please', 'real prompt'].sort());
+  });
+
+  it('mixed conversation order is preserved', async () => {
+    const file = writeFixture('mixed.jsonl', [
+      { type: 'user', message: { role: 'user', content: 'first' }, timestamp: 't1' },
+      { type: 'assistant', message: { id: 'a1', content: [{ type: 'text', text: 'one' }] }, timestamp: 't2' },
+      { type: 'user', message: { role: 'user', content: 'second' }, timestamp: 't3' },
+      { type: 'assistant', message: { id: 'a2', content: [{ type: 'text', text: 'two' }] }, timestamp: 't4' },
+    ]);
+    const messages = await loadClaudeHistory(file);
+    const contents = messages.map(m => m.content);
+    assert.deepEqual(contents, ['first', 'one', 'second', 'two']);
+  });
+
+  it('tool_result blocks still come through (no regression on the other content types)', async () => {
+    const file = writeFixture('tool.jsonl', [
+      { type: 'user', message: { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'tu1', content: 'cmd output', is_error: false },
+      ] }, timestamp: 't' },
+    ]);
+    const messages = await loadClaudeHistory(file);
+    const tool = messages.find(m => m.contentType === 'tool_result');
+    assert.ok(tool);
+    assert.equal(tool.toolUseId, 'tu1');
+    assert.equal(tool.content, 'cmd output');
+  });
+});
+
+describe('isSystemReminderText', () => {
+  it('matches <system-reminder...> openings, case-insensitive, with optional whitespace', () => {
+    assert.equal(isSystemReminderText('<system-reminder>hi</system-reminder>'), true);
+    assert.equal(isSystemReminderText('  <system-reminder>hi'), true);
+    assert.equal(isSystemReminderText('<System-Reminder type="x">'), true);
+  });
+
+  it('does not match arbitrary tags', () => {
+    assert.equal(isSystemReminderText('<polpo:artifacts dir="...">'), false);
+    assert.equal(isSystemReminderText('<important>'), false);
+    assert.equal(isSystemReminderText('plain text'), false);
+    assert.equal(isSystemReminderText('<system-prompt>'), false);
+  });
+
+  it('returns false for non-strings', () => {
+    assert.equal(isSystemReminderText(null), false);
+    assert.equal(isSystemReminderText(undefined), false);
+    assert.equal(isSystemReminderText(42), false);
+  });
+});
