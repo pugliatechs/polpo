@@ -39,6 +39,12 @@ function printHelp() {
     agent       Start a lightweight stdin/stdout agent (legacy)
     bridge      Start a hook bridge daemon for integration
     hooks       Print hook configuration JSON
+    profile     Print your Builder Profile (computed locally from
+                Claude / Codex / Gemini / OpenCode / Pi / Goose
+                session transcripts on this machine). No network calls.
+                  --days N        analysis window (1-365, default 90)
+                  --agent NAME    filter by agent type (default all)
+                  --json          emit raw JSON instead of human view
     help        Show this help message
     --version   Print version and exit
 
@@ -468,6 +474,103 @@ function printHooks() {
   console.log(`  "command": "POLPO_APPROVE=1 node ${path.join(hooksDir, 'pre-tool-use.js')}"\n`);
 }
 
+// ---- `polpo profile` ----
+//
+// Runs the Builder Profile analyzer locally and prints a compact human
+// summary. Nothing leaves the machine. With --json, emits the raw JSON
+// for piping into other tools.
+async function runProfile() {
+  const { analyzeProfile } = require('../src/server/profile-analyzer');
+  const days = clampInt(parseInt(flags.days, 10), 1, 365, 90);
+  const validAgents = ['all', 'claude', 'codex', 'gemini', 'opencode', 'pi', 'goose'];
+  const agent = validAgents.includes((flags.agent || '').toLowerCase())
+    ? flags.agent.toLowerCase()
+    : 'all';
+
+  const data = await analyzeProfile({ days, source: agent });
+
+  if (flags.json) {
+    process.stdout.write(JSON.stringify(data, null, 2) + '\n');
+    return;
+  }
+
+  const dims = data.dimensions || {};
+  const order = ['steering', 'execution', 'engineering', 'productInstinct', 'planning'];
+  const labels = {
+    steering: 'Steering',
+    execution: 'Execution',
+    engineering: 'Engineering',
+    productInstinct: 'Product',
+    planning: 'Planning',
+  };
+
+  console.log('');
+  console.log('  🐙 Polpo Builder Profile (' + days + ' days, ' + agent + ')');
+  console.log('');
+  console.log('  ' + (data.archetype && data.archetype.name ? data.archetype.name : 'Unknown'));
+  if (data.archetype && data.archetype.blurb) {
+    console.log('  ' + wrapForTerminal(data.archetype.blurb, 70, '  '));
+  }
+  console.log('');
+  for (const k of order) {
+    const v = Math.max(0, Math.min(100, Math.round(Number(dims[k]) || 0)));
+    const bar = drawBar(v, 24);
+    const label = (labels[k] || k).padEnd(13);
+    console.log('  ' + label + bar + ' ' + String(v).padStart(3));
+  }
+  console.log('');
+
+  const a = data.activity || {};
+  const t = data.tools || {};
+  const s = data.shell || {};
+  const lines = [
+    ['Sessions', String(a.totalSessions || 0) + ' (analyzed: ' + (a.analyzedSessions || 0) + ')'],
+    ['Active days', String(a.activeDays || 0) + ' / ' + String(a.spanDays || 0)],
+    ['Sessions / day', String(a.sessionsPerActiveDay || 0)],
+    ['Peak hour', a.peakHour != null ? String(a.peakHour) + ':00' : '—'],
+    ['Peak day', a.peakDay || '—'],
+    ['Tool calls', String(t.total || 0)],
+    ['Shell runs', String(s.total || 0)],
+    ['Git commits', String(s.gitCommits || 0)],
+    ['Test runs', String(s.testRuns || 0)],
+  ];
+  const labelW = Math.max.apply(null, lines.map(l => l[0].length));
+  for (const l of lines) console.log('  ' + l[0].padEnd(labelW + 2) + l[1]);
+  console.log('');
+  if (data.generatedAt) {
+    console.log('  Generated: ' + new Date(data.generatedAt).toLocaleString());
+  }
+  console.log('');
+}
+
+function clampInt(n, min, max, fallback) {
+  if (!Number.isFinite(n)) return fallback;
+  if (n < min) return min;
+  if (n > max) return max;
+  return n;
+}
+
+function drawBar(value, width) {
+  const filled = Math.round((value / 100) * width);
+  return '[' + '█'.repeat(filled) + '·'.repeat(width - filled) + ']';
+}
+
+function wrapForTerminal(text, width, indent) {
+  const words = String(text).split(/\s+/);
+  const lines = [];
+  let cur = '';
+  for (const w of words) {
+    if ((cur + ' ' + w).trim().length > width) {
+      if (cur) lines.push(cur.trim());
+      cur = w;
+    } else {
+      cur = (cur + ' ' + w).trim();
+    }
+  }
+  if (cur) lines.push(cur.trim());
+  return lines.join('\n' + indent);
+}
+
 async function runGateway() {
   // Headless gateway: dashboard routes still exist (one process, one port)
   // but we don't print the phone URL or open a tunnel. The dashboard
@@ -511,6 +614,13 @@ switch (command) {
 
   case 'hooks':
     printHooks();
+    break;
+
+  case 'profile':
+    runProfile().catch((err) => {
+      console.error('Failed to generate profile:', err && err.message);
+      process.exit(1);
+    });
     break;
 
   case '--version':
