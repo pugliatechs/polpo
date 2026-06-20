@@ -20,6 +20,14 @@ class InstanceManager extends EventEmitter {
       lastActivity: Date.now(),
       registeredAt: Date.now(),
       conversation: [],
+      // Monotonic per-instance counter stamped on every addMessage().
+      // Lets clients defeat duplicate-broadcast delivery (e.g. when a
+      // stale WebSocket on the dashboard side hasn't fully closed yet
+      // and so receives the same event on every still-open socket).
+      // Seq is monotonic but NOT persisted across server restarts —
+      // a restart wipes the instance, so the new instance id implies
+      // a fresh counter.
+      _msgSeq: 0,
       pendingApproval: null,
       autoApprove: false,
       agentSocket: null, // WebSocket back to the agent
@@ -83,16 +91,24 @@ class InstanceManager extends EventEmitter {
   addMessage(id, message) {
     const instance = this.instances.get(id);
     if (instance) {
-      instance.conversation.push({
+      // Stamp every message with a monotonic per-instance sequence
+      // number. This is what lets the dashboard drop duplicate
+      // broadcasts: any (id, seq) pair is uniquely identifying, and
+      // a client that has already processed seq N can safely ignore
+      // any later arrival with seq <= N for the same id.
+      instance._msgSeq = (instance._msgSeq || 0) + 1;
+      const stamped = {
         ...message,
-        timestamp: Date.now(),
-      });
+        seq: instance._msgSeq,
+        timestamp: message && message.timestamp ? message.timestamp : Date.now(),
+      };
+      instance.conversation.push(stamped);
       instance.lastActivity = Date.now();
       // Keep only last 200 messages per instance to manage memory
       if (instance.conversation.length > 200) {
         instance.conversation = instance.conversation.slice(-200);
       }
-      this.emit('instance:message', { id, message });
+      this.emit('instance:message', { id, message: stamped });
     }
   }
 

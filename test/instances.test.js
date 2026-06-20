@@ -114,6 +114,62 @@ describe('InstanceManager', () => {
       assert.equal(conv.length, 200);
       assert.equal(conv[0].content, 'msg-10');
     });
+
+    it('stamps a monotonic per-instance seq on every message', () => {
+      mgr.register({ id: 'seq1' });
+      mgr.addMessage('seq1', { role: 'user', content: 'a' });
+      mgr.addMessage('seq1', { role: 'assistant', content: 'b' });
+      mgr.addMessage('seq1', { role: 'user', content: 'c' });
+      const conv = mgr.getConversation('seq1');
+      assert.deepEqual(conv.map((m) => m.seq), [1, 2, 3]);
+    });
+
+    it('the seq stamped on the emitted message matches the stored one', () => {
+      mgr.register({ id: 'seq2' });
+      const seen = [];
+      mgr.on('instance:message', (e) => { seen.push(e.message.seq); });
+      mgr.addMessage('seq2', { role: 'user', content: 'a' });
+      mgr.addMessage('seq2', { role: 'user', content: 'b' });
+      assert.deepEqual(seen, [1, 2]);
+      assert.deepEqual(mgr.getConversation('seq2').map((m) => m.seq), [1, 2]);
+    });
+
+    it('seqs are independent per instance', () => {
+      mgr.register({ id: 'A' });
+      mgr.register({ id: 'B' });
+      mgr.addMessage('A', { content: 'a1' });
+      mgr.addMessage('B', { content: 'b1' });
+      mgr.addMessage('A', { content: 'a2' });
+      assert.deepEqual(mgr.getConversation('A').map((m) => m.seq), [1, 2]);
+      assert.deepEqual(mgr.getConversation('B').map((m) => m.seq), [1]);
+    });
+
+    it('preserves clientMsgId through addMessage so the dashboard can reconcile', () => {
+      mgr.register({ id: 'opt' });
+      mgr.addMessage('opt', {
+        role: 'user',
+        content: 'hi from phone',
+        source: 'mobile',
+        clientMsgId: 'cmsg-abc123',
+      });
+      const stored = mgr.getConversation('opt');
+      assert.equal(stored.length, 1);
+      assert.equal(stored[0].clientMsgId, 'cmsg-abc123');
+      assert.equal(stored[0].seq, 1);
+    });
+
+    it('emits the same clientMsgId on instance:message as it stores', () => {
+      mgr.register({ id: 'opt2' });
+      let seen = null;
+      mgr.on('instance:message', (e) => { seen = e.message; });
+      mgr.addMessage('opt2', {
+        role: 'user',
+        content: 'x',
+        clientMsgId: 'cmsg-xyz',
+      });
+      assert.equal(seen.clientMsgId, 'cmsg-xyz');
+      assert.equal(seen.seq, 1);
+    });
   });
 
   describe('getConversation', () => {
