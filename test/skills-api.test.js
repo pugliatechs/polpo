@@ -1,6 +1,6 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { parseSkillFrontmatter, parseSkillsSearchOutput } = require('../src/server/api');
+const { parseSkillFrontmatter, parseSkillsSearchOutput, normalizeTimestamp } = require('../src/server/api');
 
 describe('skills API', () => {
   describe('parseSkillFrontmatter', () => {
@@ -132,6 +132,39 @@ describe('skills API', () => {
       assert.ok(/^[a-zA-Z0-9\s._-]+$/.test('react native'));
       assert.ok(/^[a-zA-Z0-9\s._-]+$/.test('best-practices'));
       assert.ok(/^[a-zA-Z0-9\s._-]+$/.test('ros2.robotics'));
+    });
+  });
+
+  describe('normalizeTimestamp', () => {
+    it('passes a finite number through unchanged', () => {
+      assert.equal(normalizeTimestamp(1716889200000), 1716889200000);
+      assert.equal(normalizeTimestamp(0), 0);
+    });
+
+    it('parses ISO 8601 strings to epoch ms', () => {
+      assert.equal(normalizeTimestamp('2026-05-28T12:00:00Z'), Date.parse('2026-05-28T12:00:00Z'));
+    });
+
+    it('returns 0 for missing or unparseable input (treated as oldest)', () => {
+      assert.equal(normalizeTimestamp(null), 0);
+      assert.equal(normalizeTimestamp(undefined), 0);
+      assert.equal(normalizeTimestamp(''), 0);
+      assert.equal(normalizeTimestamp('not a date'), 0);
+      assert.equal(normalizeTimestamp(NaN), 0);
+      assert.equal(normalizeTimestamp(Infinity), 0);
+    });
+
+    it('sorts a mixed timestamp array newest-first deterministically', () => {
+      // Mimic the /api/search response shape
+      const results = [
+        { id: 'a', timestamp: '2026-01-01T00:00:00Z' },
+        { id: 'b', timestamp: null },
+        { id: 'c', timestamp: '2026-05-28T12:00:00Z' },
+        { id: 'd', timestamp: Date.parse('2026-04-01T00:00:00Z') },
+        { id: 'e', timestamp: 'garbage' },
+      ];
+      results.sort((x, y) => normalizeTimestamp(y.timestamp) - normalizeTimestamp(x.timestamp));
+      assert.deepEqual(results.map(r => r.id), ['c', 'd', 'a', 'b', 'e']);
     });
   });
 });
