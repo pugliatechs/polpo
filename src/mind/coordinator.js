@@ -1,12 +1,32 @@
 /**
  * Coordinator — goal/task lifecycle management for the Alien Mind.
  *
- * Receives goals from the user, asks the Reasoner to plan, assigns
- * tasks to idle agents, monitors completion, and reports results.
+ * Receives goals from the user, asks the Reasoner to plan, dispatches
+ * each task as an isolated one-shot agent run through OneShotAgentRunner,
+ * captures the result, and feeds it as context to dependent tasks.
+ *
+ * Why one-shot (and not multi-turn + pool reuse)
+ *
+ *   The mind is conceptually a planner that calls polpo's own gateway.
+ *   Each task = a self-contained prompt → result. The coordinator holds
+ *   ALL the durable state (world-model, dependency graph, memory); each
+ *   agent is a stateless function call that exists only long enough to
+ *   process one prompt and terminate. This is the same lifecycle the
+ *   HTTP gateway exposes to external apps (openclaw etc.), which means
+ *   both call sites inherit the same hardening (timeouts, fail-closed
+ *   on approvals, source tags, structured spawn logs) for free.
+ *
+ *   Trade-off: no cross-prompt agent memory. Mitigated by the
+ *   coordinator injecting predecessor task output into dependent task
+ *   prompts (see _buildPredecessorContext) and by the world-model + memory
+ *   modules carrying state across the goal's lifetime.
  */
 
 const EventEmitter = require('events');
 const { v4: uuidv4 } = require('uuid');
+const { makeLogger } = require('../util/logger');
+
+const log = makeLogger('mind-coordinator');
 
 class Coordinator extends EventEmitter {
   /**
@@ -14,34 +34,47 @@ class Coordinator extends EventEmitter {
    * @param {object} opts.instanceManager
    * @param {object} opts.worldModel - WorldModel instance
    * @param {object} opts.reasoner - Reasoner instance
-   * @param {object} [opts.agentPool] - AgentPool for spawning agents when no idle ones
+   * @param {object} opts.runner - OneShotAgentRunner (REQUIRED): every
+   *   task is dispatched as an isolated runner.run() call. The runner
+   *   owns the spawn/timeout/teardown lifecycle; the coordinator only
+   *   composes prompts and consumes results.
    * @param {object} [opts.memory] - Memory instance for long-term goal history
    * @param {object} [opts.goalStore] - GoalStore for in-flight goal persistence
    * @param {string} opts.mindInstanceId - The mind's own instance ID for reporting
+   * @param {object} [opts.policy] - Policy object (for taskTimeoutMs etc.)
    */
   constructor(opts) {
     super();
+    if (!opts || !opts.runner) {
+      throw new Error('Coordinator requires a OneShotAgentRunner via opts.runner');
+    }
     this.instanceManager = opts.instanceManager;
     this.worldModel = opts.worldModel;
     this.reasoner = opts.reasoner;
-    this.agentPool = opts.agentPool || null;
+    this.runner = opts.runner;
     this.memory = opts.memory || null;
     this.goalStore = opts.goalStore || null;
     this.mindInstanceId = opts.mindInstanceId;
+    this.policy = opts.policy || null;
 
-    this._goals = new Map(); // goalId -> Goal
-    this._taskToAgent = new Map(); // agentId -> taskId (which agent is working on which task)
-    this._timeouts = new Map(); // taskId -> timeout handle
+    this._goals = new Map();         // goalId -> Goal
+    this._taskToAgent = new Map();   // agentId -> taskId (live runs only)
+  }
 
-    // Subscribe to agent status changes for completion detection
-    var self = this;
-    this._statusHandler = function (data) {
-      if (data.id === self.mindInstanceId) return;
-      if (data.status === 'idle') {
-        self._onAgentIdle(data.id);
-      }
-    };
-    this.instanceManager.on('instance:status', this._statusHandler);
+  /**
+   * Emit a structured event for this goal so external subscribers
+   * (gateway SSE, dashboard add-ons) can observe progress without
+   * scraping the mind's conversation. Every transition that we already
+   * report via `_report(...)` also gets an emit so the dashboard text
+   * and the structured stream stay in lock-step.
+   */
+  _emitGoalEvent(goalId, type, data) {
+    if (!goalId || !type) return;
+    var payload = { goalId: goalId, type: type, timestamp: Date.now() };
+    if (data && typeof data === 'object') {
+      for (var k in data) payload[k] = data[k];
+    }
+    this.emit('goal:event', payload);
   }
 
   /**
@@ -62,7 +95,13 @@ class Coordinator extends EventEmitter {
     this._goals.set(goalId, goal);
     this._persistGoalState(goal);
 
-    this._report('Planning: ' + prompt);
+    // Don't echo the entire prompt — the user just typed it, it's
+    // already in their bubble above, and dumping it back as the mind's
+    // "first reply" clutters the chat for long goals. The structured
+    // goal:event below still carries the full prompt for any SSE
+    // consumer that needs it.
+    this._report('Planning your goal…');
+    this._emitGoalEvent(goalId, 'planning', { prompt: prompt });
 
     try {
       var worldSummary = this.worldModel.getSummary();
@@ -84,6 +123,17 @@ class Coordinator extends EventEmitter {
         goal.plan.tasks.map(function (t, i) {
           return (i + 1) + '. ' + t.description;
         }).join('\n'));
+      this._emitGoalEvent(goalId, 'plan_ready', {
+        tasks: goal.plan.tasks.map(function (t) {
+          return {
+            id: t.id,
+            description: t.description,
+            agentType: t.agentType,
+            targetCwd: t.targetCwd,
+            dependsOn: (t.dependsOn || []).slice(),
+          };
+        }),
+      });
 
       this._dispatchReadyTasks(goalId);
       return { goalId: goalId };
@@ -93,6 +143,7 @@ class Coordinator extends EventEmitter {
       goal.result = 'Planning failed: ' + err.message;
       this._persistGoalState(goal);
       this._report('Planning failed: ' + err.message);
+      this._emitGoalEvent(goalId, 'error', { message: 'planning_failed', detail: err.message });
       return { goalId: goalId };
     }
   }
@@ -239,166 +290,159 @@ class Coordinator extends EventEmitter {
   }
 
   /**
-   * Assign a task to an agent (via AgentPool if available, else legacy match).
+   * Dispatch a task as an isolated one-shot agent run.
+   *
+   * Each call spawns a fresh agent via the shared runner, sends ONE
+   * composed prompt (predecessor context + task prompt), waits for the
+   * agent to go idle, captures the result, and tears the agent down.
+   * No pool, no reuse. The coordinator holds the only durable state.
    */
   _assignTask(task) {
     var self = this;
 
-    if (this.agentPool) {
-      // Use AgentPool: handles idle match, type match, spawn new
-      task.status = 'acquiring';
-      this.agentPool.acquire(task).then(function (agentId) {
-        self._onAgentAcquired(task, agentId);
-      }).catch(function (err) {
-        task.status = 'failed';
-        task.result = { success: false, summary: 'Agent acquisition failed: ' + err.message };
-        self._report('Task failed (agent acquisition): ' + task.description);
-        self._checkGoalCompletion(task.goalId);
-      });
-      return;
-    }
-
-    // Legacy path: find idle agent directly from WorldModel (test/no-pool path).
-    // Exclude agents already assigned to another running task to avoid
-    // sending two prompts to the same agent in parallel.
-    var self2 = this;
-    var idleAgents = this.worldModel.getIdleAgents().filter(function (a) {
-      return !self2._taskToAgent.has(a.id);
-    });
-    var bestAgent = null;
-    if (task.targetCwd) {
-      var targetLower = task.targetCwd.toLowerCase();
-      for (var i = 0; i < idleAgents.length; i++) {
-        if ((idleAgents[i].cwd || '').toLowerCase().includes(targetLower) ||
-            (idleAgents[i].project || '').toLowerCase().includes(targetLower)) {
-          bestAgent = idleAgents[i];
-          break;
-        }
-      }
-    }
-    if (!bestAgent) {
-      for (var j = 0; j < idleAgents.length; j++) {
-        if (idleAgents[j].agentType === task.agentType) {
-          bestAgent = idleAgents[j];
-          break;
-        }
-      }
-    }
-    if (!bestAgent && idleAgents.length > 0) {
-      bestAgent = idleAgents[0];
-    }
-
-    if (!bestAgent) {
-      task.status = 'failed';
-      task.result = { success: false, summary: 'No idle agent available' };
-      this._report('Task failed (no idle agent): ' + task.description);
-      this._checkGoalCompletion(task.goalId);
-      return;
-    }
-
-    this._onAgentAcquired(task, bestAgent.id);
-  }
-
-  /**
-   * Handle an agent being assigned to a task (from pool or legacy match).
-   */
-  _onAgentAcquired(task, agentId) {
-    if (!agentId) {
-      var reason = 'No agent available';
-      if (this.agentPool && this.agentPool.getLastSpawnError) {
-        var spawnErr = this.agentPool.getLastSpawnError();
-        if (spawnErr) reason = 'Failed to spawn agent: ' + spawnErr;
-      }
-      task.status = 'failed';
-      task.result = { success: false, summary: reason };
-      this._report('Task failed: ' + task.description + '\n' + reason);
-      this._checkGoalCompletion(task.goalId);
-      return;
-    }
-
-    task.status = 'running';
-    task.agentId = agentId;
-    task.startedAt = Date.now();
-    this._taskToAgent.set(agentId, task.id);
-
     // Build the final prompt: predecessor context + task prompt.
-    // This is how the mind brokers information between arms.
+    // The mind brokers information between arms by serialising prior
+    // task outputs into this block; since the agent is one-shot it has
+    // no other way to know what previous arms produced.
     var goal = this._goals.get(task.goalId);
     var contextBlock = goal && goal.plan
       ? this._buildPredecessorContext(task, goal.plan.tasks)
       : '';
     var finalPrompt = contextBlock + task.prompt;
 
-    // Set timeout
-    var self = this;
-    var timeout = setTimeout(function () {
-      self._failTask(task.id, 'Timed out after ' + Math.round(task.timeoutMs / 60000) + ' minutes');
-    }, task.timeoutMs);
-    this._timeouts.set(task.id, timeout);
+    var cwd = task.targetCwd && task.targetCwd.trim()
+      ? task.targetCwd
+      : process.cwd();
 
-    // Send prompt to the agent
-    var sent = this.instanceManager.sendToAgent(agentId, {
-      type: 'prompt',
-      text: finalPrompt,
+    var goalIdShort = (task.goalId || '').slice(-8);
+    var sourceTag = 'mind:' + goalIdShort;
+    var displayName = 'Mind arm: ' + task.description.slice(0, 60);
+
+    task.status = 'running';
+    task.startedAt = Date.now();
+
+    // Fire-and-forget. The runner's onTerminal callback finalises the
+    // task synchronously inside the same tick as the triggering event,
+    // so getActiveGoals() reflects state correctly without a microtask
+    // wait.
+    this.runner.run({
+      agentType: task.agentType,
+      cwd: cwd,
+      prompt: finalPrompt,
+      name: displayName,
+      source: sourceTag,
+      timeoutMs: task.timeoutMs,
+
+      onSpawn: function (agentInstanceId) {
+        task.agentId = agentInstanceId;
+        self._taskToAgent.set(agentInstanceId, task.id);
+        // Mirror the prompt into the arm's conversation so the dashboard
+        // shows what the mind asked for. The unprefixed prompt is what
+        // the user sees — keeping it free of the predecessor context
+        // block, which is internal plumbing.
+        try {
+          self.instanceManager.addMessage(agentInstanceId, {
+            role: 'user',
+            content: task.prompt,
+            source: 'mind',
+          });
+        } catch {}
+        var inst = self.instanceManager.get(agentInstanceId);
+        var name = inst ? (inst.name || agentInstanceId) : agentInstanceId;
+        self._report('Assigned to ' + name + ': ' + task.description);
+        self._emitGoalEvent(task.goalId, 'task_started', {
+          taskId: task.id,
+          description: task.description,
+          agentInstanceId: agentInstanceId,
+          agentName: name,
+          agentType: task.agentType,
+        });
+      },
+
+      onChunk: function (text) {
+        // Relay assistant text to goal:event consumers (gateway SSE,
+        // dashboard add-ons). The runner already feeds chunks into the
+        // agent's conversation via the instance manager, so the
+        // dashboard chat view continues to work unchanged.
+        self._emitGoalEvent(task.goalId, 'task_chunk', {
+          taskId: task.id,
+          text: text,
+        });
+      },
+
+      onApproval: function (req) {
+        // Surface the request so SSE consumers know the agent paused.
+        // The runner itself will then fail the run with
+        // status='failed', error='approval_required', which lands us
+        // in _failTask via onTerminal below. The mind's policy is to
+        // bypass approvals (autoApprove=true); reaching this path
+        // means something escaped the bypass.
+        self._emitGoalEvent(task.goalId, 'task_approval_needed', {
+          taskId: task.id,
+          request: req,
+        });
+      },
+
+      onTerminal: function (result) {
+        if (task.agentId) self._taskToAgent.delete(task.agentId);
+        // Idempotent: if some other path already finalised this task
+        // (cancelGoal, watcher failAgentTask invoked _failTask before
+        // cancelling), don't clobber that decision. We just released
+        // our id mapping above; the rest is already done.
+        if (task.status !== 'running') return;
+        if (result.status === 'completed') {
+          self._completeTask(task, result.output || '');
+        } else if (result.status === 'cancelled') {
+          // Treat cancel as a normal failure path; no retry/replan,
+          // the caller (cancelGoal / failAgentTask) already decided.
+          self._markTaskCancelled(task, result.error || 'cancelled');
+        } else {
+          self._failTask(task.id, result.error || 'agent_run_failed');
+        }
+      },
+    }).catch(function (err) {
+      // Only programmer-style errors reach here (bad opts, spawn
+      // failure before the lifecycle starts). Normal failures go via
+      // onTerminal above.
+      if (task.agentId) self._taskToAgent.delete(task.agentId);
+      self._failTask(task.id, (err && err.message) || 'run_init_failed');
     });
-
-    if (!sent) {
-      task.status = 'failed';
-      task.result = { success: false, summary: 'Failed to send prompt to agent' };
-      this._taskToAgent.delete(agentId);
-      clearTimeout(timeout);
-      this._timeouts.delete(task.id);
-      if (this.agentPool) this.agentPool.release(agentId);
-      this._report('Task failed (agent unreachable): ' + task.description);
-      this._checkGoalCompletion(task.goalId);
-      return;
-    }
-
-    // Record the prompt as a user message (the original prompt, not the
-    // full context-injected one — that would make the convo noisy)
-    this.instanceManager.addMessage(agentId, {
-      role: 'user',
-      content: task.prompt,
-      source: 'mind',
-    });
-
-    var inst = this.instanceManager.get(agentId);
-    var name = inst ? (inst.name || agentId) : agentId;
-    this._report('Assigned to ' + name + ': ' + task.description);
   }
 
   /**
-   * Handle an agent going idle (potential task completion).
+   * Mark a task as cancelled (via cancelGoal or watcher abort) without
+   * triggering the replan path. Cancellation is an external decision
+   * already taken by the caller; replanning would undo it.
    */
-  _onAgentIdle(agentId) {
-    var taskId = this._taskToAgent.get(agentId);
-    if (!taskId) return;
-
-    var task = this._findTask(taskId);
-    if (!task || task.status !== 'running') return;
-
-    // Clear timeout
-    var timeout = this._timeouts.get(taskId);
-    if (timeout) {
-      clearTimeout(timeout);
-      this._timeouts.delete(taskId);
-    }
-
-    this._taskToAgent.delete(agentId);
-    this._completeTask(task);
+  _markTaskCancelled(task, reason) {
+    if (task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled') return;
+    task.status = 'failed';
+    task.completedAt = Date.now();
+    task.result = { success: false, summary: 'Cancelled: ' + reason };
+    this._report('Cancelled: ' + task.description + ' (' + reason + ')');
+    this._emitGoalEvent(task.goalId, 'task_failed', {
+      taskId: task.id, reason: reason, terminal: true, cancelled: true,
+    });
+    this._checkGoalCompletion(task.goalId);
   }
 
   /**
    * Mark a task as completed and evaluate.
+   *
+   * @param {object} task
+   * @param {string} [output] - assistant text captured by the runner.
+   *   The runner is the source of truth: by the time onTerminal fires
+   *   the arm is already unregistered and the world-model has no
+   *   conversation to walk, so we take the runner's snapshot as-is.
    */
-  _completeTask(task) {
+  _completeTask(task, output) {
     task.status = 'completed';
     task.completedAt = Date.now();
     task.result = { success: true, summary: 'Completed' };
 
     // Capture the arm's output text so dependent tasks can use it as context.
     // This is the 'brokering' that lets the mind share findings between arms.
-    task.output = this._extractAgentOutput(task.agentId);
+    task.output = typeof output === 'string' ? output : '';
 
     var duration = task.completedAt - (task.startedAt || task.completedAt);
     var durationStr = duration < 60000
@@ -406,6 +450,12 @@ class Coordinator extends EventEmitter {
       : Math.round(duration / 60000) + 'min';
 
     this._report('Completed (' + durationStr + '): ' + task.description);
+    this._emitGoalEvent(task.goalId, 'task_done', {
+      taskId: task.id,
+      success: true,
+      summary: (task.output || '').slice(-1000),
+      durationMs: duration,
+    });
 
     // Dispatch dependent tasks and check goal completion synchronously
     // so the coordinator state is consistent before returning
@@ -432,15 +482,10 @@ class Coordinator extends EventEmitter {
     // Capture any partial output before clearing state (used for re-planning)
     var partialOutput = task.agentId ? this._extractAgentOutput(task.agentId) : '';
 
-    // Clean up task state
+    // Clean up task state — the runner already stopped the agent before
+    // calling onTerminal, so we just drop our id mapping here.
     if (task.agentId) {
       this._taskToAgent.delete(task.agentId);
-      if (this.agentPool) this.agentPool.release(task.agentId);
-    }
-    var timeout = this._timeouts.get(taskId);
-    if (timeout) {
-      clearTimeout(timeout);
-      this._timeouts.delete(taskId);
     }
 
     // Try to re-plan before giving up, up to MAX_REPLANS times
@@ -455,6 +500,7 @@ class Coordinator extends EventEmitter {
     task.result = { success: false, summary: reason };
 
     this._report('Failed (no more retries): ' + task.description + '\n  ' + reason);
+    this._emitGoalEvent(task.goalId, 'task_failed', { taskId: task.id, reason: reason, terminal: true });
     this._checkGoalCompletion(task.goalId);
   }
 
@@ -474,6 +520,12 @@ class Coordinator extends EventEmitter {
     task.status = 'replanning';
 
     this._report('Re-planning (attempt ' + task.replanCount + '/' + this.MAX_REPLANS + '): ' + task.description + '\n  Reason: ' + failureReason);
+    this._emitGoalEvent(task.goalId, 'replanning', {
+      taskId: task.id,
+      attempt: task.replanCount,
+      maxAttempts: this.MAX_REPLANS,
+      reason: failureReason,
+    });
 
     var completedTasks = goal.plan.tasks.filter(function (t) { return t.status === 'completed'; });
 
@@ -587,6 +639,7 @@ class Coordinator extends EventEmitter {
     task.completedAt = Date.now();
     task.result = { success: false, summary: 'Abandoned: ' + reason };
     this._report('Abandoned: ' + task.description + '\n  ' + reason);
+    this._emitGoalEvent(task.goalId, 'task_failed', { taskId: task.id, reason: reason, terminal: true, abandoned: true });
     this._checkGoalCompletion(task.goalId);
   }
 
@@ -628,6 +681,24 @@ class Coordinator extends EventEmitter {
 
       // Remove from the in-flight store (no longer pending across restart)
       this._persistGoalState(goal);
+
+      // Granular event for /v1/goals SSE consumers. Includes the per-task
+      // summaries so a caller that joined late can rebuild what happened.
+      var taskSummaries = (goal.plan && goal.plan.tasks) ? goal.plan.tasks.map(function (t) {
+        return {
+          id: t.id,
+          description: t.description,
+          status: t.status,
+          summary: (t.result && t.result.summary) || null,
+          durationMs: (t.startedAt && t.completedAt) ? (t.completedAt - t.startedAt) : null,
+        };
+      }) : [];
+      this._emitGoalEvent(goalId, 'done', {
+        status: goal.status,
+        result: goal.result,
+        taskSummaries: taskSummaries,
+        durationMs: Date.now() - goal.createdAt,
+      });
 
       this.emit('goal:completed', { goalId: goalId, status: goal.status });
     }
@@ -675,7 +746,7 @@ class Coordinator extends EventEmitter {
       });
     } catch (err) {
       // Memory persistence is non-critical — log and continue
-      console.error('[mind-coordinator] Failed to persist goal to memory:', err.message);
+      log.error('Failed to persist goal to memory:', err.message);
     }
   }
 
@@ -694,7 +765,12 @@ class Coordinator extends EventEmitter {
   }
 
   /**
-   * Cancel a goal and abort all running tasks.
+   * Cancel a goal and abort all running tasks via the runner.
+   *
+   * Each running task gets cancelled through the runner, which aborts
+   * the agent and synchronously fires the task's onTerminal callback
+   * with status='cancelled'. That in turn marks the task failed via
+   * _markTaskCancelled; we just have to handle pending tasks ourselves.
    */
   cancelGoal(goalId) {
     var goal = this._goals.get(goalId);
@@ -704,17 +780,13 @@ class Coordinator extends EventEmitter {
       for (var i = 0; i < goal.plan.tasks.length; i++) {
         var task = goal.plan.tasks[i];
         if (task.status === 'running' && task.agentId) {
-          this.instanceManager.sendToAgent(task.agentId, { type: 'abort' });
-          this._taskToAgent.delete(task.agentId);
-        }
-        if (task.status === 'pending' || task.status === 'running') {
+          // Runner.cancel triggers onTerminal -> _markTaskCancelled;
+          // status flips to 'failed' synchronously.
+          try { this.runner.cancel(task.agentId); } catch (err) {}
+        } else if (task.status === 'pending') {
+          // Pending tasks never reached the runner; mark them directly.
           task.status = 'failed';
           task.result = { success: false, summary: 'Cancelled' };
-        }
-        var timeout = this._timeouts.get(task.id);
-        if (timeout) {
-          clearTimeout(timeout);
-          this._timeouts.delete(task.id);
         }
       }
     }
@@ -723,6 +795,7 @@ class Coordinator extends EventEmitter {
     goal.result = 'Cancelled by user';
     this._persistGoalState(goal);
     this._report('Goal cancelled: ' + goal.prompt);
+    this._emitGoalEvent(goalId, 'cancelled', { reason: 'cancelled_by_user' });
   }
 
   /**
@@ -740,9 +813,12 @@ class Coordinator extends EventEmitter {
     if (!taskId) return false;
     var task = this._findTask(taskId);
     if (!task || task.status !== 'running') return false;
-    // Tell the arm to stop; the existing failure path will release/re-plan
-    try { this.instanceManager.sendToAgent(agentId, { type: 'abort' }); } catch (err) {}
+    // Mark the task failed (entering the replan path) BEFORE cancelling
+    // the agent. The runner's onTerminal callback will then see the
+    // task already-non-running and bail out, which leaves the replan
+    // flow intact.
     this._failTask(taskId, reason || 'Auto-cancelled by watcher');
+    try { this.runner.cancel(agentId); } catch (err) {}
     return true;
   }
 
@@ -770,7 +846,7 @@ class Coordinator extends EventEmitter {
         this.goalStore.upsert(goal);
       }
     } catch (err) {
-      console.error('[mind-coordinator] Goal store write failed:', err.message);
+      log.error('Goal store write failed:', err.message);
     }
   }
 
@@ -801,7 +877,7 @@ class Coordinator extends EventEmitter {
       try {
         self._persistGoalToMemory(ghost);
       } catch (err) {
-        console.error('[mind-coordinator] Failed to log interrupted goal:', err.message);
+        log.error('Failed to log interrupted goal:', err.message);
       }
       recovered.push(snap.id);
     });
@@ -838,11 +914,10 @@ class Coordinator extends EventEmitter {
    * Clean up event listeners and timeouts.
    */
   destroy() {
-    this.instanceManager.removeListener('instance:status', this._statusHandler);
-    for (var entry of this._timeouts) {
-      clearTimeout(entry[1]);
-    }
-    this._timeouts.clear();
+    // The runner owns instance-manager listener subscriptions and the
+    // per-task timeouts; we just clear our own bookkeeping. The runner
+    // itself is owned by the mind module (index.js) and is destroyed
+    // by it, which aborts any in-flight runs.
     this._goals.clear();
     this._taskToAgent.clear();
     this.removeAllListeners();

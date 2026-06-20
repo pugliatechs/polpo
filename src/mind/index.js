@@ -14,10 +14,13 @@ const { WorldModel } = require('./world-model');
 const { Reasoner } = require('./reasoner');
 const { Coordinator } = require('./coordinator');
 const { Watcher } = require('./watcher');
-const { AgentPool } = require('./agent-pool');
+const { OneShotAgentRunner } = require('../agent/one-shot-runner');
 const { Memory } = require('./memory');
 const { GoalStore } = require('./goal-store');
 const { loadPolicy } = require('./policies');
+const { makeLogger } = require('../util/logger');
+
+const log = makeLogger('mind');
 
 /**
  * Create the Alien Mind module.
@@ -54,16 +57,18 @@ function createMind(instanceManager, options) {
     model: process.env.POLPO_MIND_MODEL || null,
   });
 
-  // Load policy early for agent pool config
+  // Load policy early for agent runner config
   var policy = loadPolicy();
 
-  // Create agent pool (handles idle match, type match, spawn new)
-  var agentPool = new AgentPool({
+  // Shared one-shot agent runner — same lifecycle the HTTP gateway
+  // uses. Mind dispatches each task as an isolated runner.run() call;
+  // there is no pool/reuse. Agents are stateless function calls; the
+  // coordinator holds all the durable state (world-model, dependency
+  // graph, memory, goal store).
+  var runner = new OneShotAgentRunner({
     instanceManager: instanceManager,
-    worldModel: worldModel,
-    serverPort: options.serverPort || 7890,
-    authToken: options.authToken || null,
-    maxSpawned: policy.maxSpawnedAgents,
+    hubPort: options.serverPort || 7890,
+    hubToken: options.authToken || null,
     autoApprove: policy.autoApproveSpawned,
   });
 
@@ -72,10 +77,10 @@ function createMind(instanceManager, options) {
   try {
     memory.load();
     if (options.verbose) {
-      console.log('[mind] Memory loaded (' + memory.size() + ' past goals)');
+      log.info('Memory loaded (' + memory.size() + ' past goals)');
     }
   } catch (err) {
-    console.error('[mind] Memory load failed:', err.message);
+    log.error('Memory load failed:', err.message);
   }
 
   // Durable goal store for in-flight recovery across server restarts.
@@ -84,7 +89,7 @@ function createMind(instanceManager, options) {
   var goalStore = new GoalStore();
   goalStore.load();
   if (options.verbose && goalStore.size() > 0) {
-    console.log('[mind] Goal store has ' + goalStore.size() + ' in-flight goal(s) to recover');
+    log.info('Goal store has ' + goalStore.size() + ' in-flight goal(s) to recover');
   }
 
   // Create coordinator (goal/task lifecycle)
@@ -92,10 +97,11 @@ function createMind(instanceManager, options) {
     instanceManager: instanceManager,
     worldModel: worldModel,
     reasoner: reasoner,
-    agentPool: agentPool,
+    runner: runner,
     memory: memory,
     goalStore: goalStore,
     mindInstanceId: mindId,
+    policy: policy,
   });
 
   // Recover any goals that were in-flight at the time of the last shutdown.
@@ -103,25 +109,25 @@ function createMind(instanceManager, options) {
   try {
     coordinator.recoverInterruptedGoals();
   } catch (err) {
-    console.error('[mind] Goal recovery failed:', err.message);
+    log.error('Goal recovery failed:', err.message);
   }
 
   // Log agent events in verbose mode
   if (options.verbose) {
     worldModel.on('agent:added', function (data) {
-      console.log('[mind] Agent added: ' + data.name + ' (' + data.agentType + ')');
+      log.info('Agent added: ' + data.name + ' (' + data.agentType + ')');
     });
     worldModel.on('agent:removed', function (data) {
-      console.log('[mind] Agent removed: ' + data.id);
+      log.info('Agent removed: ' + data.id);
     });
     worldModel.on('agent:idle', function (data) {
-      console.log('[mind] Agent idle: ' + data.name);
+      log.info('Agent idle: ' + data.name);
     });
     worldModel.on('agent:busy', function (data) {
-      console.log('[mind] Agent busy: ' + data.name);
+      log.info('Agent busy: ' + data.name);
     });
     worldModel.on('all:idle', function () {
-      console.log('[mind] All agents idle');
+      log.info('All agents idle');
     });
   }
 
@@ -210,7 +216,7 @@ function createMind(instanceManager, options) {
   });
   watcher.start();
 
-  console.log('[mind] Alien Mind active (policy: ' + policy.name + ', instance: ' + mindId + ')');
+  log.info('Alien Mind active (policy: ' + policy.name + ', instance: ' + mindId + ')');
 
   return {
     worldModel: worldModel,
@@ -221,7 +227,7 @@ function createMind(instanceManager, options) {
       watcher.destroy();
       instanceManager.removeListener('instance:message', messageHandler);
       coordinator.destroy();
-      agentPool.destroy();
+      runner.destroy();
       reasoner.destroy();
       worldModel.destroy();
       instanceManager.unregister(mindId);

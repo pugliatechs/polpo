@@ -19,16 +19,18 @@
 
 const { EventEmitter } = require('events');
 const { v4: uuidv4 } = require('uuid');
-const { createAgent } = require('../agent/agent-factory');
+const { OneShotAgentRunner } = require('../agent/one-shot-runner');
 const fs = require('fs');
 const path = require('path');
 const { UPLOAD_DIR, UPLOAD_ID_REGEX } = require('./upload-constants');
+const { makeLogger } = require('../util/logger');
+
+const log = makeLogger('gateway');
 
 const VALID_AGENT_TYPES = new Set(['claude', 'codex', 'gemini', 'opencode', 'pi', 'goose']);
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;       // 5 min
 const MAX_TIMEOUT_MS_DEFAULT = 30 * 60 * 1000;  // 30 min
 const TASK_TTL_MS = 5 * 60 * 1000;              // keep completed tasks for 5 min
-const WS_READY_TIMEOUT_MS = 5000;
 
 class GatewayTaskManager extends EventEmitter {
   /**
@@ -55,15 +57,26 @@ class GatewayTaskManager extends EventEmitter {
     // default so legacy text-only tasks work unchanged.
     this.uploadStore = opts.uploadStore || null;
     this.artifactStore = opts.artifactStore || null;
-    // Injectable for tests so we don't actually spawn agent subprocesses.
-    this._createAgent = opts.createAgent || createAgent;
-    this._waitForSocket = opts.waitForSocket || waitForAgentSocket;
+
+    // All spawn-and-lifecycle work is delegated to the shared runner —
+    // the gateway is now ~purely concerned with HTTP-side concerns
+    // (validation, rate limiting, attachments, artifact sealing, SSE
+    // fanout, TTL of completed tasks). The runner is also consumed by
+    // the Alien Mind coordinator so both call sites share hardening.
+    this._runner = opts.runner || new OneShotAgentRunner({
+      instanceManager: this.instanceManager,
+      hubPort: this.hubPort,
+      hubToken: this.hubToken,
+      autoApprove: this.autoApprove,
+      createAgent: opts.createAgent,        // injectable in tests
+      waitForSocket: opts.waitForSocket,    // injectable in tests
+    });
+    // When opts.runner is provided we don't own it — caller manages
+    // destroy(). Otherwise we own the runner we created here.
+    this._ownsRunner = !opts.runner;
 
     this._tasks = new Map();      // taskId -> task record
-    this._agents = new Map();     // agentInstanceId -> agent object (so we can stop())
-    this._listenersByAgent = new Map(); // agentInstanceId -> bound handlers (for cleanup)
-    this._wired = false;
-    this._wire();
+    this._agentToTask = new Map(); // agentInstanceId -> taskId
   }
 
   /**
@@ -74,6 +87,9 @@ class GatewayTaskManager extends EventEmitter {
     const args = validateInput(input, this.maxTimeoutMs);
     const requesterFingerprint = ctx && ctx.tokenFingerprint
       ? String(ctx.tokenFingerprint).slice(0, 64)
+      : null;
+    const userAgent = ctx && typeof ctx.userAgent === 'string'
+      ? ctx.userAgent.slice(0, 200)
       : null;
 
     // Validate captureArtifacts requires the artifact store
@@ -121,6 +137,7 @@ class GatewayTaskManager extends EventEmitter {
     const task = {
       id: taskId,
       client: args.client,
+      userAgent: userAgent,
       agentType: args.agentType,
       cwd: args.cwd,
       prompt: args.prompt,
@@ -134,7 +151,6 @@ class GatewayTaskManager extends EventEmitter {
       startedAt: Date.now(),
       completedAt: null,
       agentInstanceId: null,
-      timeoutHandle: null,
       ttlHandle: null,
       subscribers: new Set(),
       // File transfer extensions:
@@ -169,6 +185,8 @@ class GatewayTaskManager extends EventEmitter {
     return {
       id: t.id,
       client: t.client,
+      clientLabel: t.clientLabel || resolveClientLabel(t),
+      userAgent: t.userAgent || null,
       agentType: t.agentType,
       cwd: t.cwd,
       prompt: t.prompt,
@@ -211,7 +229,9 @@ class GatewayTaskManager extends EventEmitter {
   }
 
   /**
-   * Cancel a running task. Aborts the agent, marks failed/cancelled, fanouts.
+   * Cancel a running task. The runner takes care of aborting the agent
+   * and resolving the in-flight run; our runPromise.then() callback
+   * above then calls _finalize with status 'cancelled'.
    */
   cancelTask(taskId) {
     const t = this._tasks.get(taskId);
@@ -220,10 +240,46 @@ class GatewayTaskManager extends EventEmitter {
       return false;
     }
     if (t.agentInstanceId) {
-      try { this.instanceManager.sendToAgent(t.agentInstanceId, { type: 'abort' }); } catch {}
+      // Synchronously finalize so callers can observe 'cancelled' on the
+      // next getTask() — runner.cancel resolves the run promise but our
+      // .then() callback isn't yet scheduled.
+      this._runner.cancel(t.agentInstanceId);
     }
-    this._finalize(t, 'cancelled', { error: 'cancelled_by_caller' });
+    if (!(t.status === 'completed' || t.status === 'failed' || t.status === 'cancelled')) {
+      this._finalize(t, 'cancelled', { error: 'cancelled_by_caller' });
+    }
     return true;
+  }
+
+  /**
+   * Emit one structured, grep-friendly log line per task spawn.
+   *
+   * Carries the resolved client label, token fingerprint (the sha256
+   * already used for rate limiting -- safe to log), agent type, cwd,
+   * prompt length, attachment count, and whether auto-approve is on.
+   * Caller content (prompt text, header values beyond UA, attachment
+   * bytes) is NOT logged.
+   */
+  _logTaskSpawn(task, clientLabel) {
+    const fp = task.requesterFingerprint
+      ? task.requesterFingerprint.slice(0, 8)
+      : '-';
+    const ua = task.userAgent
+      ? '"' + task.userAgent.replace(/"/g, '\\"') + '"'
+      : '-';
+    const parts = [
+      'task=' + task.id,
+      'client=' + clientLabel,
+      'token-fp=' + fp,
+      'agent=' + task.agentType,
+      'ua=' + ua,
+      'cwd=' + task.cwd,
+      'prompt-len=' + (task.prompt ? task.prompt.length : 0),
+      'attachments=' + (task.attachments ? task.attachments.length : 0),
+      'capture-artifacts=' + !!task.captureArtifacts,
+      'auto-approve=' + !!this.autoApprove,
+    ];
+    log.info(parts.join(' '));
   }
 
   /**
@@ -238,62 +294,22 @@ class GatewayTaskManager extends EventEmitter {
   }
 
   /**
-   * Wire up InstanceManager listeners that route events to tasks.
+   * Look up the gateway task that owns a given agent instance id.
+   * Used by the runner callbacks below to route per-task fanout.
    */
-  _wire() {
-    if (this._wired) return;
-    this._wired = true;
-    this._onStatus = (data) => this._routeStatusEvent(data);
-    this._onMessage = (data) => this._routeMessageEvent(data);
-    this._onApproval = (data) => this._routeApprovalEvent(data);
-    this.instanceManager.on('instance:status', this._onStatus);
-    this.instanceManager.on('instance:message', this._onMessage);
-    this.instanceManager.on('instance:approval', this._onApproval);
-  }
-
   _findTaskByAgent(agentInstanceId) {
     if (!agentInstanceId) return null;
-    for (const t of this._tasks.values()) {
-      if (t.agentInstanceId === agentInstanceId) return t;
-    }
-    return null;
-  }
-
-  _routeStatusEvent(data) {
-    const task = this._findTaskByAgent(data.id);
-    if (!task) return;
-    if (task.status === 'starting' && data.status === 'busy') {
-      task.status = 'running';
-    } else if (task.status === 'running' && data.status === 'idle') {
-      // Agent completed the prompt — capture trailing assistant text as result
-      this._finalize(task, 'completed', null);
-    }
-  }
-
-  _routeMessageEvent(data) {
-    const task = this._findTaskByAgent(data.id);
-    if (!task) return;
-    const msg = data.message;
-    if (!msg || msg.role !== 'assistant') return;
-    const text = typeof msg.content === 'string' ? msg.content : '';
-    if (!text) return;
-    task.output += (task.output ? '\n' : '') + text;
-    this._fanout(task, 'chunk', { text });
-  }
-
-  _routeApprovalEvent(data) {
-    const task = this._findTaskByAgent(data.id);
-    if (!task || !data.approval) return;
-    // Gateway tasks fail closed on approvals — no human to confirm.
-    this._fanout(task, 'approval', { request: data.approval });
-    if (task.agentInstanceId) {
-      try { this.instanceManager.sendToAgent(task.agentInstanceId, { type: 'abort' }); } catch {}
-    }
-    this._finalize(task, 'failed', { error: 'approval_required' });
+    const taskId = this._agentToTask.get(agentInstanceId);
+    if (!taskId) return null;
+    return this._tasks.get(taskId) || null;
   }
 
   async _spawnAndStart(task) {
-    const clientLabel = task.client || 'unknown';
+    const clientLabel = resolveClientLabel(task);
+    // Stash the resolved label so the API surfaces it consistently
+    // (instead of recomputing the ladder in every consumer).
+    task.clientLabel = clientLabel;
+    this._logTaskSpawn(task, clientLabel);
 
     // 1. Stage attachments: copy each upload into UPLOAD_DIR with a
     //    task-scoped name so WrappedAgent's existing trust boundary
@@ -338,50 +354,66 @@ class GatewayTaskManager extends EventEmitter {
       ? artifactsBlock + '\n\n' + task.prompt
       : task.prompt;
 
-    // 4. Spawn the agent
-    const agent = this._createAgent(task.agentType, {
-      name: 'Gateway: ' + clientLabel,
+    // 4. Hand off to the shared one-shot runner. The runner owns the
+    //    spawn, WS handshake, timeout arming, prompt send, status/
+    //    message/approval routing, and agent teardown. We only translate
+    //    its callbacks into task state + SSE fanout, and gateway-specific
+    //    finalize work (artifact sealing, TTL, upload pin release).
+    const runPromise = this._runner.run({
+      agentType: task.agentType,
       cwd: task.cwd,
-      serverUrl: 'ws://127.0.0.1:' + this.hubPort,
-      token: this.hubToken,
-      type: 'terminal',
-      project: path.basename(task.cwd),
+      prompt: finalPrompt,
+      name: 'Gateway: ' + clientLabel,
       source: 'gateway:' + clientLabel,
-      permissionMode: this.autoApprove ? 'bypass' : 'default',
-    });
-
-    await agent.start();
-    task.agentInstanceId = agent.instanceId;
-    this._agents.set(agent.instanceId, agent);
-
-    if (this.autoApprove) {
-      try { this.instanceManager.setAutoApprove(agent.instanceId, true); } catch {}
-    }
-
-    // Tag the registered instance with the source string (createAgent may not
-    // forward all fields uniformly across agent types).
-    const inst = this.instanceManager.get(agent.instanceId);
-    if (inst && !inst.source) inst.source = 'gateway:' + clientLabel;
-
-    await this._waitForSocket(this.instanceManager, agent.instanceId, WS_READY_TIMEOUT_MS);
-
-    // Arm the timeout BEFORE sending the prompt so a hung start still trips it
-    task.timeoutHandle = setTimeout(() => {
-      if (task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled') return;
-      if (task.agentInstanceId) {
-        try { this.instanceManager.sendToAgent(task.agentInstanceId, { type: 'abort' }); } catch {}
-      }
-      this._finalize(task, 'failed', { error: 'timeout' });
-    }, task.timeoutMs);
-
-    const sent = this.instanceManager.sendToAgent(agent.instanceId, {
-      type: 'prompt',
-      text: finalPrompt,
+      project: path.basename(task.cwd),
+      timeoutMs: task.timeoutMs,
       attachments: attachmentsForAgent.length > 0 ? attachmentsForAgent : undefined,
+
+      onSpawn: (agentInstanceId) => {
+        task.agentInstanceId = agentInstanceId;
+        this._agentToTask.set(agentInstanceId, task.id);
+      },
+      onStatus: (next) => {
+        // Only forward the 'running' transition. Terminal states arrive
+        // via the awaited run result below so the gateway can do its
+        // sealing/fanout in one place.
+        if (task.status === 'starting' && next === 'running') {
+          task.status = 'running';
+        }
+      },
+      onChunk: (text) => {
+        // Mirror chunk into the task's output buffer and broadcast to SSE
+        // subscribers. The runner already keeps its own copy, but the
+        // gateway needs an authoritative buffer for the final result snapshot.
+        task.output += (task.output ? '\n' : '') + text;
+        this._fanout(task, 'chunk', { text });
+      },
+      onApproval: (approvalReq) => {
+        // Surface to subscribers before the runner finalises with
+        // approval_required, so SSE consumers see the request payload.
+        this._fanout(task, 'approval', { request: approvalReq });
+      },
+      onTerminal: (result) => {
+        // Synchronous with the triggering event so callers (and tests)
+        // observe the terminal task.status without waiting a tick.
+        if (task.agentInstanceId) this._agentToTask.delete(task.agentInstanceId);
+        if (result.status === 'completed') {
+          this._finalize(task, 'completed', null);
+        } else if (result.status === 'cancelled') {
+          this._finalize(task, 'cancelled', { error: result.error || 'cancelled' });
+        } else {
+          this._finalize(task, 'failed', { error: result.error || 'failed' });
+        }
+      },
     });
-    if (!sent) {
-      throw new Error('agent_send_failed');
-    }
+
+    // Even though onTerminal does the work, we still attach a catch so
+    // a programmer error in start-up doesn't surface as an unhandled
+    // rejection. Real failures show up as `status: 'failed'` in onTerminal.
+    runPromise.catch((err) => {
+      if (task.agentInstanceId) this._agentToTask.delete(task.agentInstanceId);
+      this._finalize(task, 'failed', { error: (err && err.message) || 'run_failed' });
+    });
   }
 
   _fanout(task, type, data) {
@@ -397,18 +429,10 @@ class GatewayTaskManager extends EventEmitter {
     task.status = status;
     task.completedAt = Date.now();
     if (extra && extra.error) task.error = extra.error;
-    if (task.timeoutHandle) { clearTimeout(task.timeoutHandle); task.timeoutHandle = null; }
-
-    // Stop and unregister the agent BEFORE sealing — the seal pass
-    // relies on the agent subprocess being gone so write/ is quiescent.
-    if (task.agentInstanceId) {
-      const agent = this._agents.get(task.agentInstanceId);
-      if (agent) {
-        try { agent.stop(); } catch {}
-        this._agents.delete(task.agentInstanceId);
-      }
-      try { this.instanceManager.unregister(task.agentInstanceId); } catch {}
-    }
+    // Agent stop + unregister happen inside the runner before we get
+    // here; nothing for the gateway to clean up on that front. The
+    // task-side agentInstanceId is kept on the task record so callers
+    // can still correlate (it's the same id used for the source tag).
 
     // Seal artifacts (regardless of completed/failed — the caller may
     // still want partial output even from a failed run)
@@ -514,17 +538,15 @@ class GatewayTaskManager extends EventEmitter {
   }
 
   destroy() {
-    this.instanceManager.removeListener('instance:status', this._onStatus);
-    this.instanceManager.removeListener('instance:message', this._onMessage);
-    this.instanceManager.removeListener('instance:approval', this._onApproval);
+    // Tear down the runner first — that aborts in-flight runs, which
+    // resolves their promises with status 'cancelled' and triggers the
+    // .then() in _spawnAndStart that finalises each task. Skip when the
+    // runner was injected by an outer owner.
+    if (this._ownsRunner && this._runner) {
+      try { this._runner.destroy(); } catch {}
+    }
     for (const t of this._tasks.values()) {
-      if (t.timeoutHandle) clearTimeout(t.timeoutHandle);
       if (t.ttlHandle) clearTimeout(t.ttlHandle);
-      if (t.agentInstanceId) {
-        const agent = this._agents.get(t.agentInstanceId);
-        if (agent) { try { agent.stop(); } catch {} }
-        try { this.instanceManager.unregister(t.agentInstanceId); } catch {}
-      }
       // Clean up any task-scoped attachment copies we left behind
       for (const p of (t.copiedAttachmentPaths || [])) {
         try { fs.unlinkSync(p); } catch {}
@@ -540,7 +562,7 @@ class GatewayTaskManager extends EventEmitter {
       }
     }
     this._tasks.clear();
-    this._agents.clear();
+    this._agentToTask.clear();
   }
 }
 
@@ -554,6 +576,37 @@ class GatewayTaskManager extends EventEmitter {
  * so it's visually distinct, and lists the constraints explicitly so
  * the agent doesn't need to guess.
  */
+/**
+ * Pick the most informative human-readable label for a gateway caller.
+ * Order of preference:
+ *   1. Explicit `client` from body or X-Polpo-Client header
+ *   2. First whitespace-delimited token of the User-Agent header
+ *      (e.g. "openclaw/1.4 (linux)" -> "openclaw/1.4")
+ *   3. Stable per-token pseudonym derived from the bearer fingerprint
+ *      ("anon-<7 chars>"), which is the sha256 hash already used for
+ *      rate limiting -- not the secret itself.
+ *   4. "unknown" only when the caller is literally unidentifiable
+ *      (no auth, no UA, no client field), which should be impossible
+ *      in production because auth is required.
+ *
+ * The result is sanitised so it can be safely composed into strings
+ * like "Gateway: <label>" or "gateway:<label>".
+ */
+function resolveClientLabel(task) {
+  const sanitize = (s) => String(s).replace(/[^A-Za-z0-9._\-+/]/g, '_').slice(0, 32);
+  if (task && typeof task.client === 'string' && task.client.trim()) {
+    return sanitize(task.client.trim());
+  }
+  if (task && typeof task.userAgent === 'string' && task.userAgent.trim()) {
+    const firstToken = task.userAgent.trim().split(/\s+/)[0];
+    if (firstToken) return sanitize(firstToken);
+  }
+  if (task && typeof task.requesterFingerprint === 'string' && task.requesterFingerprint) {
+    return 'anon-' + task.requesterFingerprint.slice(0, 7);
+  }
+  return 'unknown';
+}
+
 function buildArtifactsDirective(dir) {
   return [
     `<polpo:artifacts dir="${dir}" max-files="${require('./upload-constants').GATEWAY_TASK_ARTIFACT_MAX_FILES}" max-bytes="${require('./upload-constants').GATEWAY_TASK_AGGREGATE_BYTES}">`,
@@ -687,25 +740,6 @@ function validateInput(input, maxTimeoutMs) {
     attachments: resolvedAttachments,
     captureArtifacts: !!captureArtifacts,
   };
-}
-
-function waitForAgentSocket(instanceManager, agentId, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const deadline = Date.now() + timeoutMs;
-    const check = () => {
-      const inst = instanceManager.get(agentId);
-      if (inst && inst.agentSocket && inst.agentSocket.readyState === 1) {
-        resolve();
-        return;
-      }
-      if (Date.now() > deadline) {
-        reject(new Error('agent_ws_timeout'));
-        return;
-      }
-      setTimeout(check, 100);
-    };
-    check();
-  });
 }
 
 module.exports = {

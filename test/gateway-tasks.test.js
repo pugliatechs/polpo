@@ -203,10 +203,52 @@ describe('GatewayTaskManager: lifecycle', () => {
     const snap = tm.getTask(taskId);
     assert.ok(snap);
     assert.equal(snap.client, 'openclaw');
+    assert.equal(snap.clientLabel, 'openclaw');
     const inst = im.get(snap.agentInstanceId);
     assert.ok(inst);
     assert.equal(inst.source, 'gateway:openclaw');
     assert.equal(inst.name, 'Gateway: openclaw');
+  });
+
+  it('falls back to the first token of User-Agent when client is absent', async () => {
+    const { taskId } = await tm.createTask(
+      { agentType: 'claude', cwd: '/tmp', prompt: 'x' },
+      { userAgent: 'openclaw/1.4 (linux x86_64)' }
+    );
+    const snap = tm.getTask(taskId);
+    assert.equal(snap.client, null);
+    assert.equal(snap.clientLabel, 'openclaw/1.4');
+    const inst = im.get(snap.agentInstanceId);
+    assert.equal(inst.name, 'Gateway: openclaw/1.4');
+    assert.equal(inst.source, 'gateway:openclaw/1.4');
+  });
+
+  it('falls back to a stable token-fingerprint pseudonym when client and UA are absent', async () => {
+    const { taskId } = await tm.createTask(
+      { agentType: 'claude', cwd: '/tmp', prompt: 'x' },
+      { tokenFingerprint: 'a3f9c12abcd1234567890' }
+    );
+    const snap = tm.getTask(taskId);
+    assert.equal(snap.client, null);
+    assert.equal(snap.userAgent, null);
+    assert.equal(snap.clientLabel, 'anon-a3f9c12');
+    const inst = im.get(snap.agentInstanceId);
+    assert.equal(inst.name, 'Gateway: anon-a3f9c12');
+  });
+
+  it('returns "unknown" only when nothing is known about the caller', async () => {
+    const { taskId } = await tm.createTask({ agentType: 'claude', cwd: '/tmp', prompt: 'x' });
+    const snap = tm.getTask(taskId);
+    assert.equal(snap.clientLabel, 'unknown');
+  });
+
+  it('sanitises shell-unsafe characters in client and UA labels', async () => {
+    const { taskId } = await tm.createTask(
+      { agentType: 'claude', cwd: '/tmp', prompt: 'x', client: 'evil;rm -rf /' }
+    );
+    const snap = tm.getTask(taskId);
+    // Sanitiser collapses to [A-Za-z0-9._\-+/], so ';' becomes '_'
+    assert.equal(/^[A-Za-z0-9._\-+/]+$/.test(snap.clientLabel), true);
   });
 
   it('sends the prompt to the agent via instanceManager.sendToAgent', async () => {

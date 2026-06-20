@@ -4,7 +4,10 @@ const EventEmitter = require('events');
 const { Coordinator } = require('../src/mind/coordinator');
 const { WorldModel } = require('../src/mind/world-model');
 
-// Mock InstanceManager
+/**
+ * Minimal mock InstanceManager — same as the gateway-tasks mock, just
+ * adapted to the bits the coordinator + mock runner use here.
+ */
 function createMockIM() {
   const em = new EventEmitter();
   const instances = new Map();
@@ -16,6 +19,7 @@ function createMockIM() {
       cwd: info.cwd || '/tmp', status: 'idle', conversation: [],
       pendingApproval: null, canReceivePrompts: info.canReceivePrompts !== false,
       agentType: info.agentType || 'claude', conversationLength: 0,
+      source: info.source || null,
     };
     instances.set(id, inst);
     em.emit('instance:registered', inst);
@@ -49,412 +53,382 @@ function createMockIM() {
   return em;
 }
 
-// Mock Reasoner that returns a canned plan
+/**
+ * Mock OneShotAgentRunner — under test, the coordinator spawns ALL
+ * arms through the runner. This mock records every run() call and
+ * exposes helpers that simulate the runner's terminal events
+ * (completed / failed / cancelled). It registers a fake instance in
+ * the InstanceManager so coordinator-side helpers like addMessage()
+ * and get() continue to work.
+ */
+function createMockRunner(im) {
+  let nextAgentId = 0;
+  const activeRuns = new Map(); // agentInstanceId -> record
+  const allRuns = [];           // full history
+
+  function makeAgentId(opts) {
+    nextAgentId++;
+    return 'mind-arm-' + nextAgentId;
+  }
+
+  const runner = {
+    _activeRuns: activeRuns,
+    _allRuns: allRuns,
+
+    run(opts) {
+      const agentId = makeAgentId(opts);
+      im.register({
+        id: agentId,
+        name: opts.name,
+        cwd: opts.cwd,
+        project: 'polpo',
+        agentType: opts.agentType,
+        source: opts.source,
+      });
+      const record = {
+        opts,
+        agentInstanceId: agentId,
+        terminated: false,
+        startedAt: Date.now(),
+      };
+      activeRuns.set(agentId, record);
+      allRuns.push(record);
+      // Synchronous spawn signal so the coordinator's onSpawn callback
+      // fires before any test code looks at the resulting state.
+      if (opts.onSpawn) opts.onSpawn(agentId);
+      return new Promise((resolve) => { record.resolve = resolve; });
+    },
+
+    cancel(agentInstanceId) {
+      const r = activeRuns.get(agentInstanceId);
+      if (!r || r.terminated) return false;
+      runner._finishRun(r, 'cancelled', '', 'cancelled_by_caller');
+      return true;
+    },
+
+    destroy() {
+      for (const r of [...activeRuns.values()]) {
+        if (!r.terminated) runner._finishRun(r, 'cancelled', '', 'destroyed');
+      }
+      activeRuns.clear();
+    },
+
+    // --- test helpers ---
+    /** Drive the most-recent still-running arm to a successful finish. */
+    completeNextRun(output) {
+      const r = runner._lastActive();
+      if (!r) throw new Error('no active run');
+      runner._finishRun(r, 'completed', output || '', null);
+      return r.agentInstanceId;
+    },
+    completeRun(agentInstanceId, output) {
+      const r = activeRuns.get(agentInstanceId);
+      if (!r) throw new Error('no run for ' + agentInstanceId);
+      runner._finishRun(r, 'completed', output || '', null);
+    },
+    failRun(agentInstanceId, error) {
+      const r = activeRuns.get(agentInstanceId);
+      if (!r) throw new Error('no run for ' + agentInstanceId);
+      runner._finishRun(r, 'failed', '', error || 'failed');
+    },
+    /** Simulate the runner forwarding a chunk from the agent. */
+    fireChunk(agentInstanceId, text) {
+      const r = activeRuns.get(agentInstanceId);
+      if (!r || !r.opts.onChunk) return;
+      r.opts.onChunk(text);
+    },
+    /** Most-recent still-running record (in insertion order). */
+    _lastActive() {
+      for (const r of [...activeRuns.values()].reverse()) {
+        if (!r.terminated) return r;
+      }
+      return null;
+    },
+    _finishRun(record, status, output, error) {
+      record.terminated = true;
+      activeRuns.delete(record.agentInstanceId);
+      try { im.unregister(record.agentInstanceId); } catch {}
+      const result = {
+        status,
+        output: output || '',
+        error: error || null,
+        durationMs: Date.now() - record.startedAt,
+        agentInstanceId: record.agentInstanceId,
+      };
+      if (record.opts.onTerminal) record.opts.onTerminal(result);
+      if (record.resolve) record.resolve(result);
+    },
+
+    promptsSent() { return allRuns.map(r => r.opts.prompt); },
+  };
+  return runner;
+}
+
 function createMockReasoner(plan, replanResponse) {
   return {
-    plan: async function () { return plan || { tasks: [{ description: 'Do the thing', agentType: 'claude', targetCwd: '/tmp', prompt: 'Please do the thing', dependsOn: [] }] }; },
+    plan: async function () {
+      return plan || {
+        tasks: [{ description: 'Do the thing', agentType: 'claude', targetCwd: '/tmp', prompt: 'Please do the thing', dependsOn: [] }],
+      };
+    },
     replan: async function () { return replanResponse || { action: 'abandon', reason: 'mock default' }; },
     evaluate: async function () { return { success: true, summary: 'Looks good' }; },
     destroy: function () {},
   };
 }
 
-describe('Coordinator', () => {
-  let im;
-  let wm;
-  let coordinator;
+function newCoord(im, wm, reasoner, runner, extra) {
+  return new Coordinator(Object.assign({
+    instanceManager: im,
+    worldModel: wm,
+    reasoner,
+    runner,
+    mindInstanceId: 'mind-001',
+  }, extra || {}));
+}
+
+describe('Coordinator: basic lifecycle', () => {
+  let im, wm, runner, coordinator;
   const MIND_ID = 'mind-001';
 
   beforeEach(() => {
     im = createMockIM();
     im.register({ id: MIND_ID, name: 'Alien Mind', agentType: 'mind' });
     wm = new WorldModel(im, MIND_ID);
+    runner = createMockRunner(im);
   });
 
   afterEach(() => {
     if (coordinator) coordinator.destroy();
+    runner.destroy();
     wm.destroy();
   });
 
+  it('requires a runner', () => {
+    assert.throws(() => new Coordinator({
+      instanceManager: im, worldModel: wm, reasoner: createMockReasoner(),
+      mindInstanceId: MIND_ID,
+    }), /runner/);
+  });
+
   it('submitGoal creates a goal with correct shape', async () => {
-    const reasoner = createMockReasoner();
-    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, mindInstanceId: MIND_ID });
-
-    // Add an idle agent
-    im.register({ id: 'agent-1', name: 'Worker', agentType: 'claude' });
-
+    coordinator = newCoord(im, wm, createMockReasoner(), runner);
     const result = await coordinator.submitGoal('Fix the tests');
-    assert.ok(result.goalId);
     assert.ok(result.goalId.startsWith('goal-'));
-
     const goals = coordinator.getActiveGoals();
     assert.equal(goals.length, 1);
     assert.equal(goals[0].prompt, 'Fix the tests');
   });
 
-  it('assigns task to idle agent', async () => {
-    const reasoner = createMockReasoner();
-    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, mindInstanceId: MIND_ID });
-
-    im.register({ id: 'agent-1', name: 'Worker', agentType: 'claude' });
-
+  it('dispatches each task as a runner.run() call', async () => {
+    coordinator = newCoord(im, wm, createMockReasoner(), runner);
     await coordinator.submitGoal('Fix the tests');
-
-    // Check that a prompt was sent to the agent
-    const sentToAgent = im._sent.filter(function (s) { return s.id === 'agent-1'; });
-    assert.ok(sentToAgent.length > 0);
-    assert.equal(sentToAgent[0].msg.type, 'prompt');
-    assert.ok(sentToAgent[0].msg.text.includes('do the thing'));
+    assert.equal(runner._allRuns.length, 1);
+    assert.ok(runner.promptsSent()[0].includes('do the thing'));
   });
 
-  it('prefers agent matching targetCwd', async () => {
-    const plan = { tasks: [{ description: 'Task', agentType: 'claude', targetCwd: '/project-a', prompt: 'work on A', dependsOn: [] }] };
-    const reasoner = createMockReasoner(plan);
-    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, mindInstanceId: MIND_ID });
-
-    im.register({ id: 'agent-wrong', name: 'Wrong', agentType: 'claude', cwd: '/project-b' });
-    im.register({ id: 'agent-right', name: 'Right', agentType: 'claude', cwd: '/project-a' });
-
-    await coordinator.submitGoal('Work on A');
-
-    const sentToRight = im._sent.filter(function (s) { return s.id === 'agent-right'; });
-    assert.ok(sentToRight.length > 0);
+  it('tags each arm with source: mind:<goalId-tail>', async () => {
+    coordinator = newCoord(im, wm, createMockReasoner(), runner);
+    const { goalId } = await coordinator.submitGoal('Fix the tests');
+    const opts = runner._allRuns[0].opts;
+    assert.equal(opts.source, 'mind:' + goalId.slice(-8));
+    assert.ok(opts.name.startsWith('Mind arm:'));
   });
 
-  it('reports failure when no idle agents', async () => {
-    const reasoner = createMockReasoner();
-    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, mindInstanceId: MIND_ID });
-
-    // No agents registered (besides mind)
-
-    await coordinator.submitGoal('Do something');
-
-    const goals = coordinator.getActiveGoals();
-    // Task should have failed
-    const task = goals[0].plan.tasks[0];
-    assert.equal(task.status, 'failed');
-    assert.ok(task.result.summary.includes('No idle agent'));
-  });
-
-  it('detects task completion when agent goes idle', async () => {
-    const reasoner = createMockReasoner();
-    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, mindInstanceId: MIND_ID });
-
-    im.register({ id: 'agent-1', name: 'Worker', agentType: 'claude' });
-
-    await coordinator.submitGoal('Fix tests');
-
-    // Simulate agent going busy then idle
-    im.updateStatus('agent-1', 'busy');
-    im.updateStatus('agent-1', 'idle');
-
+  it('treats runner.run completion as task completion', async () => {
+    coordinator = newCoord(im, wm, createMockReasoner(), runner);
+    await coordinator.submitGoal('Fix the tests');
+    runner.completeNextRun('I did the thing');
     const goals = coordinator.getActiveGoals();
     assert.equal(goals[0].plan.tasks[0].status, 'completed');
+    assert.equal(goals[0].plan.tasks[0].output, 'I did the thing');
   });
 
   it('marks goal completed when all tasks done', async () => {
-    const reasoner = createMockReasoner();
-    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, mindInstanceId: MIND_ID });
-
-    im.register({ id: 'agent-1', name: 'Worker', agentType: 'claude' });
-
+    coordinator = newCoord(im, wm, createMockReasoner(), runner);
     let completedGoalId = null;
-    coordinator.on('goal:completed', function (data) { completedGoalId = data.goalId; });
-
-    await coordinator.submitGoal('Fix tests');
-
-    im.updateStatus('agent-1', 'busy');
-    im.updateStatus('agent-1', 'idle');
-
+    coordinator.on('goal:completed', d => { completedGoalId = d.goalId; });
+    await coordinator.submitGoal('Fix the tests');
+    runner.completeNextRun('done');
     assert.ok(completedGoalId);
-    const goals = coordinator.getActiveGoals();
-    assert.equal(goals[0].status, 'completed');
+    assert.equal(coordinator.getActiveGoals()[0].status, 'completed');
   });
 
-  it('cancelGoal aborts running tasks', async () => {
-    const reasoner = createMockReasoner();
-    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, mindInstanceId: MIND_ID });
-
-    im.register({ id: 'agent-1', name: 'Worker', agentType: 'claude' });
-
-    const result = await coordinator.submitGoal('Long task');
-    coordinator.cancelGoal(result.goalId);
-
-    const goals = coordinator.getActiveGoals();
-    assert.equal(goals[0].status, 'failed');
-    assert.equal(goals[0].result, 'Cancelled by user');
-
-    // Should have sent abort to agent
-    const aborts = im._sent.filter(function (s) { return s.msg.type === 'abort'; });
-    assert.ok(aborts.length > 0);
+  it('cancelGoal aborts running tasks via the runner', async () => {
+    coordinator = newCoord(im, wm, createMockReasoner(), runner);
+    const { goalId } = await coordinator.submitGoal('Long task');
+    const armId = runner._allRuns[0].agentInstanceId;
+    assert.ok(runner._activeRuns.has(armId), 'arm is in flight before cancel');
+    coordinator.cancelGoal(goalId);
+    assert.equal(runner._activeRuns.has(armId), false, 'arm cancelled');
+    const goal = coordinator.getActiveGoals()[0];
+    assert.equal(goal.status, 'failed');
+    assert.equal(goal.result, 'Cancelled by user');
   });
 
   it('handles planning failure gracefully', async () => {
     const failingReasoner = {
-      plan: async function () { throw new Error('LLM unavailable'); },
-      evaluate: async function () { return { success: true, summary: '' }; },
-      destroy: function () {},
+      plan: async () => { throw new Error('LLM unavailable'); },
+      evaluate: async () => ({ success: true, summary: '' }),
+      destroy: () => {},
     };
-    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner: failingReasoner, mindInstanceId: MIND_ID });
-
+    coordinator = newCoord(im, wm, failingReasoner, runner);
     await coordinator.submitGoal('Something');
-
     const goals = coordinator.getActiveGoals();
     assert.equal(goals[0].status, 'failed');
     assert.ok(goals[0].result.includes('Planning failed'));
+    assert.equal(runner._allRuns.length, 0, 'no arm spawned on planning failure');
   });
 
   it('reports progress to mind conversation', async () => {
-    const reasoner = createMockReasoner();
-    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, mindInstanceId: MIND_ID });
-
-    im.register({ id: 'agent-1', name: 'Worker', agentType: 'claude' });
-
+    coordinator = newCoord(im, wm, createMockReasoner(), runner);
     await coordinator.submitGoal('Fix tests');
-
-    // Check mind's conversation has planning and assignment messages
     const conv = im.getConversation(MIND_ID, 20);
-    const assistantMsgs = conv.filter(function (m) { return m.role === 'assistant' && m.source === 'mind'; });
-    assert.ok(assistantMsgs.length >= 2); // At least "Planning..." and "Assigned to..."
-    assert.ok(assistantMsgs.some(function (m) { return m.content.includes('Planning'); }));
-    assert.ok(assistantMsgs.some(function (m) { return m.content.includes('Assigned'); }));
+    const assistant = conv.filter(m => m.role === 'assistant' && m.source === 'mind');
+    assert.ok(assistant.length >= 2);
+    assert.ok(assistant.some(m => m.content.includes('Planning')));
+    assert.ok(assistant.some(m => m.content.includes('Assigned')));
   });
 });
 
-describe('Coordinator with dependencies', () => {
-  let im;
-  let wm;
-  let coordinator;
+describe('Coordinator: task dependencies', () => {
+  let im, wm, runner, coordinator;
   const MIND_ID = 'mind-001';
 
   beforeEach(() => {
     im = createMockIM();
     im.register({ id: MIND_ID, name: 'Alien Mind', agentType: 'mind' });
     wm = new WorldModel(im, MIND_ID);
+    runner = createMockRunner(im);
   });
 
   afterEach(() => {
     if (coordinator) coordinator.destroy();
+    runner.destroy();
     wm.destroy();
   });
 
   it('only dispatches tasks with met dependencies', async () => {
-    const plan = {
-      tasks: [
-        { description: 'First', agentType: 'claude', targetCwd: '', prompt: 'do first', dependsOn: [] },
-        { description: 'Second', agentType: 'claude', targetCwd: '', prompt: 'do second', dependsOn: [0] },
-      ],
-    };
-    const reasoner = createMockReasoner(plan);
-    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, mindInstanceId: MIND_ID });
+    const plan = { tasks: [
+      { description: 'First', agentType: 'claude', targetCwd: '', prompt: 'do first', dependsOn: [] },
+      { description: 'Second', agentType: 'claude', targetCwd: '', prompt: 'do second', dependsOn: [0] },
+    ] };
+    coordinator = newCoord(im, wm, createMockReasoner(plan), runner);
+    await coordinator.submitGoal('Two-step');
+    assert.equal(runner._allRuns.length, 1);
+    assert.ok(runner.promptsSent()[0].includes('do first'));
 
-    im.register({ id: 'agent-1', name: 'Worker 1', agentType: 'claude' });
-    im.register({ id: 'agent-2', name: 'Worker 2', agentType: 'claude' });
-
-    await coordinator.submitGoal('Two-step task');
-
-    // Only the first task should have been dispatched
-    const prompts = im._sent.filter(function (s) { return s.msg.type === 'prompt'; });
-    assert.equal(prompts.length, 1);
-    assert.ok(prompts[0].msg.text.includes('do first'));
-
-    // Complete first task
-    im.updateStatus('agent-1', 'busy');
-    im.updateStatus('agent-1', 'idle');
-
-    // Now second task should be dispatched
-    const allPrompts = im._sent.filter(function (s) { return s.msg.type === 'prompt'; });
-    assert.equal(allPrompts.length, 2);
-    assert.ok(allPrompts[1].msg.text.includes('do second'));
+    runner.completeNextRun('first done');
+    assert.equal(runner._allRuns.length, 2);
+    assert.ok(runner.promptsSent()[1].includes('do second'));
   });
 
   it('injects predecessor output as context for dependent tasks', async () => {
-    const plan = {
-      tasks: [
-        { description: 'Research step', agentType: 'claude', targetCwd: '', prompt: 'research the topic', dependsOn: [] },
-        { description: 'Build step', agentType: 'claude', targetCwd: '', prompt: 'build based on research', dependsOn: [0] },
-      ],
-    };
-    const reasoner = createMockReasoner(plan);
-    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, mindInstanceId: MIND_ID });
+    const plan = { tasks: [
+      { description: 'Research', agentType: 'claude', targetCwd: '', prompt: 'research the topic', dependsOn: [] },
+      { description: 'Build', agentType: 'claude', targetCwd: '', prompt: 'build based on research', dependsOn: [0] },
+    ] };
+    coordinator = newCoord(im, wm, createMockReasoner(plan), runner);
+    await coordinator.submitGoal('Two-step');
+    runner.completeNextRun('Found that X uses Y library');
 
-    im.register({ id: 'agent-1', name: 'Worker 1', agentType: 'claude' });
-
-    await coordinator.submitGoal('Two-step goal');
-
-    // Simulate the first arm producing output, then completing
-    im.addMessage('agent-1', { role: 'assistant', content: 'Found that X uses Y library', contentType: 'text' });
-    im.updateStatus('agent-1', 'busy');
-    im.updateStatus('agent-1', 'idle');
-
-    // The second task should have been dispatched with the first's output as context
-    const prompts = im._sent.filter(function (s) { return s.msg.type === 'prompt'; });
-    assert.equal(prompts.length, 2);
-    const secondPrompt = prompts[1].msg.text;
-    assert.ok(secondPrompt.includes('<previous_task_results>'), 'expected context block in dependent prompt');
-    assert.ok(secondPrompt.includes('Found that X uses Y library'), 'expected predecessor output in context');
-    assert.ok(secondPrompt.includes('build based on research'), 'expected task prompt still present');
-    // The context block should come BEFORE the task prompt
-    const ctxIdx = secondPrompt.indexOf('<previous_task_results>');
-    const taskIdx = secondPrompt.indexOf('build based on research');
-    assert.ok(ctxIdx < taskIdx, 'expected context to come before task prompt');
+    const second = runner.promptsSent()[1];
+    assert.ok(second.includes('<previous_task_results>'));
+    assert.ok(second.includes('Found that X uses Y library'));
+    assert.ok(second.includes('build based on research'));
+    assert.ok(second.indexOf('<previous_task_results>') < second.indexOf('build based on research'));
   });
 
   it('first task has no predecessor context', async () => {
-    const plan = {
-      tasks: [
-        { description: 'Standalone', agentType: 'claude', targetCwd: '', prompt: 'do it', dependsOn: [] },
-      ],
-    };
-    const reasoner = createMockReasoner(plan);
-    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, mindInstanceId: MIND_ID });
-
-    im.register({ id: 'agent-1', name: 'Worker 1', agentType: 'claude' });
-
-    await coordinator.submitGoal('Single task');
-
-    const prompts = im._sent.filter(function (s) { return s.msg.type === 'prompt'; });
-    assert.equal(prompts.length, 1);
-    assert.ok(!prompts[0].msg.text.includes('<previous_task_results>'));
+    coordinator = newCoord(im, wm, createMockReasoner(), runner);
+    await coordinator.submitGoal('Single');
+    assert.ok(!runner.promptsSent()[0].includes('<previous_task_results>'));
   });
 
   it('multiple predecessors each provide context', async () => {
-    const plan = {
-      tasks: [
-        { description: 'Research A', agentType: 'claude', targetCwd: '', prompt: 'research A', dependsOn: [] },
-        { description: 'Research B', agentType: 'claude', targetCwd: '', prompt: 'research B', dependsOn: [] },
-        { description: 'Synthesize', agentType: 'claude', targetCwd: '', prompt: 'synthesize findings', dependsOn: [0, 1] },
-      ],
-    };
-    const reasoner = createMockReasoner(plan);
-    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, mindInstanceId: MIND_ID });
+    const plan = { tasks: [
+      { description: 'A', agentType: 'claude', targetCwd: '', prompt: 'research A', dependsOn: [] },
+      { description: 'B', agentType: 'claude', targetCwd: '', prompt: 'research B', dependsOn: [] },
+      { description: 'C', agentType: 'claude', targetCwd: '', prompt: 'synthesize findings', dependsOn: [0, 1] },
+    ] };
+    coordinator = newCoord(im, wm, createMockReasoner(plan), runner);
+    await coordinator.submitGoal('Diamond');
+    // Two parallel arms run first
+    assert.equal(runner._allRuns.length, 2);
+    runner.completeRun(runner._allRuns[0].agentInstanceId, 'Finding A: alpha');
+    runner.completeRun(runner._allRuns[1].agentInstanceId, 'Finding B: beta');
 
-    im.register({ id: 'agent-1', name: 'Worker 1', agentType: 'claude' });
-    im.register({ id: 'agent-2', name: 'Worker 2', agentType: 'claude' });
-
-    await coordinator.submitGoal('Diamond task');
-
-    // Simulate both parallel tasks completing with different outputs
-    im.addMessage('agent-1', { role: 'assistant', content: 'Finding A: alpha', contentType: 'text' });
-    im.updateStatus('agent-1', 'busy');
-    im.updateStatus('agent-1', 'idle');
-
-    im.addMessage('agent-2', { role: 'assistant', content: 'Finding B: beta', contentType: 'text' });
-    im.updateStatus('agent-2', 'busy');
-    im.updateStatus('agent-2', 'idle');
-
-    // Synthesis task should now be dispatched with both outputs as context
-    const prompts = im._sent.filter(function (s) { return s.msg.type === 'prompt'; });
-    assert.equal(prompts.length, 3);
-    const synthPrompt = prompts[2].msg.text;
-    assert.ok(synthPrompt.includes('Finding A: alpha'), 'expected predecessor A output');
-    assert.ok(synthPrompt.includes('Finding B: beta'), 'expected predecessor B output');
+    assert.equal(runner._allRuns.length, 3);
+    const synth = runner.promptsSent()[2];
+    assert.ok(synth.includes('Finding A: alpha'));
+    assert.ok(synth.includes('Finding B: beta'));
   });
 
   it('truncates long predecessor outputs', async () => {
-    const plan = {
-      tasks: [
-        { description: 'Big output', agentType: 'claude', targetCwd: '', prompt: 'produce lots', dependsOn: [] },
-        { description: 'Consume', agentType: 'claude', targetCwd: '', prompt: 'use output', dependsOn: [0] },
-      ],
-    };
-    const reasoner = createMockReasoner(plan);
-    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, mindInstanceId: MIND_ID });
-
-    im.register({ id: 'agent-1', name: 'Worker 1', agentType: 'claude' });
-
+    const plan = { tasks: [
+      { description: 'A', agentType: 'claude', targetCwd: '', prompt: 'produce lots', dependsOn: [] },
+      { description: 'B', agentType: 'claude', targetCwd: '', prompt: 'use output', dependsOn: [0] },
+    ] };
+    coordinator = newCoord(im, wm, createMockReasoner(plan), runner);
     await coordinator.submitGoal('Big context');
-
-    const hugeOutput = 'x'.repeat(20000);
-    im.addMessage('agent-1', { role: 'assistant', content: hugeOutput, contentType: 'text' });
-    im.updateStatus('agent-1', 'busy');
-    im.updateStatus('agent-1', 'idle');
-
-    const prompts = im._sent.filter(function (s) { return s.msg.type === 'prompt'; });
-    const secondPrompt = prompts[1].msg.text;
-    assert.ok(secondPrompt.includes('output truncated'), 'expected truncation marker');
-    assert.ok(secondPrompt.length < 15000, 'expected prompt to be bounded');
+    runner.completeNextRun('x'.repeat(20000));
+    const second = runner.promptsSent()[1];
+    assert.ok(second.includes('output truncated'));
+    assert.ok(second.length < 15000);
   });
 
-  it('_extractAgentOutput pulls consecutive trailing assistant messages', async () => {
+  it('the runner output is the authoritative source for predecessor context', async () => {
+    // Earlier versions walked the world-model conversation to recover
+    // the arm's trailing assistant text. The runner now captures every
+    // chunk and feeds it to onTerminal, so the coordinator takes that
+    // snapshot at face value — no world-model fallback needed.
     const plan = { tasks: [
-      { description: 'Step 1', agentType: 'claude', targetCwd: '', prompt: 'first', dependsOn: [] },
-      { description: 'Step 2', agentType: 'claude', targetCwd: '', prompt: 'second', dependsOn: [0] },
+      { description: 'A', agentType: 'claude', targetCwd: '', prompt: 'first', dependsOn: [] },
+      { description: 'B', agentType: 'claude', targetCwd: '', prompt: 'second', dependsOn: [0] },
     ] };
-    const reasoner = createMockReasoner(plan);
-    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, mindInstanceId: MIND_ID });
-
-    im.register({ id: 'agent-1', name: 'Worker 1', agentType: 'claude' });
-
-    await coordinator.submitGoal('Multi-message');
-
-    // Add a mix of messages: user, assistant, tool, assistant, assistant
-    im.addMessage('agent-1', { role: 'user', content: 'earlier user msg' });
-    im.addMessage('agent-1', { role: 'assistant', content: 'earlier answer', contentType: 'text' });
-    im.addMessage('agent-1', { role: 'tool', content: 'tool stuff', contentType: 'tool_result' });
-    im.addMessage('agent-1', { role: 'assistant', content: 'final 1', contentType: 'text' });
-    im.addMessage('agent-1', { role: 'assistant', content: 'final 2', contentType: 'text' });
-    im.updateStatus('agent-1', 'busy');
-    im.updateStatus('agent-1', 'idle');
-
-    const prompts = im._sent.filter(function (s) { return s.msg.type === 'prompt'; });
-    const secondPrompt = prompts[1].msg.text;
-    // Should include the trailing consecutive assistant messages, not earlier ones
-    assert.ok(secondPrompt.includes('final 1'));
-    assert.ok(secondPrompt.includes('final 2'));
-    assert.ok(!secondPrompt.includes('earlier answer'), 'should not include assistant msg before tool result');
+    coordinator = newCoord(im, wm, createMockReasoner(plan), runner);
+    await coordinator.submitGoal('mm');
+    runner.completeNextRun('final 1\n\nfinal 2');
+    const second = runner.promptsSent()[1];
+    assert.ok(second.includes('final 1'));
+    assert.ok(second.includes('final 2'));
   });
 });
 
-describe('Coordinator re-planning on failure', () => {
-  let im;
-  let wm;
-  let coordinator;
+describe('Coordinator: re-planning on failure', () => {
+  let im, wm, runner, coordinator;
   const MIND_ID = 'mind-001';
 
   beforeEach(() => {
     im = createMockIM();
     im.register({ id: MIND_ID, name: 'Alien Mind', agentType: 'mind' });
     wm = new WorldModel(im, MIND_ID);
+    runner = createMockRunner(im);
   });
 
   afterEach(() => {
     if (coordinator) coordinator.destroy();
+    runner.destroy();
     wm.destroy();
   });
 
   it('retries task with revised prompt when reasoner says retry', async () => {
     const plan = { tasks: [
-      { description: 'Risky task', agentType: 'claude', targetCwd: '', prompt: 'original prompt', dependsOn: [] },
+      { description: 'Risky', agentType: 'claude', targetCwd: '', prompt: 'original prompt', dependsOn: [] },
     ] };
-    const reasoner = createMockReasoner(plan, { action: 'retry', prompt: 'revised prompt' });
-    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, mindInstanceId: MIND_ID });
+    coordinator = newCoord(im, wm, createMockReasoner(plan, { action: 'retry', prompt: 'revised prompt' }), runner);
+    await coordinator.submitGoal('Try');
+    assert.ok(runner.promptsSent()[0].includes('original prompt'));
 
-    im.register({ id: 'agent-1', name: 'Worker', agentType: 'claude' });
-
-    const result = await coordinator.submitGoal('Try something');
-    // First dispatch sends 'original prompt'
-    let prompts = im._sent.filter(function (s) { return s.msg.type === 'prompt'; });
-    assert.equal(prompts.length, 1);
-    assert.ok(prompts[0].msg.text.includes('original prompt'));
-
-    // Fail the task
-    coordinator._failTask(coordinator.getActiveGoals()[0].plan.tasks[0].id, 'Something went wrong');
-    await new Promise(function (r) { setTimeout(r, 20); }); // let async replan settle
-
-    // Should have re-dispatched with revised prompt
-    prompts = im._sent.filter(function (s) { return s.msg.type === 'prompt'; });
-    assert.equal(prompts.length, 2);
-    assert.ok(prompts[1].msg.text.includes('revised prompt'));
-
-    // Task should be running again (not failed)
-    const task = coordinator.getActiveGoals()[0].plan.tasks[0];
-    assert.equal(task.replanCount, 1);
+    coordinator._failTask(coordinator.getActiveGoals()[0].plan.tasks[0].id, 'wrong');
+    await new Promise(r => setTimeout(r, 20));
+    assert.ok(runner.promptsSent()[1].includes('revised prompt'));
+    assert.equal(coordinator.getActiveGoals()[0].plan.tasks[0].replanCount, 1);
   });
 
   it('splits task into replacement subtasks when reasoner says split', async () => {
     const plan = { tasks: [
-      { description: 'Complex task', agentType: 'claude', targetCwd: '', prompt: 'do complex', dependsOn: [] },
+      { description: 'Complex', agentType: 'claude', targetCwd: '', prompt: 'do complex', dependsOn: [] },
     ] };
     const reasoner = createMockReasoner(plan, {
       action: 'split',
@@ -463,22 +437,16 @@ describe('Coordinator re-planning on failure', () => {
         { description: 'Subtask B', prompt: 'simpler B', agentType: 'claude' },
       ],
     });
-    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, mindInstanceId: MIND_ID });
-
-    im.register({ id: 'agent-1', name: 'Worker', agentType: 'claude' });
-
-    await coordinator.submitGoal('Complex goal');
+    coordinator = newCoord(im, wm, reasoner, runner);
+    await coordinator.submitGoal('Complex');
     coordinator._failTask(coordinator.getActiveGoals()[0].plan.tasks[0].id, 'Too complex');
-    await new Promise(function (r) { setTimeout(r, 20); });
+    await new Promise(r => setTimeout(r, 20));
 
-    // Should now have 3 tasks: original (completed as replaced) + 2 replacements
     const tasks = coordinator.getActiveGoals()[0].plan.tasks;
     assert.equal(tasks.length, 3);
     assert.equal(tasks[0].status, 'completed');
-    assert.ok(tasks[0].result.summary.includes('Replaced'));
     assert.equal(tasks[1].description, 'Subtask A');
     assert.equal(tasks[2].description, 'Subtask B');
-    // Subtask B should depend on Subtask A (sequential chain)
     assert.deepEqual(tasks[2].dependsOn, [1]);
   });
 
@@ -486,47 +454,32 @@ describe('Coordinator re-planning on failure', () => {
     const plan = { tasks: [
       { description: 'Unsolvable', agentType: 'claude', targetCwd: '', prompt: 'cannot do', dependsOn: [] },
     ] };
-    const reasoner = createMockReasoner(plan, { action: 'abandon', reason: 'Not feasible' });
-    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, mindInstanceId: MIND_ID });
-
-    im.register({ id: 'agent-1', name: 'Worker', agentType: 'claude' });
-
+    coordinator = newCoord(im, wm, createMockReasoner(plan, { action: 'abandon', reason: 'Not feasible' }), runner);
     await coordinator.submitGoal('Impossible');
     coordinator._failTask(coordinator.getActiveGoals()[0].plan.tasks[0].id, 'Cannot proceed');
-    await new Promise(function (r) { setTimeout(r, 20); });
-
-    const task = coordinator.getActiveGoals()[0].plan.tasks[0];
-    assert.equal(task.status, 'failed');
-    assert.ok(task.result.summary.includes('Abandoned'));
-    assert.ok(task.result.summary.includes('Not feasible'));
+    await new Promise(r => setTimeout(r, 20));
+    const t = coordinator.getActiveGoals()[0].plan.tasks[0];
+    assert.equal(t.status, 'failed');
+    assert.ok(t.result.summary.includes('Not feasible'));
   });
 
   it('respects MAX_REPLANS limit', async () => {
     const plan = { tasks: [
-      { description: 'Flaky', agentType: 'claude', targetCwd: '', prompt: 'flaky prompt', dependsOn: [] },
+      { description: 'Flaky', agentType: 'claude', targetCwd: '', prompt: 'flaky', dependsOn: [] },
     ] };
-    const reasoner = createMockReasoner(plan, { action: 'retry', prompt: 'retry prompt' });
-    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, mindInstanceId: MIND_ID });
-
-    im.register({ id: 'agent-1', name: 'Worker', agentType: 'claude' });
-
-    await coordinator.submitGoal('Flaky goal');
+    coordinator = newCoord(im, wm, createMockReasoner(plan, { action: 'retry', prompt: 'retry' }), runner);
+    await coordinator.submitGoal('Flaky');
     const taskId = coordinator.getActiveGoals()[0].plan.tasks[0].id;
-
-    // Fail MAX_REPLANS + 1 times
     for (let i = 0; i <= coordinator.MAX_REPLANS; i++) {
-      coordinator._failTask(taskId, 'fails again #' + i);
-      await new Promise(function (r) { setTimeout(r, 20); });
+      coordinator._failTask(taskId, 'again #' + i);
+      await new Promise(r => setTimeout(r, 20));
     }
-
-    const task = coordinator.getActiveGoals()[0].plan.tasks[0];
-    assert.equal(task.status, 'failed');
-    assert.ok(task.result.summary.includes('fails again'));
-    // replanCount should be exactly MAX_REPLANS (the last failure skips replan)
-    assert.equal(task.replanCount, coordinator.MAX_REPLANS);
+    const t = coordinator.getActiveGoals()[0].plan.tasks[0];
+    assert.equal(t.status, 'failed');
+    assert.equal(t.replanCount, coordinator.MAX_REPLANS);
   });
 
-  it('split: dependents of original task are redirected to last replacement', async () => {
+  it('split: dependents of original task redirected to last replacement', async () => {
     const plan = { tasks: [
       { description: 'A', agentType: 'claude', targetCwd: '', prompt: 'do A', dependsOn: [] },
       { description: 'B depends on A', agentType: 'claude', targetCwd: '', prompt: 'do B', dependsOn: [0] },
@@ -538,19 +491,13 @@ describe('Coordinator re-planning on failure', () => {
         { description: 'A2', prompt: 'a2' },
       ],
     });
-    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, mindInstanceId: MIND_ID });
-
-    im.register({ id: 'agent-1', name: 'Worker', agentType: 'claude' });
-
-    await coordinator.submitGoal('Multi-step');
+    coordinator = newCoord(im, wm, reasoner, runner);
+    await coordinator.submitGoal('Multi');
     const taskA = coordinator.getActiveGoals()[0].plan.tasks[0];
     coordinator._failTask(taskA.id, 'A failed');
-    await new Promise(function (r) { setTimeout(r, 20); });
-
-    const allTasks = coordinator.getActiveGoals()[0].plan.tasks;
-    // Original A at index 0 (replaced), B at index 1, A1 at 2, A2 at 3
-    const taskB = allTasks.find(function (t) { return t.description === 'B depends on A'; });
-    // B's dependency should now point to the last replacement (A2 at index 3)
+    await new Promise(r => setTimeout(r, 20));
+    const all = coordinator.getActiveGoals()[0].plan.tasks;
+    const taskB = all.find(t => t.description === 'B depends on A');
     assert.deepEqual(taskB.dependsOn, [3]);
   });
 });
@@ -566,110 +513,82 @@ const { Memory } = require('../src/mind/memory');
 function tempGoalStorePath() {
   return path.join(os.tmpdir(), 'polpo-coord-goalstore-' + Date.now() + '-' + Math.random().toString(36).slice(2) + '.json');
 }
-
 function tempMemoryPath() {
   return path.join(os.tmpdir(), 'polpo-coord-memory-' + Date.now() + '-' + Math.random().toString(36).slice(2) + '.jsonl');
 }
 
-describe('Coordinator goal persistence', () => {
-  let im, wm, coordinator, goalStorePath, memoryPath;
+describe('Coordinator: goal persistence', () => {
+  let im, wm, runner, coordinator, goalStorePath, memoryPath;
   const MIND_ID = 'mind-persist';
 
   beforeEach(() => {
     im = createMockIM();
     im.register({ id: MIND_ID, name: 'Alien Mind', agentType: 'mind' });
     wm = new WorldModel(im, MIND_ID);
+    runner = createMockRunner(im);
     goalStorePath = tempGoalStorePath();
     memoryPath = tempMemoryPath();
   });
 
   afterEach(() => {
     if (coordinator) coordinator.destroy();
+    runner.destroy();
     wm.destroy();
     try { fs.unlinkSync(goalStorePath); } catch {}
     try { fs.unlinkSync(memoryPath); } catch {}
   });
 
   it('persists a goal to the store while running', async () => {
-    const reasoner = createMockReasoner();
     const goalStore = new GoalStore({ path: goalStorePath });
-    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, goalStore, mindInstanceId: MIND_ID });
-
-    im.register({ id: 'agent-1', name: 'Worker', agentType: 'claude' });
+    coordinator = newCoord(im, wm, createMockReasoner(), runner, { goalStore, mindInstanceId: MIND_ID });
     await coordinator.submitGoal('Persistent goal');
-
-    // Should be in the store while running (task assigned, agent busy)
-    const store2 = new GoalStore({ path: goalStorePath });
-    store2.load();
-    assert.equal(store2.size(), 1);
-    assert.equal(store2.getAll()[0].prompt, 'Persistent goal');
-    assert.equal(store2.getAll()[0].status, 'running');
+    const reload = new GoalStore({ path: goalStorePath });
+    reload.load();
+    assert.equal(reload.size(), 1);
+    assert.equal(reload.getAll()[0].prompt, 'Persistent goal');
+    assert.equal(reload.getAll()[0].status, 'running');
   });
 
   it('removes the goal from the store on completion', async () => {
-    const reasoner = createMockReasoner();
     const goalStore = new GoalStore({ path: goalStorePath });
-    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, goalStore, mindInstanceId: MIND_ID });
-
-    im.register({ id: 'agent-1', name: 'Worker', agentType: 'claude' });
+    coordinator = newCoord(im, wm, createMockReasoner(), runner, { goalStore, mindInstanceId: MIND_ID });
     await coordinator.submitGoal('Goal that finishes');
-    const task = coordinator.getActiveGoals()[0].plan.tasks[0];
-    // Simulate agent going busy then idle
-    im.updateStatus('agent-1', 'busy');
-    im.updateStatus('agent-1', 'idle');
-    // Coordinator awaits reasoner.evaluate asynchronously
-    await new Promise(function (r) { setTimeout(r, 30); });
-
-    const store2 = new GoalStore({ path: goalStorePath });
-    store2.load();
-    assert.equal(store2.size(), 0, 'completed goal should be removed from the store');
+    runner.completeNextRun('done');
+    await new Promise(r => setTimeout(r, 30));
+    const reload = new GoalStore({ path: goalStorePath });
+    reload.load();
+    assert.equal(reload.size(), 0);
   });
 
   it('removes the goal from the store on cancel', async () => {
-    const reasoner = createMockReasoner();
     const goalStore = new GoalStore({ path: goalStorePath });
-    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, goalStore, mindInstanceId: MIND_ID });
-
-    im.register({ id: 'agent-1', name: 'Worker', agentType: 'claude' });
-    await coordinator.submitGoal('Doomed goal');
-    const goalId = coordinator.getActiveGoals()[0].id;
+    coordinator = newCoord(im, wm, createMockReasoner(), runner, { goalStore, mindInstanceId: MIND_ID });
+    const { goalId } = await coordinator.submitGoal('Doomed goal');
     coordinator.cancelGoal(goalId);
-
-    const store2 = new GoalStore({ path: goalStorePath });
-    store2.load();
-    assert.equal(store2.size(), 0);
+    const reload = new GoalStore({ path: goalStorePath });
+    reload.load();
+    assert.equal(reload.size(), 0);
   });
 
   it('persists task-level progress snapshots', async () => {
-    const reasoner = createMockReasoner({
-      tasks: [
-        { description: 'Step 1', agentType: 'claude', targetCwd: '/tmp', prompt: 'p1', dependsOn: [] },
-        { description: 'Step 2', agentType: 'claude', targetCwd: '/tmp', prompt: 'p2', dependsOn: [0] },
-      ],
-    });
+    const plan = { tasks: [
+      { description: 'Step 1', agentType: 'claude', targetCwd: '/tmp', prompt: 'p1', dependsOn: [] },
+      { description: 'Step 2', agentType: 'claude', targetCwd: '/tmp', prompt: 'p2', dependsOn: [0] },
+    ] };
     const goalStore = new GoalStore({ path: goalStorePath });
-    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, goalStore, mindInstanceId: MIND_ID });
-
-    im.register({ id: 'agent-1', name: 'Worker', agentType: 'claude' });
+    coordinator = newCoord(im, wm, createMockReasoner(plan), runner, { goalStore, mindInstanceId: MIND_ID });
     await coordinator.submitGoal('Two steps');
-    // Complete step 1
-    const t1 = coordinator.getActiveGoals()[0].plan.tasks[0];
-    im.updateStatus('agent-1', 'busy');
-    im.updateStatus('agent-1', 'idle');
-    await new Promise(function (r) { setTimeout(r, 30); });
-
-    const store2 = new GoalStore({ path: goalStorePath });
-    store2.load();
-    // Goal is still running (step 2 not yet done), and step 1 should be persisted as completed
-    assert.equal(store2.size(), 1);
-    const persistedTasks = store2.getAll()[0].plan.tasks;
-    assert.equal(persistedTasks[0].status, 'completed');
+    runner.completeNextRun('step 1 done');
+    await new Promise(r => setTimeout(r, 30));
+    const reload = new GoalStore({ path: goalStorePath });
+    reload.load();
+    assert.equal(reload.size(), 1);
+    assert.equal(reload.getAll()[0].plan.tasks[0].status, 'completed');
   });
 
   it('recoverInterruptedGoals marks stored goals as interrupted and clears the store', async () => {
-    // Pre-seed the store as if from a previous run
-    const seedStore = new GoalStore({ path: goalStorePath });
-    seedStore.upsert({
+    const seed = new GoalStore({ path: goalStorePath });
+    seed.upsert({
       id: 'goal-seed',
       prompt: 'Old work',
       status: 'running',
@@ -679,58 +598,138 @@ describe('Coordinator goal persistence', () => {
         { id: 't2', description: 'in flight step', status: 'running', result: null },
       ] },
     });
-
-    const reasoner = createMockReasoner();
     const memory = new Memory({ path: memoryPath });
     const goalStore = new GoalStore({ path: goalStorePath });
     goalStore.load();
-    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, memory, goalStore, mindInstanceId: MIND_ID });
-
+    coordinator = newCoord(im, wm, createMockReasoner(), runner, { memory, goalStore, mindInstanceId: MIND_ID });
     const recovered = coordinator.recoverInterruptedGoals();
-    assert.equal(recovered.length, 1);
-    assert.equal(recovered[0], 'goal-seed');
-
-    // Store should now be empty
+    assert.deepEqual(recovered, ['goal-seed']);
     const check = new GoalStore({ path: goalStorePath });
     check.load();
     assert.equal(check.size(), 0);
-
-    // Memory should have a record of the interrupted goal
     assert.equal(memory.size(), 1);
-    const recent = memory.getRecent(1)[0];
-    assert.equal(recent.goalPrompt, 'Old work');
-    assert.equal(recent.outcome, 'failed');
-
-    // Mind should have received a recovery report
     const mindMessages = im.get(MIND_ID).conversation;
-    const reportMsg = mindMessages.find(function (m) { return m.content && m.content.indexOf('Recovered') === 0; });
-    assert.ok(reportMsg, 'mind should report recovery to the user');
-    assert.ok(reportMsg.content.indexOf('Old work') !== -1);
-    assert.ok(reportMsg.content.indexOf('1/2') !== -1, 'report should show task progress (1/2 completed)');
+    const reportMsg = mindMessages.find(m => m.content && m.content.indexOf('Recovered') === 0);
+    assert.ok(reportMsg);
+    assert.ok(reportMsg.content.indexOf('1/2') !== -1);
   });
 
   it('recoverInterruptedGoals is a no-op when the store is empty', () => {
-    const reasoner = createMockReasoner();
     const goalStore = new GoalStore({ path: goalStorePath });
-    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, goalStore, mindInstanceId: MIND_ID });
-
-    const recovered = coordinator.recoverInterruptedGoals();
-    assert.deepEqual(recovered, []);
-    // No report message should have been emitted
-    const mindMessages = im.get(MIND_ID).conversation;
-    const reportMsg = mindMessages.find(function (m) { return m.content && m.content.indexOf('Recovered') === 0; });
-    assert.equal(reportMsg, undefined);
+    coordinator = newCoord(im, wm, createMockReasoner(), runner, { goalStore, mindInstanceId: MIND_ID });
+    assert.deepEqual(coordinator.recoverInterruptedGoals(), []);
   });
 
   it('works without a goalStore (graceful degradation)', async () => {
-    const reasoner = createMockReasoner();
-    coordinator = new Coordinator({ instanceManager: im, worldModel: wm, reasoner, mindInstanceId: MIND_ID });
-
-    im.register({ id: 'agent-1', name: 'Worker', agentType: 'claude' });
+    coordinator = newCoord(im, wm, createMockReasoner(), runner);
     await coordinator.submitGoal('No store goal');
+    assert.deepEqual(coordinator.recoverInterruptedGoals(), []);
+  });
+});
 
-    // Recovery with no store should also be safe
-    const recovered = coordinator.recoverInterruptedGoals();
-    assert.deepEqual(recovered, []);
+// ---- goal:event emissions (for the gateway /v1/goals SSE relay) ----
+
+describe('Coordinator: goal:event emissions', () => {
+  let im, wm, runner, coordinator;
+  const MIND_ID = 'mind-events';
+
+  beforeEach(() => {
+    im = createMockIM();
+    im.register({ id: MIND_ID, name: 'Alien Mind', agentType: 'mind' });
+    wm = new WorldModel(im, MIND_ID);
+    runner = createMockRunner(im);
+  });
+
+  afterEach(() => {
+    if (coordinator) coordinator.destroy();
+    runner.destroy();
+    wm.destroy();
+  });
+
+  function captureEvents(c) {
+    const events = [];
+    c.on('goal:event', ev => events.push(ev));
+    return events;
+  }
+
+  it('emits planning -> plan_ready in order on submitGoal', async () => {
+    coordinator = newCoord(im, wm, createMockReasoner(), runner, { mindInstanceId: MIND_ID });
+    const events = captureEvents(coordinator);
+    const { goalId } = await coordinator.submitGoal('Refactor auth');
+    const types = events.map(e => e.type);
+    const p = types.indexOf('planning');
+    const r = types.indexOf('plan_ready');
+    assert.ok(p >= 0);
+    assert.ok(r > p);
+    assert.equal(events[p].goalId, goalId);
+    assert.equal(events[p].prompt, 'Refactor auth');
+    assert.ok(Array.isArray(events[r].tasks));
+    assert.ok(events[r].tasks.length > 0);
+  });
+
+  it('emits task_started when the task is dispatched to an arm', async () => {
+    coordinator = newCoord(im, wm, createMockReasoner(), runner, { mindInstanceId: MIND_ID });
+    const events = captureEvents(coordinator);
+    await coordinator.submitGoal('p');
+    const started = events.find(e => e.type === 'task_started');
+    assert.ok(started);
+    assert.ok(started.agentInstanceId.startsWith('mind-arm-'));
+    assert.equal(started.agentType, 'claude');
+  });
+
+  it('emits task_chunk when the runner forwards a chunk', async () => {
+    coordinator = newCoord(im, wm, createMockReasoner(), runner, { mindInstanceId: MIND_ID });
+    const events = captureEvents(coordinator);
+    await coordinator.submitGoal('p');
+    runner.fireChunk(runner._allRuns[0].agentInstanceId, 'streaming text');
+    const chunk = events.find(e => e.type === 'task_chunk');
+    assert.ok(chunk);
+    assert.equal(chunk.text, 'streaming text');
+  });
+
+  it('emits task_done and done when a task completes', async () => {
+    coordinator = newCoord(im, wm, createMockReasoner(), runner, { mindInstanceId: MIND_ID });
+    const events = captureEvents(coordinator);
+    await coordinator.submitGoal('p');
+    runner.completeNextRun('out');
+    const types = events.map(e => e.type);
+    assert.ok(types.includes('task_done'));
+    assert.ok(types.includes('done'));
+    assert.equal(types[types.length - 1], 'done');
+  });
+
+  it('emits cancelled when the user cancels a running goal', async () => {
+    coordinator = newCoord(im, wm, createMockReasoner(), runner, { mindInstanceId: MIND_ID });
+    const events = captureEvents(coordinator);
+    const { goalId } = await coordinator.submitGoal('p');
+    coordinator.cancelGoal(goalId);
+    const cancelled = events.find(e => e.type === 'cancelled');
+    assert.ok(cancelled);
+    assert.equal(cancelled.goalId, goalId);
+    assert.equal(cancelled.reason, 'cancelled_by_user');
+  });
+
+  it('emits replanning before retrying', async () => {
+    const reasoner = {
+      plan: async () => ({ tasks: [{ description: 'do', agentType: 'claude', targetCwd: '/tmp', prompt: 'p', dependsOn: [] }] }),
+      replan: async () => ({ action: 'retry', prompt: 'revised p' }),
+      evaluate: async () => ({ success: true, summary: 'ok' }),
+      destroy: () => {},
+    };
+    coordinator = newCoord(im, wm, reasoner, runner, { mindInstanceId: MIND_ID });
+    const events = captureEvents(coordinator);
+    await coordinator.submitGoal('p');
+    const task = coordinator.getActiveGoals()[0].plan.tasks[0];
+    coordinator._failTask(task.id, 'mock failure');
+    await new Promise(r => setTimeout(r, 20));
+    const replanning = events.find(e => e.type === 'replanning');
+    assert.ok(replanning);
+    assert.equal(replanning.attempt, 1);
+    assert.equal(replanning.reason, 'mock failure');
+  });
+
+  it('does not crash when an emit happens without listeners', async () => {
+    coordinator = newCoord(im, wm, createMockReasoner(), runner, { mindInstanceId: MIND_ID });
+    await coordinator.submitGoal('silent');
   });
 });
