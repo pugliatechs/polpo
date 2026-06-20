@@ -18,6 +18,14 @@
 * **sessions:** preserve plain-string user prompts in history loader ([979cffc](https://github.com/pugliatechs/polpo/commit/979cffcfde24e4f2d34da14c99fa5e72d5f2af4b))
 * **tunnel:** require multi-segment subdomain for Cloudflare Quick Tunnel URL ([cac0dcb](https://github.com/pugliatechs/polpo/commit/cac0dcb419d30fc4f49ebd60b6b7277de94727e0))
 
+### Refactoring
+
+* **agent,mind:** extract OneShotAgentRunner; unify gateway + mind spawn lifecycle ([d75b49c](https://github.com/pugliatechs/polpo/commit/d75b49c))
+* **util:** route all server/mind/agent/hooks/tunnel logs through makeLogger ([0000b91](https://github.com/pugliatechs/polpo/commit/0000b91))
+
+### Documentation
+
+* v1.2.1 documentation pass — one-shot architecture, outbox, gateway, agent-facing guide ([fc48644](https://github.com/pugliatechs/polpo/commit/fc48644))
 
 ### Miscellaneous Chores
 
