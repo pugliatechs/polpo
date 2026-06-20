@@ -100,6 +100,29 @@
       <div id="cost-chart" class="cost-chart"></div>
     </div>
 
+    <!-- Builder Profile (Paxel-style, computed locally) -->
+    <div id="profile-section" class="sessions-section hidden">
+      <div class="section-header">
+        <h3>Builder Profile</h3>
+        <button id="btn-refresh-profile" class="btn-icon" title="Refresh">&#8635;</button>
+      </div>
+      <div class="profile-card">
+        <div class="profile-header">
+          <div id="profile-archetype-name" class="profile-archetype-name">—</div>
+          <div id="profile-archetype-blurb" class="profile-archetype-blurb"></div>
+        </div>
+        <div class="profile-radar-wrap">
+          <svg id="profile-radar" class="profile-radar" viewBox="-40 0 280 210" aria-label="Builder dimensions radar chart"></svg>
+        </div>
+        <div id="profile-dimensions" class="profile-dimensions"></div>
+        <div id="profile-stats" class="profile-stats"></div>
+        <div class="profile-meta">
+          <span id="profile-meta-text"></span>
+          <button id="btn-profile-about" class="link-button" type="button">about this profile</button>
+        </div>
+      </div>
+    </div>
+
     <!-- System Stats (desktop only) -->
     <div id="stats-bar" class="stats-bar hidden">
       <div class="stat-item">
@@ -137,14 +160,39 @@
         <div class="detail-meta-row">
           <span id="detail-project"></span>
           <span id="detail-type"></span>
+          <button id="detail-model" class="model-pill hidden" title="Change model" type="button">
+            <span class="model-pill-label">model</span>
+            <span class="model-pill-value">—</span>
+          </button>
+          <!--
+            Outbox pill: agent → phone file transfer. Click to toggle on/off
+            for the active session. When on, the websocket layer injects a
+            <polpo:outbox dir="..."> directive into every prompt so the
+            agent knows where to drop files the user should download.
+          -->
+          <button id="detail-outbox" class="outbox-pill hidden" title="Toggle file outbox" type="button">
+            <span class="outbox-pill-icon">&#128194;</span>
+            <span class="outbox-pill-label">outbox</span>
+            <span id="outbox-pill-state" class="outbox-pill-state">off</span>
+          </button>
         </div>
       </div>
       <div class="detail-actions">
+        <button id="btn-conv-search" class="btn-icon btn-conv-search-toggle" title="Search in conversation (Ctrl+F)">&#128269;</button>
         <button id="btn-stop-auto-approve" class="btn-icon btn-auto-stop hidden" title="Stop auto-approve">&#9210;</button>
         <button id="btn-skills" class="btn-icon btn-skills hidden" title="Skills">&#9881;</button>
         <button id="btn-changes" class="btn-icon btn-changes" title="Changes">&#177;</button>
         <button id="btn-abort" class="btn-icon btn-danger" title="Abort">&#9632;</button>
       </div>
+    </div>
+
+    <!-- In-conversation search bar (toggled by btn-conv-search or Ctrl+F) -->
+    <div id="conv-search-bar" class="conv-search-bar hidden">
+      <input type="text" id="conv-search-input" class="conv-search-input" placeholder="Search in conversation..." autocomplete="off" spellcheck="false">
+      <span id="conv-search-count" class="conv-search-count" aria-live="polite"></span>
+      <button id="btn-conv-search-prev" class="btn-icon" title="Previous match (Shift+Enter)" aria-label="Previous match">&#8593;</button>
+      <button id="btn-conv-search-next" class="btn-icon" title="Next match (Enter)" aria-label="Next match">&#8595;</button>
+      <button id="btn-conv-search-close" class="btn-icon" title="Close (Esc)" aria-label="Close search">&#10005;</button>
     </div>
 
     <!-- Approval Banner (standard tool approval) -->
@@ -244,8 +292,12 @@
         <label class="modal-label" for="new-name">Name <span class="modal-optional">(optional)</span></label>
         <input type="text" id="new-name" class="modal-input" placeholder="e.g., Backend refactor">
 
-        <label class="modal-label" for="new-model">Model <span class="modal-optional">(optional)</span></label>
-        <input type="text" id="new-model" class="modal-input" placeholder="e.g., opus, sonnet, flash">
+        <label class="modal-label" for="new-model-select">Model <span class="modal-optional">(optional)</span></label>
+        <select id="new-model-select" class="modal-input"></select>
+        <!-- Surfaced only when the operator picks "Custom..." -->
+        <input type="text" id="new-model" class="modal-input model-custom-input hidden"
+               placeholder="exact model id (e.g. claude-opus-4-7, gpt-5, gemini-2.5-pro)"
+               autocomplete="off" spellcheck="false">
       </div>
       <div class="modal-footer">
         <div id="new-session-error" class="modal-error hidden"></div>
@@ -390,6 +442,91 @@
       </div>
       <div class="modal-body" id="changes-modal-body">
         <div id="changes-file-list" class="changes-file-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Model picker modal (mid-session switch) -->
+  <div id="model-picker-modal" class="modal-overlay hidden">
+    <div class="modal-content">
+      <div class="modal-handle"><div class="modal-handle-bar"></div></div>
+      <div class="modal-header">
+        <h3>Switch model</h3>
+        <button id="btn-close-model-picker" class="btn-icon" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p id="model-picker-hint" class="modal-hint"></p>
+        <div id="model-picker-list" class="model-picker-list"></div>
+        <label class="modal-label" for="model-picker-custom">Custom <span class="modal-optional">(advanced)</span></label>
+        <input type="text" id="model-picker-custom" class="modal-input" placeholder="e.g. claude-opus-4-7, gpt-5, gemini-2.5-pro" autocomplete="off" spellcheck="false">
+        <div id="model-picker-warning" class="modal-error hidden"></div>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-model-picker-apply" class="btn btn-approve">Apply</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Builder Profile: about modal -->
+  <div id="profile-about-modal" class="modal-overlay hidden">
+    <div class="modal-content">
+      <div class="modal-handle"><div class="modal-handle-bar"></div></div>
+      <div class="modal-header">
+        <h3>About your Builder Profile</h3>
+        <button id="btn-close-profile-about" class="btn-icon" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body profile-about-body">
+        <p>
+          A statistical mirror of how you work with AI coding agents, computed
+          entirely on this machine from the session transcripts polpo already
+          has on disk.
+        </p>
+
+        <h4>Privacy</h4>
+        <p>
+          Nothing leaves the machine. No LLM call, no telemetry, no third
+          party. The profile is just counts and ratios derived from local files.
+          The only text in the response is your archetype name and a one-line
+          blurb, both hardcoded in the analyzer source.
+        </p>
+
+        <h4>The five dimensions (each 0&ndash;100)</h4>
+        <ul class="profile-about-list">
+          <li><strong>Steering</strong> &mdash; how closely you guide the agent turn by turn (prompts per session, prompt length, command-style verbs).</li>
+          <li><strong>Execution</strong> &mdash; hands-on output volume per session (edits + shell runs).</li>
+          <li><strong>Engineering</strong> &mdash; rigor signals (tests run, commits made, read/search share of the tool mix).</li>
+          <li><strong>Product Instinct</strong> &mdash; range and user-focused language (unique projects, product-shaped vocabulary).</li>
+          <li><strong>Planning</strong> &mdash; plan-tool use, structured prompts, code-block ratio.</li>
+        </ul>
+
+        <h4>How to read it</h4>
+        <p>
+          Treat the scores as a mirror, not a verdict. Scores saturate
+          (value/(value+midpoint)*100), so 50 means "comfortable amount of
+          this", 80 means "a lot of this", and 100 is asymptotic. Use it for
+          self-reflection or drift detection ("my test-run count fell to zero
+          last month"), not for comparisons.
+        </p>
+
+        <h4>Heuristic transparency</h4>
+        <p>
+          Every signal that feeds a dimension is documented inline in
+          <code>src/server/profile-analyzer.js</code>. If the scores feel off,
+          the math is around 200 lines you can read and tune.
+        </p>
+
+        <h4>Limitations</h4>
+        <ul class="profile-about-list">
+          <li>Statistical, not semantic &mdash; the analyzer counts, it doesn't understand.</li>
+          <li>Custom MCP tools without the <code>mcp__</code> prefix land in the <em>other</em> bucket.</li>
+          <li>Sessions beyond a 200-session content cap or a 15s deadline are still counted in metadata aggregates but don't feed tool/shell/prompt stats. <code>analyzedSessions</code> vs <code>totalSessions</code> shows the truncation.</li>
+        </ul>
+
+        <p class="profile-about-footer">
+          Inspired by YC's Paxel experiment. Implementation lives in
+          <code>src/server/profile-analyzer.js</code>; full reference in
+          <code>docs/profile.md</code>.
+        </p>
       </div>
     </div>
   </div>

@@ -752,7 +752,9 @@ main {
 
 .detail-meta-row {
   display: flex;
-  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
   font-size: 11px;
   color: var(--text-muted);
   min-width: 0;
@@ -774,6 +776,167 @@ main {
   padding: 6px;
   min-width: 34px;
   min-height: 34px;
+}
+
+/* ---- Mid-session Model Pill (in detail-meta-row) ---- */
+.model-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(124, 58, 237, 0.12);
+  border: 1px solid rgba(124, 58, 237, 0.35);
+  color: var(--accent-light, var(--accent));
+  border-radius: 4px;
+  padding: 1px 7px;
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s, border-color 0.15s;
+}
+.model-pill:hover {
+  background: rgba(124, 58, 237, 0.22);
+  border-color: var(--accent);
+}
+.model-pill-label {
+  text-transform: uppercase;
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  opacity: 0.7;
+  font-weight: 600;
+}
+.model-pill-value {
+  font-weight: 600;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- Outbox pill (in detail-meta-row) + download chips on assistant bubbles ---- */
+.outbox-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(34, 197, 94, 0.10);
+  border: 1px solid rgba(34, 197, 94, 0.30);
+  color: rgb(74, 222, 128);
+  border-radius: 4px;
+  padding: 1px 7px;
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s, border-color 0.15s;
+}
+.outbox-pill:hover {
+  background: rgba(34, 197, 94, 0.20);
+  border-color: rgb(34, 197, 94);
+}
+.outbox-pill.outbox-on {
+  background: rgba(34, 197, 94, 0.25);
+  border-color: rgb(34, 197, 94);
+}
+.outbox-pill-icon {
+  font-size: 12px;
+  line-height: 1;
+}
+.outbox-pill-label {
+  text-transform: uppercase;
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  opacity: 0.7;
+  font-weight: 600;
+}
+.outbox-pill-state {
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 9px;
+  letter-spacing: 0.05em;
+}
+
+/* Chips appended below an assistant message when the agent produced
+   files in that turn. Visually mirror .msg-attachments (which renders
+   user-sent attachments). */
+.msg-outbox {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.msg-outbox-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: rgba(34, 197, 94, 0.08);
+  border: 1px solid rgba(34, 197, 94, 0.30);
+  color: var(--text);
+  text-decoration: none;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.msg-outbox-chip:hover {
+  background: rgba(34, 197, 94, 0.18);
+  border-color: rgb(34, 197, 94);
+}
+.msg-outbox-chip-icon {
+  font-size: 14px;
+}
+.msg-outbox-chip-size {
+  opacity: 0.6;
+  font-size: 11px;
+}
+
+/* ---- Model Picker Modal ---- */
+.modal-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.4;
+  margin: 0 0 12px;
+}
+.model-picker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 14px;
+}
+.model-picker-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--bg-card);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.model-picker-row:hover {
+  border-color: rgba(124, 58, 237, 0.4);
+}
+.model-picker-row.selected {
+  border-color: var(--accent);
+  background: rgba(124, 58, 237, 0.10);
+}
+.model-picker-row-label {
+  font-size: 13px;
+}
+.model-picker-row-check {
+  color: var(--accent-light, var(--accent));
+  font-weight: 700;
+}
+
+/* The "Custom..." text input in the new-session modal stays hidden
+   until the operator picks the Custom option in the select above it. */
+.model-custom-input {
+  margin-top: 6px;
 }
 
 /* ---- Auto-approve Banner ---- */
@@ -1207,6 +1370,53 @@ h5.plan-h { font-size: 13px; }
 .msg-user.from-mobile {
   background: #7c3aed;
   border: 1px solid rgba(255,255,255,0.15);
+}
+
+/* Optimistic-render states.
+   `.msg-pending` is applied at insertion time and cleared the instant
+   the server's echo reconciles via clientMsgId. The dimmed appearance
+   communicates "in flight" without taking up extra space (so the
+   bubble doesn't jump when the class flips). `.msg-failed` is applied
+   when the OPTIMISTIC_TIMEOUT_MS deadline elapses without a server
+   echo — a red border tells the user the send didn't land. */
+.msg-pending {
+  opacity: 0.6;
+  position: relative;
+}
+.msg-pending::after {
+  content: '';
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.75);
+  animation: polpo-pending-pulse 1.1s infinite ease-in-out;
+}
+@keyframes polpo-pending-pulse {
+  0%   { transform: scale(0.6); opacity: 0.3; }
+  50%  { transform: scale(1.2); opacity: 0.95; }
+  100% { transform: scale(0.6); opacity: 0.3; }
+}
+.msg-confirmed {
+  /* No-op for now: presence of this class signals the bubble was
+     reconciled. Kept so the CSS can later add a brief confirm-flash
+     without re-rendering. */
+}
+.msg-failed {
+  opacity: 1;
+  border: 1px solid rgba(239, 68, 68, 0.8);
+  background: rgba(239, 68, 68, 0.18);
+}
+.msg-failed::after {
+  content: '!';
+  position: absolute;
+  right: 6px;
+  bottom: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  color: rgb(239, 68, 68);
 }
 
 .msg-assistant {
@@ -2196,6 +2406,24 @@ h5.plan-h { font-size: 13px; }
   padding: 0 16px 8px;
   max-height: 400px;
   overflow-y: auto;
+  /* Never let flex parents collapse the results into 0 height while
+     the sessions list below claims all available space. */
+  flex-shrink: 0;
+}
+/* When a search is active we take over the whole sidebar so results
+   are never crowded out by the active sessions / mind / costs blocks. */
+#view-list.searching .empty-state,
+#view-list.searching .new-session-bar,
+#view-list.searching #mind-section,
+#view-list.searching #instance-list,
+#view-list.searching .sessions-section,
+#view-list.searching #cost-section,
+#view-list.searching .stats-bar {
+  display: none !important;
+}
+#view-list.searching .search-results {
+  flex: 1;
+  max-height: none;
 }
 .search-result-item {
   background: var(--bg-card);
@@ -2233,6 +2461,214 @@ h5.plan-h { font-size: 13px; }
   font-size: 13px;
   text-align: center;
   padding: 16px;
+}
+
+/* ---- In-Conversation Search ---- */
+.conv-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: var(--bg-card, #15172a);
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+.conv-search-input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 12px;
+  background: var(--bg-input);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 14px;
+  outline: none;
+}
+.conv-search-input:focus {
+  border-color: var(--accent);
+}
+.conv-search-count {
+  font-size: 12px;
+  color: var(--text-muted);
+  min-width: 60px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.conv-search-count.no-matches {
+  color: var(--danger, #ef4444);
+}
+.conv-match {
+  background: rgba(124, 58, 237, 0.35);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+.conv-match.current {
+  background: rgba(255, 200, 0, 0.55);
+  color: #0f172a;
+  outline: 2px solid rgba(255, 200, 0, 0.9);
+}
+
+/* ---- Builder Profile (Paxel-style) ---- */
+.profile-card {
+  padding: 0 16px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.profile-header {
+  background: var(--bg-card);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  border: 1px solid rgba(255,255,255,0.06);
+}
+.profile-archetype-name {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--accent-light, var(--accent));
+}
+.profile-archetype-blurb {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  line-height: 1.35;
+}
+.profile-radar-wrap {
+  display: flex;
+  justify-content: center;
+  padding: 4px 0;
+}
+.profile-radar {
+  /* Width covers the wider viewBox (-40 0 280 210) so the radar itself
+     ends up about as big as before; height follows the viewBox aspect
+     ratio. max-width: 100% keeps it inside narrow sidebars. */
+  width: 260px;
+  height: auto;
+  max-width: 100%;
+  aspect-ratio: 280 / 210;
+}
+.profile-radar .axis-line {
+  stroke: rgba(255,255,255,0.08);
+  stroke-width: 1;
+}
+.profile-radar .grid-poly {
+  fill: none;
+  stroke: rgba(255,255,255,0.05);
+  stroke-width: 1;
+}
+.profile-radar .score-poly {
+  fill: rgba(124, 58, 237, 0.25);
+  stroke: var(--accent);
+  stroke-width: 1.5;
+}
+.profile-radar .axis-label {
+  font-size: 10px;
+  fill: var(--text-muted);
+  font-family: -apple-system, sans-serif;
+  /* text-anchor is set per-label inline (start/middle/end based on
+     which side of the radar the label is on); no CSS default needed. */
+}
+.profile-dimensions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.profile-dim {
+  background: var(--bg-card);
+  border: 1px solid rgba(255,255,255,0.05);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+.profile-dim-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: capitalize;
+}
+.profile-dim-value {
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.profile-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  font-size: 12px;
+}
+.profile-stat {
+  background: var(--bg-card);
+  border: 1px solid rgba(255,255,255,0.05);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+}
+.profile-stat-label {
+  color: var(--text-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.profile-stat-value {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.profile-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+  display: flex;
+  justify-content: space-between;
+  padding-top: 4px;
+}
+.profile-meta a,
+.profile-meta .link-button {
+  color: var(--accent-light, var(--accent));
+  text-decoration: none;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+}
+.profile-meta a:hover,
+.profile-meta .link-button:hover {
+  text-decoration: underline;
+}
+
+.profile-about-body {
+  font-size: 13px;
+  line-height: 1.5;
+}
+.profile-about-body h4 {
+  font-size: 13px;
+  margin: 14px 0 6px;
+  color: var(--accent-light, var(--accent));
+}
+.profile-about-body p {
+  margin: 6px 0 8px;
+}
+.profile-about-body code {
+  background: var(--bg-card);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+.profile-about-list {
+  margin: 4px 0 10px 18px;
+  padding: 0;
+}
+.profile-about-list li {
+  margin: 4px 0;
+}
+.profile-about-footer {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255,255,255,0.06);
 }
 
 /* ---- Cost Dashboard ---- */

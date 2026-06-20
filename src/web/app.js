@@ -26,6 +26,105 @@
   let reconnectDelay = 1000;
   let pendingAttachments = [];
   let selectedAgentType = 'claude';
+
+  // ---- Per-agent model registry ----
+  //
+  // Drives both the new-session model picker and the mid-session "switch
+  // model" pill in the detail header. `presets` are well-known names the
+  // operator can select with one tap; `customAllowed` controls whether
+  // the picker shows a free-text fallback for anything not in the list.
+  // `slashSwitch` is true for agents whose CLI honours an in-session
+  // model switch via a slash-command (Claude Code only, today); for the
+  // others, mid-session switching means respawning the agent process,
+  // which we surface as a warning rather than silently doing it.
+  var AGENT_MODELS = {
+    claude: {
+      slashSwitch: true,           // /model <name> works in claude
+      slashCommand: '/model',
+      customAllowed: true,
+      presets: [
+        { id: '',                 label: 'Default (per CLAUDE.md / claude defaults)' },
+        { id: 'opus',             label: 'Opus 4.7 — best quality' },
+        { id: 'sonnet',           label: 'Sonnet 4.6 — balanced' },
+        { id: 'haiku',            label: 'Haiku 4.5 — fastest' },
+      ],
+    },
+    codex: {
+      slashSwitch: false,
+      customAllowed: true,
+      presets: [
+        { id: '',                 label: 'Default (codex chooses)' },
+        { id: 'gpt-5',            label: 'GPT-5' },
+        { id: 'gpt-4o',           label: 'GPT-4o' },
+        { id: 'o3',               label: 'o3' },
+      ],
+    },
+    gemini: {
+      slashSwitch: false,
+      customAllowed: true,
+      presets: [
+        { id: '',                 label: 'Default' },
+        { id: 'gemini-2.5-pro',   label: 'Gemini 2.5 Pro' },
+        { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
+        { id: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash' },
+      ],
+    },
+    opencode: {
+      slashSwitch: false,
+      customAllowed: true,
+      presets: [
+        { id: '',                                  label: 'Default (provider config)' },
+        { id: 'anthropic/claude-sonnet-4-6',       label: 'Anthropic · Claude Sonnet 4.6' },
+        { id: 'openai/gpt-4o',                     label: 'OpenAI · GPT-4o' },
+        { id: 'openai/gpt-5',                      label: 'OpenAI · GPT-5' },
+        { id: 'ollama/llama3.1',                   label: 'Ollama · Llama 3.1 (local)' },
+      ],
+    },
+    pi: {
+      slashSwitch: false,
+      customAllowed: true,
+      presets: [
+        { id: '',                                  label: 'Default (pi config)' },
+        { id: 'anthropic/claude-sonnet-4-6',       label: 'Anthropic · Claude Sonnet 4.6' },
+        { id: 'openai/gpt-4o',                     label: 'OpenAI · GPT-4o' },
+        { id: 'openai/gpt-5',                      label: 'OpenAI · GPT-5' },
+      ],
+    },
+    goose: {
+      slashSwitch: false,
+      customAllowed: true,
+      presets: [
+        { id: '',                                  label: 'Default (goose config)' },
+        { id: 'anthropic/claude-sonnet-4-5',       label: 'Anthropic · Claude Sonnet 4.5' },
+        { id: 'openai/gpt-4o-mini',                label: 'OpenAI · GPT-4o-mini' },
+      ],
+    },
+  };
+
+  // Per-instance client-side model state. Keyed by instanceId so it
+  // survives instance switching within the same dashboard load. We
+  // intentionally do NOT persist across reloads: the server is the
+  // source of truth for what was passed at startup, and any /model
+  // slash-command is just a regular prompt — there is no separate
+  // server endpoint to query "current model" because Claude's CLI is
+  // free to switch silently. Treat this as an advisory hint.
+  var instanceModelHint = {};
+
+  // Friendly label for a known model id, falling back to the id itself
+  // when the operator picked something custom. Pure helper.
+  function modelLabelFor(agentType, modelId) {
+    if (!modelId) return 'default';
+    var spec = AGENT_MODELS[agentType];
+    if (spec) {
+      for (var i = 0; i < spec.presets.length; i++) {
+        if (spec.presets[i].id === modelId) {
+          // Trim "(best quality)" tails so the header pill stays short.
+          return spec.presets[i].label.split(' — ')[0];
+        }
+      }
+    }
+    return modelId;
+  }
   let installedSkills = [];
   let skillSearchResults = [];
   let skillSearchTimeout = null;
@@ -144,7 +243,8 @@
   const $newCwd = document.getElementById('new-cwd');
   const $cwdSuggestions = document.getElementById('cwd-suggestions');
   const $newName = document.getElementById('new-name');
-  const $newModel = document.getElementById('new-model');
+  const $newModel = document.getElementById('new-model');          // custom-input fallback
+  const $newModelSelect = document.getElementById('new-model-select'); // primary dropdown
   const $btnCreateSession = document.getElementById('btn-create-session');
   const $newSessionError = document.getElementById('new-session-error');
   const $btnChanges = document.getElementById('btn-changes');
@@ -484,6 +584,27 @@
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
     }
+    // Positively detach the previous socket BEFORE opening a new one.
+    // ws.close() doesn't transition to CLOSED synchronously — it goes
+    // through CLOSING first and during that window the old socket can
+    // still receive and dispatch broadcasts. If we leave its handlers
+    // attached, every server-side broadcast that lands during the
+    // closing window gets handleMessage()'d twice — once via the new
+    // socket, once via the old one — and the user sees duplicate
+    // bubbles for a single send. Nulling out the handlers first means
+    // the old socket can't dispatch anything regardless of how long
+    // CLOSING takes.
+    if (ws) {
+      try {
+        ws.onmessage = null;
+        ws.onclose = null;
+        ws.onopen = null;
+        ws.onerror = null;
+        if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
+          ws.close();
+        }
+      } catch (e) {}
+    }
     isReconnecting = true;
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const url = `${proto}//${location.host}?role=dashboard`;
@@ -603,8 +724,62 @@
           var inst = instances.get(msg.id);
           if (!inst.conversation) inst.conversation = [];
 
-          // After history is loaded, skip watcher messages that overlap
-          // with the tail of history (same role + content = duplicate).
+          // ---- Layer 1: clientMsgId reconciliation. ----
+          //
+          // If the incoming message carries the same UUID the user's
+          // own browser stamped on a send_prompt moments ago, this is
+          // the server's echo confirming the optimistic local bubble.
+          // Replace the pending entry with the server's stamped one
+          // (which now has seq + canonical timestamp) and switch the
+          // DOM bubble out of its pending state. NO duplicate render.
+          //
+          // This is the load-bearing change: the user sees their own
+          // text immediately on send (via the optimistic insert in
+          // sendPrompt()), and the round-trip echo silently confirms.
+          if (msg.message && typeof msg.message.clientMsgId === 'string') {
+            var reconciled = false;
+            for (var pi = inst.conversation.length - 1; pi >= 0; pi--) {
+              var existing = inst.conversation[pi];
+              if (existing && existing._pending && existing.clientMsgId === msg.message.clientMsgId) {
+                inst.conversation[pi] = Object.assign({}, msg.message, { _pending: false });
+                if (typeof msg.message.seq === 'number') {
+                  inst._lastMessageSeq = msg.message.seq;
+                }
+                clearOptimisticTimeout(msg.message.clientMsgId);
+                if (activeInstanceId === msg.id) {
+                  markBubbleConfirmed(msg.message.clientMsgId);
+                }
+                reconciled = true;
+                break;
+              }
+            }
+            if (reconciled) break;
+            // Else: this clientMsgId belongs to a different tab or the
+            // optimistic bubble was already dropped. Fall through to
+            // the standard path so we render it like any new message.
+          }
+
+          // ---- Layer 2: seq dedup. ----
+          //
+          // Defence against duplicate-broadcast delivery (e.g. a
+          // stale WebSocket that hasn't fully closed yet still
+          // dispatching events). Every server-side addMessage stamps
+          // a monotonic per-instance seq; a broadcast we've already
+          // processed has seq <= the high-water mark we track here.
+          if (msg.message && typeof msg.message.seq === 'number') {
+            if (inst._lastMessageSeq != null && msg.message.seq <= inst._lastMessageSeq) {
+              break;
+            }
+            inst._lastMessageSeq = msg.message.seq;
+          }
+
+          // ---- Layer 3: history-overlap dedup. ----
+          //
+          // After history is loaded, skip watcher messages whose
+          // (role, content, contentType) tuple matches one already in
+          // the recent tail — this is the legacy guard against
+          // watcher-replaying an event the history endpoint already
+          // returned.
           var dominated = false;
           if (inst._historyLoaded && inst._historyLen) {
             var tail = inst.conversation.slice(-20);
@@ -668,7 +843,59 @@
         // Refresh cost dashboard on new cost data
         loadCosts();
         break;
+
+      case 'outbox_update':
+        // The hub fired when the agent (in this instance) went idle
+        // and produced files in its outbox dir during the just-finished
+        // turn. Attach the new files to the most recent assistant
+        // message so the dashboard renders download chips on that bubble.
+        handleOutboxUpdate(msg.instanceId, msg.newFiles || [], msg.files || []);
+        break;
     }
+  }
+
+  /**
+   * Stamp the most-recent assistant message in this instance's
+   * conversation with the new files, then re-render the conversation
+   * if it's the active session so the chips appear.
+   */
+  function handleOutboxUpdate(instanceId, newFileNames, allFiles) {
+    if (!instances.has(instanceId)) return;
+    var inst = instances.get(instanceId);
+    if (!inst.conversation) inst.conversation = [];
+
+    // Resolve full file metadata for each new name from the server's snapshot
+    var byName = {};
+    for (var i = 0; i < allFiles.length; i++) byName[allFiles[i].name] = allFiles[i];
+    var newFileMetas = newFileNames
+      .map(function (n) { return byName[n]; })
+      .filter(Boolean);
+    if (newFileMetas.length === 0) return;
+
+    // Find the last assistant message; if none, fall back to creating a
+    // synthetic system message that owns the chips.
+    var conv = inst.conversation;
+    var targetIdx = -1;
+    for (var k = conv.length - 1; k >= 0; k--) {
+      if (conv[k].role === 'assistant') { targetIdx = k; break; }
+    }
+    if (targetIdx === -1) {
+      var systemMsg = {
+        role: 'assistant',
+        content: 'Agent produced files in this turn:',
+        contentType: 'text',
+        outboxFiles: newFileMetas,
+        _outboxInstanceId: instanceId,
+        timestamp: Date.now(),
+      };
+      conv.push(systemMsg);
+    } else {
+      var target = conv[targetIdx];
+      target.outboxFiles = (target.outboxFiles || []).concat(newFileMetas);
+      target._outboxInstanceId = instanceId;
+    }
+
+    if (activeInstanceId === instanceId) renderDetail();
   }
 
   // ---- Helpers: Instance ----
@@ -803,12 +1030,23 @@
       return 0;
     });
 
-    // Split into mind group (Alien Mind + its arms) and regular instances
+    // Split into mind group (Alien Mind + its arms) and regular instances.
+    //
+    // The arm is identified by its source tag — every arm the coordinator
+    // spawns through OneShotAgentRunner gets registered with
+    // `source: 'mind:<goalId-tail>'`. That's the canonical signal and
+    // it survives display-name renames. The legacy name-prefix check
+    // ('Arm: ', 'Mind arm: ') is kept as a fallback for any non-runner
+    // path that might still set the display name without the source tag.
     var mindGroup = [];
     var regular = [];
     for (var m = 0; m < arr.length; m++) {
       var inst = arr[m];
-      if (inst.agentType === 'mind' || (inst.name && inst.name.indexOf('Arm: ') === 0)) {
+      var isMindArm =
+        inst.agentType === 'mind'
+        || (typeof inst.source === 'string' && inst.source.indexOf('mind:') === 0)
+        || (inst.name && (inst.name.indexOf('Mind arm: ') === 0 || inst.name.indexOf('Arm: ') === 0));
+      if (isMindArm) {
         mindGroup.push(inst);
       } else {
         regular.push(inst);
@@ -877,12 +1115,13 @@
           var messages = data.messages || data;
           var total = data.total || messages.length;
           if (messages.length > 0) {
-            inst.conversation = messages;
+            inst.conversation = preservePending(inst.conversation, messages);
             inst._historyLen = total;
             inst._totalMessages = total;
             inst._loadedFrom = total - messages.length; // index of first loaded message
           } else {
-            inst._totalMessages = 0;
+            inst.conversation = preservePending(inst.conversation, []);
+            inst._totalMessages = inst.conversation.length;
             inst._loadedFrom = 0;
           }
           inst._historyLoaded = true;
@@ -901,10 +1140,14 @@
       authFetch('/api/instances/' + inst.id + '/conversation?limit=100')
         .then(function (r) { return r.json(); })
         .then(function (msgs) {
-          inst.conversation = msgs;
-          inst._totalMessages = msgs.length;
+          inst.conversation = preservePending(inst.conversation, msgs);
+          inst._totalMessages = inst.conversation.length;
           inst._loadedFrom = 0;
           inst._loadingOlder = false;
+          // Reset the dedup high-water mark to the highest seq in the
+          // reloaded conversation. Any subsequent live broadcast with a
+          // smaller-or-equal seq is a duplicate and gets dropped.
+          inst._lastMessageSeq = highestSeq(msgs);
           if (!inst._firstPrompt) {
             inst._firstPrompt = getFirstPrompt(inst.conversation);
             renderList();
@@ -916,6 +1159,33 @@
         })
         .catch(function () {});
     }
+  }
+
+  function highestSeq(messages) {
+    if (!Array.isArray(messages)) return null;
+    var max = null;
+    for (var i = 0; i < messages.length; i++) {
+      var s = messages[i] && messages[i].seq;
+      if (typeof s === 'number' && (max == null || s > max)) max = s;
+    }
+    return max;
+  }
+
+  /**
+   * Carry over any still-pending optimistic messages when a history
+   * reload replaces the conversation array. Without this, a reload
+   * triggered while the user has an in-flight send (e.g. a WS reconnect
+   * mid-prompt) would silently swallow the bubble they were watching.
+   *
+   * Pending messages keep their clientMsgId so the eventual server
+   * echo can still reconcile them — no special case downstream.
+   */
+  function preservePending(oldConversation, freshList) {
+    var fresh = Array.isArray(freshList) ? freshList : [];
+    if (!Array.isArray(oldConversation) || oldConversation.length === 0) return fresh;
+    var pending = oldConversation.filter(function (m) { return m && m._pending; });
+    if (pending.length === 0) return fresh;
+    return fresh.concat(pending);
   }
 
   function loadOlderMessages(inst) {
@@ -952,6 +1222,10 @@
 
   // ---- Render: Detail View ----
   function openDetail(id) {
+    // Switching to a new conversation: drop any in-conversation search
+    // highlights so we don't leak stale <mark> elements across sessions.
+    if (typeof closeConvSearch === 'function') closeConvSearch();
+
     activeInstanceId = id;
 
     var inst = instances.get(id);
@@ -961,6 +1235,10 @@
         showLoading($conversation, 'Loading conversation...');
         reloadHistory(inst, true);
       }
+      // Sync the outbox-enabled flag from the server. The pill paints
+      // immediately from `instanceOutboxEnabled` (off by default); the
+      // refresh corrects it once the server responds.
+      refreshOutboxState(id);
     }
 
     if (isDesktop()) {
@@ -979,6 +1257,7 @@
   }
 
   function closeDetail() {
+    if (typeof closeConvSearch === 'function') closeConvSearch();
     activeInstanceId = null;
     if (isDesktop()) {
       highlightSelectedCard(null);
@@ -1023,6 +1302,8 @@
     $detailProject.textContent = '📁 ' + (inst.project || '');
     var detailAgentType = VALID_AGENT_TYPES.indexOf(inst.agentType) !== -1 ? inst.agentType : 'claude';
     $detailType.innerHTML = '<span class="agent-badge agent-' + detailAgentType + '">' + agentLabel(detailAgentType) + '</span>';
+    renderModelPill(inst, detailAgentType);
+    renderOutboxPill(inst);
 
     // Skills button — only for Claude instances
     var isClaude = !inst.agentType || inst.agentType === 'claude';
@@ -1123,6 +1404,9 @@
         imgs[i].addEventListener('load', function () { scrollToBottom(true); });
       }
     }
+    // If a global search result triggered this render, jump straight to
+    // the match the user clicked. No-op when there's no pending query.
+    if (typeof applyPendingConvSearch === 'function') applyPendingConvSearch();
   }
 
   /**
@@ -1280,6 +1564,14 @@
     // Default: text message
     var cls = 'msg msg-' + (m.role || 'system');
     if (m.source === 'mobile') cls += ' from-mobile';
+    // Optimistic-render flags. The DOM exposes data-client-msg-id so
+    // the confirmation handler can find the bubble for in-place state
+    // updates without re-rendering the whole conversation.
+    if (m._pending) cls += ' msg-pending';
+    if (m._failed) cls += ' msg-failed';
+    var cmsgAttr = m.clientMsgId
+      ? ' data-client-msg-id="' + escapeHtml(m.clientMsgId) + '"'
+      : '';
     var rendered = m.role === 'assistant'
       ? renderMarkdown(m.content || '')
       : escapeHtml(m.content || '');
@@ -1298,13 +1590,43 @@
       '</div>';
     }
 
+    // Outbox chips: files the agent produced during this assistant turn
+    // (assistant messages only; the websocket layer attaches these when
+    // the agent goes idle and the outbox dir diff is non-empty).
+    var outboxHtml = '';
+    if (m.role === 'assistant' && Array.isArray(m.outboxFiles) && m.outboxFiles.length > 0) {
+      var instIdForLink = m._outboxInstanceId || activeInstanceId || '';
+      outboxHtml = '<div class="msg-outbox">' +
+        m.outboxFiles.map(function (f) {
+          var sizeStr = f.size != null ? humanFileSize(f.size) : '';
+          return '<a class="msg-outbox-chip" ' +
+            'data-instance-id="' + escapeHtml(instIdForLink) + '" ' +
+            'data-outbox-name="' + escapeHtml(f.name) + '" ' +
+            'title="Download ' + escapeHtml(f.name) + '">' +
+            '<span class="msg-outbox-chip-icon">&#11015;</span>' +
+            '<span>' + escapeHtml(f.name) + '</span>' +
+            (sizeStr ? '<span class="msg-outbox-chip-size">' + escapeHtml(sizeStr) + '</span>' : '') +
+            '</a>';
+        }).join('') +
+      '</div>';
+    }
+
     return (
-      '<div class="' + cls + '">' +
+      '<div class="' + cls + '"' + cmsgAttr + '>' +
         attachHtml +
         rendered +
+        outboxHtml +
         timeHtml +
       '</div>'
     );
+  }
+
+  function humanFileSize(bytes) {
+    if (!Number.isFinite(bytes) || bytes < 0) return '';
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    if (bytes < 1024 * 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+    return (bytes / 1024 / 1024 / 1024).toFixed(2) + ' GB';
   }
 
   /**
@@ -1654,6 +1976,27 @@
   });
 
   // ---- Actions ----
+  /**
+   * Send a user prompt.
+   *
+   * Renders the bubble locally BEFORE the server round-trip so the user
+   * sees their own text the instant they press Enter. The server's
+   * echo back over WebSocket is then matched to the optimistic bubble
+   * via a client-generated UUID (`clientMsgId`) and reconciles
+   * (replaces the pending entry with the server-stamped one) instead
+   * of producing a second bubble.
+   *
+   * Why a client UUID and not just "match by content + timestamp":
+   *   - Content can repeat verbatim (slash commands, retries) — content
+   *     match would coalesce distinct messages.
+   *   - Timestamps drift between client and server.
+   *   - The UUID is uniquely paired and survives reconnection.
+   *
+   * If the server doesn't echo within OPTIMISTIC_TIMEOUT_MS the bubble
+   * flips to a failed visual state so the user knows their send didn't
+   * land. The seq dedup defended further down the pipeline still
+   * catches duplicate-broadcast delivery from any future bug.
+   */
   function sendPrompt() {
     var text = $promptInput.value.trim();
     if ((!text && pendingAttachments.length === 0) || !activeInstanceId) return;
@@ -1661,13 +2004,43 @@
     var attachments = pendingAttachments.map(function (a) {
       return { id: a.id, path: a.path, filename: a.filename, mediaType: a.mediaType };
     });
+    var clientMsgId = newClientMsgId();
+    var finalText = text || (attachments.length > 0 ? 'See attached file(s).' : '');
 
+    // 1. Optimistic local insert. Bubble appears immediately.
+    var optimisticMsg = {
+      role: 'user',
+      content: finalText,
+      source: 'mobile',
+      attachments: attachments,
+      clientMsgId: clientMsgId,
+      _pending: true,
+      timestamp: Date.now(),
+    };
+    var inst = instances.get(activeInstanceId);
+    if (inst) {
+      if (!inst.conversation) inst.conversation = [];
+      inst.conversation.push(optimisticMsg);
+      if (!inst._firstPrompt) {
+        inst._firstPrompt = finalText;
+        renderList();
+      }
+      appendMessage(optimisticMsg);
+    }
+
+    // 2. Ship to server. The clientMsgId rides along so the server's
+    //    echo can be matched to the optimistic bubble.
     send({
       type: 'send_prompt',
       instanceId: activeInstanceId,
-      text: text || (attachments.length > 0 ? 'See attached file(s).' : ''),
+      text: finalText,
       attachments: attachments,
+      clientMsgId: clientMsgId,
     });
+
+    // 3. Failure timeout: if the server hasn't echoed within the
+    //    deadline, mark the bubble as failed so the user knows.
+    scheduleOptimisticTimeout(activeInstanceId, clientMsgId);
 
     clearAttachments();
     $promptInput.value = '';
@@ -1677,6 +2050,319 @@
     // updateSendButton() on the next renderDetail() trigger.
     $btnSend.disabled = true;
     scrollToBottom(true);
+  }
+
+  // -----  Optimistic-render plumbing  ----------------------------------
+
+  var OPTIMISTIC_TIMEOUT_MS = 10000;
+  var optimisticTimers = {};   // clientMsgId -> setTimeout handle
+
+  /**
+   * Generate a per-message UUID for client→server→client matching.
+   * The format is human-recognizable in the network tab when debugging
+   * (`cmsg-<base36 epoch>-<random>`); the recipient treats it as an
+   * opaque string.
+   */
+  function newClientMsgId() {
+    return 'cmsg-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+  }
+
+  function scheduleOptimisticTimeout(instanceId, clientMsgId) {
+    if (optimisticTimers[clientMsgId]) clearTimeout(optimisticTimers[clientMsgId]);
+    optimisticTimers[clientMsgId] = setTimeout(function () {
+      delete optimisticTimers[clientMsgId];
+      var inst = instances.get(instanceId);
+      if (!inst || !inst.conversation) return;
+      // Walk backwards so we hit the most-recent pending first
+      for (var i = inst.conversation.length - 1; i >= 0; i--) {
+        var m = inst.conversation[i];
+        if (m && m._pending && m.clientMsgId === clientMsgId) {
+          m._pending = false;
+          m._failed = true;
+          markBubbleFailed(clientMsgId);
+          break;
+        }
+      }
+    }, OPTIMISTIC_TIMEOUT_MS);
+  }
+
+  function clearOptimisticTimeout(clientMsgId) {
+    if (optimisticTimers[clientMsgId]) {
+      clearTimeout(optimisticTimers[clientMsgId]);
+      delete optimisticTimers[clientMsgId];
+    }
+  }
+
+  /**
+   * Targeted DOM update on confirmation: find the pending bubble by
+   * its data-client-msg-id and drop the .msg-pending class. We don't
+   * re-render the whole conversation because that would scroll-jitter
+   * the user out of the bottom-pinned view.
+   */
+  function markBubbleConfirmed(clientMsgId) {
+    var el = $conversation.querySelector('.msg[data-client-msg-id="' + cssEscape(clientMsgId) + '"]');
+    if (el) {
+      el.classList.remove('msg-pending');
+      el.classList.add('msg-confirmed');
+    }
+  }
+
+  function markBubbleFailed(clientMsgId) {
+    var el = $conversation.querySelector('.msg[data-client-msg-id="' + cssEscape(clientMsgId) + '"]');
+    if (el) {
+      el.classList.remove('msg-pending');
+      el.classList.add('msg-failed');
+    }
+  }
+
+  /**
+   * CSS.escape shim for older browsers (and our usage of it inside
+   * attribute selectors). The clientMsgId charset is constrained but
+   * we escape defensively to avoid selector-injection bugs.
+   */
+  function cssEscape(s) {
+    if (window.CSS && typeof window.CSS.escape === 'function') return window.CSS.escape(s);
+    return String(s).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+  }
+
+  // ---- Mid-session model picker ----
+  //
+  // The detail-header pill shows the operator's last picked model for
+  // this instance (defaulting to the model the session was created
+  // with, when known). Clicking it opens a modal where they can pick a
+  // preset or enter a custom id. Behaviour by agent:
+  //
+  //   - Claude: sends "/model <name>" as a regular prompt. Claude Code
+  //     interprets that slash-command at the CLI level and switches the
+  //     model for subsequent turns — no server changes required.
+  //   - Everyone else: shows a warning that switching the model takes
+  //     effect only after respawning the agent, and disables the apply
+  //     button. The picker still lets the operator inspect the preset
+  //     list, just without making a live change.
+  var $detailModelPill = document.getElementById('detail-model');
+  var $detailModelLabel = $detailModelPill && $detailModelPill.querySelector('.model-pill-label');
+  var $detailModelValue = $detailModelPill && $detailModelPill.querySelector('.model-pill-value');
+  var $detailOutboxPill = document.getElementById('detail-outbox');
+  var $detailOutboxState = document.getElementById('outbox-pill-state');
+  // Per-instance outbox state — server is authoritative; this is just a
+  // local UI mirror keyed by instanceId so we don't refetch on every render.
+  var instanceOutboxEnabled = {};
+
+  function renderOutboxPill(inst) {
+    if (!$detailOutboxPill) return;
+    if (!inst || !inst.id) {
+      $detailOutboxPill.classList.add('hidden');
+      return;
+    }
+    $detailOutboxPill.classList.remove('hidden');
+    var on = !!instanceOutboxEnabled[inst.id];
+    if (on) {
+      $detailOutboxPill.classList.add('outbox-on');
+      $detailOutboxState.textContent = 'on';
+    } else {
+      $detailOutboxPill.classList.remove('outbox-on');
+      $detailOutboxState.textContent = 'off';
+    }
+  }
+
+  async function toggleOutbox() {
+    var inst = instances.get(activeInstanceId);
+    if (!inst) return;
+    var nextOn = !instanceOutboxEnabled[inst.id];
+    var endpoint = '/api/instances/' + encodeURIComponent(inst.id) + '/outbox/' + (nextOn ? 'enable' : 'disable');
+    try {
+      var resp = await fetch(endpoint, { method: 'POST', credentials: 'same-origin' });
+      if (!resp.ok) throw new Error('http_' + resp.status);
+      var data = await resp.json();
+      instanceOutboxEnabled[inst.id] = !!data.enabled;
+      renderOutboxPill(inst);
+    } catch (err) {
+      console.error('outbox toggle failed:', err);
+    }
+  }
+
+  /**
+   * Sync the outbox-enabled state for an instance from the server.
+   * Called when the user opens an instance so the pill reflects truth
+   * across reloads / multi-tab usage.
+   */
+  async function refreshOutboxState(instanceId) {
+    if (!instanceId) return;
+    try {
+      var resp = await fetch('/api/instances/' + encodeURIComponent(instanceId) + '/outbox', {
+        credentials: 'same-origin',
+      });
+      if (!resp.ok) return;
+      var data = await resp.json();
+      instanceOutboxEnabled[instanceId] = !!data.enabled;
+      if (instances.has(instanceId)) renderOutboxPill(instances.get(instanceId));
+    } catch (err) {
+      // non-critical: leave pill in its current state
+    }
+  }
+
+  if ($detailOutboxPill) {
+    $detailOutboxPill.addEventListener('click', toggleOutbox);
+  }
+
+  // Delegated handler for outbox download chips. The chip carries the
+  // instanceId + filename in data-* attributes so a single listener
+  // covers chips on every rendered message.
+  document.addEventListener('click', function (e) {
+    var chip = e.target && e.target.closest && e.target.closest('.msg-outbox-chip');
+    if (!chip) return;
+    e.preventDefault();
+    var iid = chip.getAttribute('data-instance-id');
+    var name = chip.getAttribute('data-outbox-name');
+    if (!iid || !name) return;
+    // Open in a new tab so the browser's download UI handles auth +
+    // save. credentials: 'include' isn't needed for a same-origin
+    // navigation; the dashboard cookie/session ride along.
+    var url = '/api/instances/' + encodeURIComponent(iid) + '/outbox/' + encodeURIComponent(name);
+    window.location.href = url;
+  });
+  var $modelPickerModal = document.getElementById('model-picker-modal');
+  var $modelPickerList = document.getElementById('model-picker-list');
+  var $modelPickerCustom = document.getElementById('model-picker-custom');
+  var $modelPickerHint = document.getElementById('model-picker-hint');
+  var $modelPickerWarning = document.getElementById('model-picker-warning');
+  var $modelPickerApply = document.getElementById('btn-model-picker-apply');
+  var $btnCloseModelPicker = document.getElementById('btn-close-model-picker');
+  var modelPickerSelected = '';
+
+  function renderModelPill(inst, agentType) {
+    if (!$detailModelPill) return;
+    if (!inst || !inst.id) {
+      $detailModelPill.classList.add('hidden');
+      return;
+    }
+    var current = instanceModelHint[inst.id] != null ? instanceModelHint[inst.id] : (inst.model || '');
+    $detailModelLabel.textContent = 'model';
+    $detailModelValue.textContent = modelLabelFor(agentType, current);
+    $detailModelPill.classList.remove('hidden');
+    // Stash the agent type on the element so the click handler doesn't
+    // have to re-derive it (and the modal picks the right preset list).
+    $detailModelPill.dataset.agentType = agentType;
+    $detailModelPill.dataset.current = current;
+  }
+
+  function openModelPicker() {
+    var inst = instances.get(activeInstanceId);
+    if (!inst || !$modelPickerModal) return;
+    var agentType = ($detailModelPill && $detailModelPill.dataset.agentType) || inst.agentType || 'claude';
+    var current = ($detailModelPill && $detailModelPill.dataset.current) || '';
+    var spec = AGENT_MODELS[agentType] || AGENT_MODELS.claude;
+    modelPickerSelected = current;
+
+    // Populate the preset list as radio-like buttons
+    $modelPickerList.replaceChildren();
+    spec.presets.forEach(function (preset) {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'model-picker-row' + (preset.id === current ? ' selected' : '');
+      btn.dataset.modelId = preset.id;
+      var label = document.createElement('span');
+      label.className = 'model-picker-row-label';
+      label.textContent = preset.label;
+      btn.appendChild(label);
+      if (preset.id === current) {
+        var check = document.createElement('span');
+        check.className = 'model-picker-row-check';
+        check.textContent = '✓';
+        btn.appendChild(check);
+      }
+      btn.addEventListener('click', function () {
+        modelPickerSelected = preset.id;
+        // Visually mark and clear other rows
+        var rows = $modelPickerList.querySelectorAll('.model-picker-row');
+        for (var i = 0; i < rows.length; i++) rows[i].classList.remove('selected');
+        btn.classList.add('selected');
+        $modelPickerCustom.value = '';
+      });
+      $modelPickerList.appendChild(btn);
+    });
+    // Pre-fill the custom field when the current model isn't a preset
+    var isPreset = spec.presets.some(function (p) { return p.id === current; });
+    $modelPickerCustom.value = isPreset ? '' : (current || '');
+
+    // Hint + warning per agent capability
+    if (spec.slashSwitch) {
+      $modelPickerHint.textContent = 'This agent supports live model switching via a slash-command. The new model takes effect on the next prompt.';
+      $modelPickerWarning.classList.add('hidden');
+      $modelPickerApply.disabled = false;
+      $modelPickerApply.textContent = 'Apply';
+    } else {
+      $modelPickerHint.textContent = 'This agent only accepts a model at startup, so switching mid-session is recorded locally only — you will need to start a new session for the change to take effect.';
+      $modelPickerWarning.textContent = 'Heads up: the running agent will continue using its current model. Use the new-session button (＋) to actually switch.';
+      $modelPickerWarning.classList.remove('hidden');
+      $modelPickerApply.disabled = false;
+      $modelPickerApply.textContent = 'Remember this choice';
+    }
+
+    $modelPickerModal.classList.remove('hidden');
+    requestAnimationFrame(function () { $modelPickerModal.classList.add('visible'); });
+    setTimeout(function () { $modelPickerCustom.focus(); }, 350);
+  }
+
+  function applyModelPicker() {
+    var inst = instances.get(activeInstanceId);
+    if (!inst || !$modelPickerModal) return;
+    var agentType = ($detailModelPill && $detailModelPill.dataset.agentType) || inst.agentType || 'claude';
+    var spec = AGENT_MODELS[agentType] || AGENT_MODELS.claude;
+
+    // Custom input wins when present (lets the operator override any
+    // selected preset by typing).
+    var modelId = $modelPickerCustom.value.trim() || modelPickerSelected;
+    // Empty string is valid — means "back to default" — but the slash
+    // path can't express that, so for claude we treat empty as "no-op".
+    if (spec.slashSwitch && modelId) {
+      // Send "/model <id>" via the existing prompt API. The agent's
+      // stdin handler routes any text to claude; the slash command is
+      // interpreted by Claude Code itself.
+      send({
+        type: 'send_prompt',
+        instanceId: inst.id,
+        text: (spec.slashCommand || '/model') + ' ' + modelId,
+        attachments: [],
+      });
+    }
+    // Update the local hint regardless of agent type — the operator
+    // explicitly picked this, so the pill should reflect that even when
+    // the underlying agent won't honour it until respawn.
+    instanceModelHint[inst.id] = modelId;
+    renderModelPill(inst, agentType);
+    closeModelPicker();
+  }
+
+  function closeModelPicker() {
+    if (!$modelPickerModal) return;
+    $modelPickerModal.classList.remove('visible');
+    setTimeout(function () { $modelPickerModal.classList.add('hidden'); }, 300);
+  }
+
+  if ($detailModelPill) {
+    $detailModelPill.addEventListener('click', openModelPicker);
+  }
+  if ($modelPickerApply) {
+    $modelPickerApply.addEventListener('click', applyModelPicker);
+  }
+  if ($btnCloseModelPicker) {
+    $btnCloseModelPicker.addEventListener('click', closeModelPicker);
+  }
+  if ($modelPickerModal) {
+    $modelPickerModal.addEventListener('click', function (e) {
+      if (e.target === $modelPickerModal) closeModelPicker();
+    });
+  }
+  if ($modelPickerCustom) {
+    // Custom text wins; clear the highlighted preset row when typing.
+    $modelPickerCustom.addEventListener('input', function () {
+      if ($modelPickerCustom.value.trim()) {
+        var rows = $modelPickerList.querySelectorAll('.model-picker-row');
+        for (var i = 0; i < rows.length; i++) rows[i].classList.remove('selected');
+        modelPickerSelected = '';
+      }
+    });
   }
 
   // ---- Template Bar ----
@@ -2115,6 +2801,38 @@
     this.value = ''; // reset so same file can be picked again
     files.forEach(function (file) {
       uploadFile(file);
+    });
+  });
+
+  // Paste images straight from the clipboard. Listens on the prompt
+  // input so it only fires while the user is composing a message;
+  // attaching on document would intercept paste in other contexts.
+  // Browsers expose pasted images as File objects via
+  // event.clipboardData.items[i].getAsFile() with type 'image/*'.
+  // Text paste keeps its default behaviour (we only preventDefault
+  // when at least one image was found).
+  $promptInput.addEventListener('paste', function (e) {
+    if (!e.clipboardData || !e.clipboardData.items) return;
+    var images = [];
+    for (var i = 0; i < e.clipboardData.items.length; i++) {
+      var item = e.clipboardData.items[i];
+      if (item && item.kind === 'file' && item.type && item.type.indexOf('image/') === 0) {
+        var blob = item.getAsFile();
+        if (blob) images.push(blob);
+      }
+    }
+    if (images.length === 0) return; // let the browser handle text paste
+    e.preventDefault();
+    images.forEach(function (blob) {
+      // Pasted images come without a real filename. Give them a
+      // deterministic-ish one so the server-side sanitizer is happy.
+      var ext = (blob.type.split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '').toLowerCase();
+      var stamped = new File(
+        [blob],
+        'pasted-' + new Date().toISOString().replace(/[:.]/g, '-') + '.' + ext,
+        { type: blob.type, lastModified: Date.now() }
+      );
+      uploadFile(stamped);
     });
   });
 
@@ -2647,6 +3365,56 @@
         btns[i].classList.remove('selected');
       }
     }
+    populateNewModelSelect();
+  }
+
+  // Rebuild the new-session model <select> whenever the selected agent
+  // changes. Adds a "Custom..." entry at the end when the agent allows
+  // arbitrary model names (which is currently every agent).
+  function populateNewModelSelect() {
+    if (!$newModelSelect) return;
+    var spec = AGENT_MODELS[selectedAgentType] || AGENT_MODELS.claude;
+    $newModelSelect.replaceChildren();
+    spec.presets.forEach(function (preset) {
+      var opt = document.createElement('option');
+      opt.value = preset.id;
+      opt.textContent = preset.label;
+      $newModelSelect.appendChild(opt);
+    });
+    if (spec.customAllowed) {
+      var custom = document.createElement('option');
+      custom.value = '__custom__';
+      custom.textContent = 'Custom…';
+      $newModelSelect.appendChild(custom);
+    }
+    // Reset selection + hide the custom text field when re-populating.
+    $newModelSelect.value = '';
+    if ($newModel) {
+      $newModel.value = '';
+      $newModel.classList.add('hidden');
+    }
+  }
+
+  if ($newModelSelect) {
+    $newModelSelect.addEventListener('change', function () {
+      if (!$newModel) return;
+      if ($newModelSelect.value === '__custom__') {
+        $newModel.classList.remove('hidden');
+        $newModel.focus();
+      } else {
+        $newModel.classList.add('hidden');
+        $newModel.value = '';
+      }
+    });
+  }
+
+  // Resolve the operator's model choice when creating a new session:
+  // "__custom__" means the value lives in the custom text input.
+  function resolveNewSessionModel() {
+    if (!$newModelSelect) return '';
+    var v = $newModelSelect.value;
+    if (v === '__custom__') return ($newModel && $newModel.value.trim()) || '';
+    return v || '';
   }
 
   $newAgentType.addEventListener('click', function (e) {
@@ -2756,7 +3524,7 @@
         agentType: selectedAgentType,
         cwd: cwd,
         name: $newName.value.trim() || undefined,
-        model: $newModel.value.trim() || undefined,
+        model: resolveNewSessionModel() || undefined,
       }),
     })
     .then(function (r) {
@@ -3258,6 +4026,7 @@
       $btnSearch.classList.remove('hidden');
     } else {
       $btnSearch.classList.add('hidden');
+      $viewList.classList.remove('searching');
       $searchResults.classList.add('hidden');
       $searchResults.innerHTML = '';
     }
@@ -3269,10 +4038,16 @@
     if (e.key === 'Enter') {
       e.preventDefault();
       triggerSearch();
+    } else if (e.key === 'Escape') {
+      $searchInput.value = '';
+      // Trigger the same teardown the input handler does for empty input
+      $searchInput.dispatchEvent(new Event('input'));
+      $searchInput.blur();
     }
   });
 
   function searchConversations(query) {
+    $viewList.classList.add('searching');
     $searchResults.classList.remove('hidden');
     $searchResults.innerHTML = '<div class="loading-message">Searching...</div>';
 
@@ -3320,6 +4095,12 @@
   function onSearchResultClick(e) {
     var sessionId = e.currentTarget.getAttribute('data-session-id');
     if (!sessionId) return;
+    // Stash the active search query so once the destination conversation
+    // is loaded we can auto-open the in-conversation search and jump to it.
+    var q = $searchInput.value.trim();
+    if (q) pendingConvSearchQuery = q;
+    // Restore the normal sidebar layout when navigating to a result
+    $viewList.classList.remove('searching');
 
     // 1. Check if there's an active instance with this sessionId
     var found = null;
@@ -3360,11 +4141,452 @@
       .catch(function () {});
   }
 
+  // ---- In-Conversation Search ----
+  //
+  // Client-side text search inside the currently-open conversation. Walks
+  // text nodes under #conversation, wraps matches in <mark class="conv-match">,
+  // and lets the user step through matches with up/down (or Enter/Shift+Enter).
+  // No server round-trip — the conversation is already in the DOM.
+  //
+  // The search is intentionally non-live with respect to newly-arrived
+  // messages: highlights are computed at search time. Clearing the search
+  // strips every wrapper this module added, leaving the DOM unchanged.
+  var $btnConvSearch = document.getElementById('btn-conv-search');
+  var $convSearchBar = document.getElementById('conv-search-bar');
+  var $convSearchInput = document.getElementById('conv-search-input');
+  var $convSearchCount = document.getElementById('conv-search-count');
+  var $btnConvSearchPrev = document.getElementById('btn-conv-search-prev');
+  var $btnConvSearchNext = document.getElementById('btn-conv-search-next');
+  var $btnConvSearchClose = document.getElementById('btn-conv-search-close');
+
+  var convMatches = [];   // ordered list of <mark.conv-match> elements
+  var convMatchIdx = -1;  // index of the currently-focused match
+  // When a click on the GLOBAL search results triggers navigation into a
+  // session, we stash the user's query here. As soon as the conversation
+  // finishes rendering (renderConversation), the in-conversation search is
+  // auto-opened with this query so the user lands directly on the match
+  // they clicked instead of at the bottom of the conversation.
+  var pendingConvSearchQuery = null;
+
+  function escapeRegex(str) {
+    return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  function clearConvMatches() {
+    // Replace every <mark.conv-match> with its text content. We collect
+    // first because the live NodeList shrinks as we mutate.
+    var marks = $conversation.querySelectorAll('mark.conv-match');
+    for (var i = 0; i < marks.length; i++) {
+      var m = marks[i];
+      var parent = m.parentNode;
+      if (!parent) continue;
+      parent.replaceChild(document.createTextNode(m.textContent), m);
+      parent.normalize(); // coalesce adjacent text nodes so the next search sees clean text
+    }
+    convMatches = [];
+    convMatchIdx = -1;
+    $convSearchCount.textContent = '';
+    $convSearchCount.classList.remove('no-matches');
+  }
+
+  function highlightConvMatches(query) {
+    clearConvMatches();
+    if (!query || query.length < 2) return;
+
+    var pattern = new RegExp(escapeRegex(query), 'gi');
+    var found = [];
+
+    // Walk text nodes under #conversation. Skip text inside elements we
+    // shouldn't modify: existing <mark> (avoid double-wrap), scripts/styles,
+    // input/textarea (user prompt isn't visible content anyway).
+    var walker = document.createTreeWalker($conversation, NodeFilter.SHOW_TEXT, {
+      acceptNode: function (node) {
+        if (!node.nodeValue || !node.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
+        var p = node.parentNode;
+        while (p && p !== $conversation) {
+          var tag = p.nodeName;
+          if (tag === 'MARK' || tag === 'SCRIPT' || tag === 'STYLE' ||
+              tag === 'INPUT' || tag === 'TEXTAREA') {
+            return NodeFilter.FILTER_REJECT;
+          }
+          p = p.parentNode;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+
+    // Collect target nodes first because we'll mutate as we go
+    var targets = [];
+    var n;
+    while ((n = walker.nextNode())) targets.push(n);
+
+    for (var i = 0; i < targets.length; i++) {
+      var node = targets[i];
+      var text = node.nodeValue;
+      // matchAll yields all non-overlapping matches with index info; using
+      // it avoids the imperative regex iterator pattern.
+      var hits = Array.from(text.matchAll(pattern));
+      if (hits.length === 0) continue;
+      var frag = document.createDocumentFragment();
+      var lastEnd = 0;
+      for (var hi = 0; hi < hits.length; hi++) {
+        var hit = hits[hi];
+        if (hit.index > lastEnd) {
+          frag.appendChild(document.createTextNode(text.slice(lastEnd, hit.index)));
+        }
+        var mark = document.createElement('mark');
+        mark.className = 'conv-match';
+        mark.textContent = hit[0];
+        frag.appendChild(mark);
+        found.push(mark);
+        lastEnd = hit.index + hit[0].length;
+      }
+      if (lastEnd < text.length) {
+        frag.appendChild(document.createTextNode(text.slice(lastEnd)));
+      }
+      node.parentNode.replaceChild(frag, node);
+    }
+
+    convMatches = found;
+    if (found.length === 0) {
+      $convSearchCount.textContent = 'no matches';
+      $convSearchCount.classList.add('no-matches');
+      convMatchIdx = -1;
+    } else {
+      focusConvMatch(0);
+    }
+  }
+
+  function focusConvMatch(idx) {
+    if (!convMatches.length) return;
+    if (idx < 0) idx = convMatches.length - 1;
+    if (idx >= convMatches.length) idx = 0;
+    if (convMatchIdx >= 0 && convMatches[convMatchIdx]) {
+      convMatches[convMatchIdx].classList.remove('current');
+    }
+    convMatchIdx = idx;
+    var el = convMatches[idx];
+    el.classList.add('current');
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    $convSearchCount.textContent = (idx + 1) + ' / ' + convMatches.length;
+    $convSearchCount.classList.remove('no-matches');
+    // Native text selection so the user can immediately copy the match
+    // and so the cursor/caret position visibly reflects where they are.
+    selectCurrentConvMatch();
+  }
+
+  function openConvSearch() {
+    $convSearchBar.classList.remove('hidden');
+    $convSearchInput.focus();
+    $convSearchInput.select();
+  }
+
+  // Called from renderConversation() after the conversation DOM is in place.
+  // If a global-search click set pendingConvSearchQuery, open the in-conversation
+  // search bar pre-populated with that query, highlight, and select the first
+  // match (visually + via the native Selection API so the user can copy it).
+  function applyPendingConvSearch() {
+    if (!pendingConvSearchQuery) return;
+    var q = pendingConvSearchQuery;
+    pendingConvSearchQuery = null;
+    if (!$convSearchBar || !$convSearchInput) return;
+    // Defer one frame so any post-render scroll has settled before we
+    // scrollIntoView the match.
+    requestAnimationFrame(function () {
+      $convSearchBar.classList.remove('hidden');
+      $convSearchInput.value = q;
+      highlightConvMatches(q);
+      selectCurrentConvMatch();
+    });
+  }
+
+  // Use the native Selection API to actually highlight the currently-focused
+  // match's text. This lets the user immediately copy it (Ctrl+C) and makes
+  // the position unambiguous even if the amber background isn't enough.
+  function selectCurrentConvMatch() {
+    if (convMatchIdx < 0 || !convMatches[convMatchIdx]) return;
+    var el = convMatches[convMatchIdx];
+    var sel = window.getSelection ? window.getSelection() : null;
+    if (!sel || typeof sel.removeAllRanges !== 'function') return;
+    try {
+      var range = document.createRange();
+      range.selectNodeContents(el);
+      sel.removeAllRanges();
+      sel.addRange(range);
+    } catch (e) {
+      // Selection isn't critical; the amber highlight is enough on its own
+    }
+  }
+
+  function closeConvSearch() {
+    clearConvMatches();
+    $convSearchInput.value = '';
+    $convSearchBar.classList.add('hidden');
+  }
+
+  if ($btnConvSearch) {
+    $btnConvSearch.addEventListener('click', function () {
+      if ($convSearchBar.classList.contains('hidden')) openConvSearch();
+      else closeConvSearch();
+    });
+  }
+  if ($btnConvSearchClose) {
+    $btnConvSearchClose.addEventListener('click', closeConvSearch);
+  }
+  if ($btnConvSearchNext) {
+    $btnConvSearchNext.addEventListener('click', function () { focusConvMatch(convMatchIdx + 1); });
+  }
+  if ($btnConvSearchPrev) {
+    $btnConvSearchPrev.addEventListener('click', function () { focusConvMatch(convMatchIdx - 1); });
+  }
+
+  if ($convSearchInput) {
+    var convSearchDebounce;
+    $convSearchInput.addEventListener('input', function () {
+      clearTimeout(convSearchDebounce);
+      var q = $convSearchInput.value.trim();
+      // Debounce so each keystroke doesn't trigger a full tree walk
+      convSearchDebounce = setTimeout(function () { highlightConvMatches(q); }, 120);
+    });
+    $convSearchInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        if (e.shiftKey) focusConvMatch(convMatchIdx - 1);
+        else focusConvMatch(convMatchIdx + 1);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        closeConvSearch();
+      }
+    });
+  }
+
+  // Ctrl+F / Cmd+F when a detail view is open opens the in-conversation
+  // search instead of the browser's find-in-page. Only intercept when a
+  // session is actually open; otherwise let the browser handle it.
+  document.addEventListener('keydown', function (e) {
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'f' || e.key === 'F')) {
+      if (activeInstanceId && $viewDetail && !$viewDetail.classList.contains('hidden')) {
+        e.preventDefault();
+        openConvSearch();
+      }
+    }
+  });
+
   // ---- Cost Dashboard ----
   function formatCost(n) {
     if (n >= 1) return '$' + n.toFixed(2);
     if (n >= 0.01) return '$' + n.toFixed(3);
     return '$' + n.toFixed(4);
+  }
+
+  // ---- Builder Profile (Paxel-style sidebar card) ----
+  //
+  // Calls GET /api/profile and renders a small radar chart of the five
+  // dimension scores, the archetype name + blurb, and a few headline
+  // stats. The endpoint is cached server-side (60 s) so it's safe to
+  // re-fetch on each dashboard load; we still avoid hammering it on
+  // every render cycle by only fetching on initial load and on manual
+  // refresh.
+  var $profileSection = document.getElementById('profile-section');
+  var $profileArchName = document.getElementById('profile-archetype-name');
+  var $profileArchBlurb = document.getElementById('profile-archetype-blurb');
+  var $profileRadar = document.getElementById('profile-radar');
+  var $profileDimensions = document.getElementById('profile-dimensions');
+  var $profileStats = document.getElementById('profile-stats');
+  var $profileMetaText = document.getElementById('profile-meta-text');
+  var $btnRefreshProfile = document.getElementById('btn-refresh-profile');
+
+  var PROFILE_DIMS = ['steering', 'execution', 'engineering', 'productInstinct', 'planning'];
+  var PROFILE_DIM_LABELS = {
+    steering: 'Steering',
+    execution: 'Execution',
+    engineering: 'Engineering',
+    productInstinct: 'Product',
+    planning: 'Planning',
+  };
+
+  function loadProfile() {
+    authFetch('/api/profile?days=90&agent=all')
+      .then(function (r) {
+        if (!r.ok) throw new Error('profile_failed');
+        return r.json();
+      })
+      .then(function (data) {
+        if (!data || !data.dimensions || !data.archetype) return;
+        renderProfile(data);
+        $profileSection.classList.remove('hidden');
+      })
+      .catch(function () {
+        // Leave section hidden — the API may be unavailable
+        // (e.g. older host) or there may be zero sessions.
+      });
+  }
+
+  function renderProfile(p) {
+    setText($profileArchName, p.archetype.name || '');
+    setText($profileArchBlurb, p.archetype.blurb || '');
+    renderProfileRadar(p.dimensions);
+    renderProfileDimensions(p.dimensions);
+    renderProfileStats(p);
+    var generated = p.generatedAt ? new Date(p.generatedAt) : null;
+    setText($profileMetaText,
+      (p.activity && p.activity.totalSessions
+        ? p.activity.totalSessions + ' sessions / ' + p.activity.spanDays + ' days'
+        : 'no data') +
+      (generated ? ' · ' + generated.toLocaleString() : '')
+    );
+  }
+
+  // Lightweight DOM helper: assigning text via textContent avoids any
+  // HTML injection on archetype text the analyzer produces.
+  function setText(el, value) {
+    if (!el) return;
+    el.textContent = value == null ? '' : String(value);
+  }
+
+  // Render a 5-axis radar chart as inline SVG. No external libraries —
+  // the math is short and keeps the bundle dependency-free.
+  // Safety: every interpolated value is either a number we computed
+  // (polygon coordinates) or escapeHtml()'d (axis labels). The
+  // PROFILE_DIM_LABELS table is hardcoded above, not server-sourced.
+  function renderProfileRadar(dimensions) {
+    if (!$profileRadar) return;
+    var cx = 100, cy = 100, R = 80;
+    var n = PROFILE_DIMS.length;
+    var parts = [];
+
+    // Grid: 4 concentric polygons at 25/50/75/100 of R
+    for (var g = 1; g <= 4; g++) {
+      var gr = (R * g) / 4;
+      parts.push('<polygon class="grid-poly" points="' + polygonPoints(cx, cy, gr, n) + '"/>');
+    }
+    // Axis lines
+    for (var i = 0; i < n; i++) {
+      var pt = vertex(cx, cy, R, i, n);
+      parts.push('<line class="axis-line" x1="' + cx + '" y1="' + cy + '" x2="' + pt.x + '" y2="' + pt.y + '"/>');
+    }
+    // Score polygon
+    var scorePts = PROFILE_DIMS.map(function (k, idx) {
+      var v = Math.max(0, Math.min(100, Number(dimensions[k]) || 0));
+      var r = (R * v) / 100;
+      var p = vertex(cx, cy, r, idx, n);
+      return p.x + ',' + p.y;
+    }).join(' ');
+    parts.push('<polygon class="score-poly" points="' + scorePts + '"/>');
+    // Axis labels (just outside the outer ring). We override text-anchor
+    // per-label so labels on the right of the radar are left-aligned
+    // (anchor="start") and labels on the left are right-aligned ("end")
+    // — otherwise the longest names overflow the viewBox.
+    PROFILE_DIMS.forEach(function (k, idx) {
+      var labelR = R + 10;
+      var p = vertex(cx, cy, labelR, idx, n);
+      // Vertical nudge so top label sits above its axis tip and bottom
+      // labels sit below it.
+      var dy = p.y < cy - 30 ? -4 : (p.y > cy + 30 ? 12 : 4);
+      // Horizontal anchor: middle near the vertical axis, start/end on
+      // the sides. 8px deadband keeps near-center labels centered.
+      var anchor = 'middle';
+      if (p.x < cx - 8) anchor = 'end';
+      else if (p.x > cx + 8) anchor = 'start';
+      parts.push('<text class="axis-label" x="' + p.x + '" y="' + (p.y + dy) +
+        '" text-anchor="' + anchor + '">' + escapeHtml(PROFILE_DIM_LABELS[k] || k) + '</text>');
+    });
+    $profileRadar.innerHTML = parts.join('');
+  }
+
+  function vertex(cx, cy, r, idx, n) {
+    // Start at top (-π/2), go clockwise
+    var angle = -Math.PI / 2 + (2 * Math.PI * idx) / n;
+    return { x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) };
+  }
+
+  function polygonPoints(cx, cy, r, n) {
+    var pts = [];
+    for (var i = 0; i < n; i++) {
+      var p = vertex(cx, cy, r, i, n);
+      pts.push(p.x + ',' + p.y);
+    }
+    return pts.join(' ');
+  }
+
+  // Both renderers build trivial structure (two children per cell), so
+  // constructing real DOM nodes via createElement + textContent is clearer
+  // AND removes any string-concatenation risk on labels that originate
+  // from the server (archetype names, dimension values).
+  function renderProfileDimensions(dimensions) {
+    if (!$profileDimensions) return;
+    $profileDimensions.replaceChildren();
+    PROFILE_DIMS.forEach(function (k) {
+      var v = Math.max(0, Math.min(100, Number(dimensions[k]) || 0));
+      var wrap = document.createElement('div');
+      wrap.className = 'profile-dim';
+      var label = document.createElement('span');
+      label.className = 'profile-dim-label';
+      label.textContent = PROFILE_DIM_LABELS[k] || k;
+      var value = document.createElement('span');
+      value.className = 'profile-dim-value';
+      value.textContent = String(Math.round(v));
+      wrap.appendChild(label);
+      wrap.appendChild(value);
+      $profileDimensions.appendChild(wrap);
+    });
+  }
+
+  function renderProfileStats(p) {
+    if (!$profileStats) return;
+    var cells = [
+      ['Active days',    String((p.activity && p.activity.activeDays) || 0)],
+      ['Sessions / day', String((p.activity && p.activity.sessionsPerActiveDay) || 0)],
+      ['Tool calls',     String((p.tools && p.tools.total) || 0)],
+      ['Shell runs',     String((p.shell && p.shell.total) || 0)],
+      ['Git commits',    String((p.shell && p.shell.gitCommits) || 0)],
+      ['Test runs',      String((p.shell && p.shell.testRuns) || 0)],
+    ];
+    $profileStats.replaceChildren();
+    cells.forEach(function (c) {
+      var wrap = document.createElement('div');
+      wrap.className = 'profile-stat';
+      var label = document.createElement('div');
+      label.className = 'profile-stat-label';
+      label.textContent = c[0];
+      var value = document.createElement('div');
+      value.className = 'profile-stat-value';
+      value.textContent = c[1];
+      wrap.appendChild(label);
+      wrap.appendChild(value);
+      $profileStats.appendChild(wrap);
+    });
+  }
+
+  if ($btnRefreshProfile) {
+    $btnRefreshProfile.addEventListener('click', loadProfile);
+  }
+
+  // Builder Profile: "about this profile" modal. In-app rather than a
+  // link to docs/profile.md (which is a repo path the dashboard server
+  // doesn't serve) so the explainer works offline and stays consistent
+  // with every other dashboard surface.
+  var $btnProfileAbout = document.getElementById('btn-profile-about');
+  var $profileAboutModal = document.getElementById('profile-about-modal');
+  var $btnCloseProfileAbout = document.getElementById('btn-close-profile-about');
+  if ($btnProfileAbout && $profileAboutModal) {
+    $btnProfileAbout.addEventListener('click', function () {
+      $profileAboutModal.classList.remove('hidden');
+    });
+  }
+  if ($btnCloseProfileAbout && $profileAboutModal) {
+    $btnCloseProfileAbout.addEventListener('click', function () {
+      $profileAboutModal.classList.add('hidden');
+    });
+  }
+  if ($profileAboutModal) {
+    // Close when the operator taps the backdrop, matching the pattern
+    // used by the other modals in the dashboard.
+    $profileAboutModal.addEventListener('click', function (e) {
+      if (e.target === $profileAboutModal) {
+        $profileAboutModal.classList.add('hidden');
+      }
+    });
   }
 
   function loadCosts() {
@@ -3659,6 +4881,7 @@
   connect();
   loadSessions();
   loadCosts();
+  loadProfile();
 
   // Fetch version from health endpoint
   fetch('/health').then(function (r) { return r.json(); }).then(function (data) {
