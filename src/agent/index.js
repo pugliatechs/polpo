@@ -1,6 +1,10 @@
 const WebSocket = require('ws');
 const http = require('http');
 const readline = require('readline');
+const { makeLogger } = require('../util/logger');
+
+const log = makeLogger('polpo-agent');
+const mobile = makeLogger('mobile');
 
 const DEFAULT_SERVER = 'ws://127.0.0.1:7890';
 
@@ -68,7 +72,7 @@ class PolpoAgent {
     this.ws = new WebSocket(wsUrl);
 
     this.ws.on('open', () => {
-      console.log(`[polpo-agent] Connected to hub as "${this.name}" (${this.instanceId})`);
+      log.info(`Connected to hub as "${this.name}" (${this.instanceId})`);
     });
 
     this.ws.on('message', (raw) => {
@@ -81,7 +85,7 @@ class PolpoAgent {
     });
 
     this.ws.on('close', () => {
-      console.log('[polpo-agent] Disconnected from hub, reconnecting in 3s...');
+      log.info('Disconnected from hub, reconnecting in 3s...');
       this.reconnectTimer = setTimeout(() => this.connect(), 3000);
     });
 
@@ -156,16 +160,16 @@ async function runStandalone(options = {}) {
   const agent = new PolpoAgent({
     ...options,
     onPrompt: (text) => {
-      console.log(`\n[mobile] >>> ${text}`);
+      mobile.info(`>>> ${text}`);
     },
     onAbort: () => {
-      console.log('\n[mobile] Task aborted by remote user');
+      mobile.info('Task aborted by remote user');
     },
     onPause: () => {
-      console.log('\n[mobile] Paused by remote user');
+      mobile.info('Paused by remote user');
     },
     onResume: () => {
-      console.log('\n[mobile] Resumed by remote user');
+      mobile.info('Resumed by remote user');
     },
   });
 

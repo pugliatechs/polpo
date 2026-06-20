@@ -2,6 +2,9 @@ const cloudflared = require('./cloudflared');
 const localtunnel = require('./localtunnel');
 const ngrok = require('./ngrok');
 const ssh = require('./ssh');
+const { makeLogger } = require('../util/logger');
+
+const log = makeLogger('tunnel');
 
 const PROVIDERS = { cloudflared, localtunnel, ngrok, ssh };
 
@@ -31,19 +34,19 @@ async function startTunnel(opts) {
     if (!p.isAvailable()) {
       throw new Error(`${provider} is not available. ${installHint(provider)}`);
     }
-    console.log(`  Starting ${provider} tunnel...`);
+    log.info(`Starting ${provider} tunnel...`);
     return p.start(port, { tunnelHost, tunnelPort });
   }
 
   // Auto-detect
   for (const p of AUTO_DETECT) {
     if (!p.isAvailable()) continue;
-    console.log(`  Trying ${p.name}...`);
+    log.info(`Trying ${p.name}...`);
     try {
       const result = await p.start(port, { tunnelHost, tunnelPort });
       return result;
     } catch (err) {
-      console.log(`  ${p.name} failed: ${err.message}`);
+      log.warn(`${p.name} failed: ${err.message}`);
     }
   }
 

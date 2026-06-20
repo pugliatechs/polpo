@@ -10,6 +10,10 @@
  * Reports findings to the mind's conversation for the user to see.
  */
 
+const { makeLogger } = require('../util/logger');
+
+const log = makeLogger('mind-watcher');
+
 class Watcher {
   /**
    * @param {object} opts
@@ -42,7 +46,7 @@ class Watcher {
 
     this._timer = setInterval(function () {
       try { self._check(); } catch (err) {
-        console.error('[mind-watcher] Check error:', err.message);
+        log.error('Check error:', err.message);
       }
     }, intervalMs);
   }

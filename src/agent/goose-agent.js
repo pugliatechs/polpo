@@ -18,6 +18,7 @@ const WebSocket = require('ws');
 const http = require('http');
 const os = require('os');
 const path = require('path');
+const { logPrefix } = require('./log-prefix');
 const readline = require('readline');
 
 const DEFAULT_SERVER = 'ws://127.0.0.1:7890';
@@ -526,7 +527,7 @@ class GooseAgent {
   }
 
   _log(msg) {
-    console.log(`[goose-agent ${new Date().toLocaleTimeString()}] ${msg}`);
+    console.error(`${logPrefix('goose-agent')} ${msg}`);
   }
 }
 

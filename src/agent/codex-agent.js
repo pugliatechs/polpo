@@ -19,6 +19,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const readline = require('readline');
+const { logPrefix } = require('./log-prefix');
 
 const DEFAULT_SERVER = 'ws://127.0.0.1:7890';
 const UPLOAD_DIR = path.join(os.tmpdir(), 'polpo-uploads');
@@ -524,8 +525,7 @@ class CodexAgent {
   }
 
   _log(msg) {
-    const ts = new Date().toISOString().slice(11, 19);
-    console.error(`[codex-agent ${ts}] ${msg}`);
+    console.error(`${logPrefix('codex-agent')} ${msg}`);
   }
 }
 
@@ -543,7 +543,7 @@ async function runCodex(options = {}) {
         agent.sendPrompt(line.trim());
       }
     });
-    console.error('[codex-agent] Local stdin active — type prompts here or use phone');
+    console.error(`${logPrefix('codex-agent')} Local stdin active — type prompts here or use phone`);
   }
 
   process.on('SIGINT', () => {

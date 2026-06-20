@@ -14,6 +14,9 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
+const { makeLogger } = require('../util/logger');
+
+const log = makeLogger('mind-memory');
 
 var DEFAULT_MEMORY_PATH = path.join(os.homedir(), '.config', 'polpo', 'mind-memory.jsonl');
 var MAX_SUMMARY_LENGTH = 500;
@@ -140,7 +143,7 @@ class Memory {
       fs.appendFileSync(this.filePath, json + '\n', { mode: 0o600 });
     } catch (err) {
       // Non-fatal: keep in-memory cache updated even if disk write fails
-      console.error('[mind-memory] Failed to persist entry:', err.message);
+      log.error('Failed to persist entry:', err.message);
     }
 
     this._entries.push(full);

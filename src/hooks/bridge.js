@@ -84,10 +84,17 @@ function resetInactivity() {
 }
 
 // --- Logging ---
+//
+// Use the shared logger so the bridge's lines have the same
+// [<tag> YYYY-MM-DD HH:MM:SS.ffffff] prefix as every other polpo
+// component. Earlier versions emitted only [bridge HH:MM:SS] which
+// lost the date and microsecond resolution.
+
+const { makeLogger } = require('../util/logger');
+const bridgeLog = makeLogger('bridge');
 
 function log(msg) {
-  const ts = new Date().toISOString().slice(11, 19);
-  console.error(`[bridge ${ts}] ${msg}`);
+  bridgeLog.error(msg);
 }
 
 // --- Register with Polpo hub via HTTP ---

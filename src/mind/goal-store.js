@@ -14,6 +14,9 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { makeLogger } = require('../util/logger');
+
+const log = makeLogger('mind-goal-store');
 
 const DEFAULT_PATH = path.join(os.homedir(), '.config', 'polpo', 'mind-active-goals.json');
 
@@ -38,7 +41,7 @@ class GoalStore {
       }
     } catch (err) {
       if (err.code !== 'ENOENT') {
-        console.error('[mind-goal-store] Load failed:', err.message);
+        log.error('Load failed:', err.message);
       }
     }
   }
@@ -78,7 +81,7 @@ class GoalStore {
       fs.writeFileSync(tmp, data, { mode: 0o600 });
       fs.renameSync(tmp, this.path);
     } catch (err) {
-      console.error('[mind-goal-store] Flush failed:', err.message);
+      log.error('Flush failed:', err.message);
     }
   }
 }

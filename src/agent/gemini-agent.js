@@ -19,6 +19,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const readline = require('readline');
+const { logPrefix } = require('./log-prefix');
 
 const DEFAULT_SERVER = 'ws://127.0.0.1:7890';
 const UPLOAD_DIR = path.join(os.tmpdir(), 'polpo-uploads');
@@ -452,8 +453,7 @@ class GeminiAgent {
   }
 
   _log(msg) {
-    const ts = new Date().toISOString().slice(11, 19);
-    console.error(`[gemini-agent ${ts}] ${msg}`);
+    console.error(`${logPrefix('gemini-agent')} ${msg}`);
   }
 }
 
@@ -471,7 +471,7 @@ async function runGemini(options = {}) {
         agent.sendPrompt(line.trim());
       }
     });
-    console.error('[gemini-agent] Local stdin active — type prompts here or use phone');
+    console.error(`${logPrefix('gemini-agent')} Local stdin active — type prompts here or use phone`);
   }
 
   process.on('SIGINT', () => {

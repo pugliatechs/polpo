@@ -19,6 +19,7 @@ const http = require('http');
 const os = require('os');
 const path = require('path');
 const readline = require('readline');
+const { logPrefix } = require('./log-prefix');
 
 const DEFAULT_SERVER = 'ws://127.0.0.1:7890';
 const UPLOAD_DIR = path.join(os.tmpdir(), 'polpo-uploads');
@@ -502,8 +503,7 @@ class OpencodeAgent {
   }
 
   _log(msg) {
-    const ts = new Date().toISOString().slice(11, 19);
-    console.error(`[opencode-agent ${ts}] ${msg}`);
+    console.error(`${logPrefix('opencode-agent')} ${msg}`);
   }
 }
 
@@ -518,7 +518,7 @@ async function runOpencode(options = {}) {
         agent.sendPrompt(line.trim());
       }
     });
-    console.error('[opencode-agent] Local stdin active — type prompts here or use phone');
+    console.error(`${logPrefix('opencode-agent')} Local stdin active — type prompts here or use phone`);
   }
 
   process.on('SIGINT', () => {

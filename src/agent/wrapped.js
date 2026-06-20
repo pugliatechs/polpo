@@ -23,6 +23,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const readline = require('readline');
+const { logPrefix } = require('./log-prefix');
 
 const DEFAULT_SERVER = 'ws://127.0.0.1:7890';
 const UPLOAD_DIR = path.join(os.tmpdir(), 'polpo-uploads');
@@ -582,8 +583,7 @@ class WrappedAgent {
   }
 
   _log(msg) {
-    const ts = new Date().toISOString().slice(11, 19);
-    console.error(`[wrapped-agent ${ts}] ${msg}`);
+    console.error(`${logPrefix('wrapped-agent')} ${msg}`);
   }
 }
 
@@ -602,14 +602,14 @@ async function runWrapped(options = {}) {
         agent.sendPrompt(line.trim());
       }
     });
-    console.error('[wrapped-agent] Local stdin active — type prompts here or use phone');
+    console.error(`${logPrefix('wrapped-agent')} Local stdin active — type prompts here or use phone`);
   }
 
   let shuttingDown = false;
   function shutdown() {
     if (shuttingDown) return;
     shuttingDown = true;
-    console.error('  Shutting down...');
+    console.error(`${logPrefix('wrapped-agent')} Shutting down...`);
     agent.stop();
     process.exit(0);
   }

@@ -23,6 +23,7 @@ const path = require('path');
 
 const UPLOAD_DIR = path.join(os.tmpdir(), 'polpo-uploads');
 const readline = require('readline');
+const { logPrefix } = require('./log-prefix');
 
 const DEFAULT_SERVER = 'ws://127.0.0.1:7890';
 
@@ -562,8 +563,7 @@ class PiAgent {
   }
 
   _log(msg) {
-    const ts = new Date().toISOString().slice(11, 19);
-    console.error(`[pi-agent ${ts}] ${msg}`);
+    console.error(`${logPrefix('pi-agent')} ${msg}`);
   }
 }
 
