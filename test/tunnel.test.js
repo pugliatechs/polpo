@@ -191,3 +191,73 @@ describe('tunnel/qr.js', () => {
     assert.equal(typeof displayQR, 'function');
   });
 });
+
+describe('tunnel/cloudflared.js — extractTunnelUrl', () => {
+  const { extractTunnelUrl, QUICK_TUNNEL_URL, READY_MARKER } = require('../src/tunnel/cloudflared');
+
+  it('extracts a real Quick Tunnel URL', () => {
+    const line = '2026-05-28T11:59:38Z INF |  https://wise-orange-eagle-foo.trycloudflare.com  |';
+    assert.equal(extractTunnelUrl(line), 'https://wise-orange-eagle-foo.trycloudflare.com');
+  });
+
+  it('handles a 2-segment Quick Tunnel URL', () => {
+    const line = 'https://hello-world.trycloudflare.com';
+    assert.equal(extractTunnelUrl(line), 'https://hello-world.trycloudflare.com');
+  });
+
+  it('REGRESSION: does not match api.trycloudflare.com from a retry error line', () => {
+    const failureLine = 'failed to request quick Tunnel: Post "https://api.trycloudflare.com/tunnel": context deadline exceeded (Client.Timeout exceeded while awaiting headers)';
+    assert.equal(extractTunnelUrl(failureLine), null);
+  });
+
+  it('does not match other single-segment subdomains', () => {
+    assert.equal(extractTunnelUrl('https://status.trycloudflare.com'), null);
+    assert.equal(extractTunnelUrl('https://docs.trycloudflare.com'), null);
+    assert.equal(extractTunnelUrl('https://api.trycloudflare.com'), null);
+  });
+
+  it('returns null for non-trycloudflare URLs', () => {
+    assert.equal(extractTunnelUrl('https://example.com'), null);
+    assert.equal(extractTunnelUrl('https://www.cloudflare.com/website-terms/'), null);
+    assert.equal(
+      extractTunnelUrl('https://developers.cloudflare.com/cloudflare-one/connections/connect-apps'),
+      null
+    );
+  });
+
+  it('returns null for empty / non-string input', () => {
+    assert.equal(extractTunnelUrl(''), null);
+    assert.equal(extractTunnelUrl(null), null);
+    assert.equal(extractTunnelUrl(undefined), null);
+  });
+
+  it('picks the real URL when both api and a Quick Tunnel URL appear on the same line', () => {
+    // Defensive: even if a single chunk contains both, the regex must
+    // skip the api URL and find the multi-segment one.
+    const line = 'tried https://api.trycloudflare.com/tunnel, got https://wise-orange-eagle-foo.trycloudflare.com';
+    assert.equal(extractTunnelUrl(line), 'https://wise-orange-eagle-foo.trycloudflare.com');
+  });
+
+  it('with requireMarker: returns the URL only when the success marker is also present', () => {
+    const noMarker = '|  https://wise-orange-eagle-foo.trycloudflare.com  |';
+    const withMarker = 'Your quick Tunnel has been created! Visit it at: https://wise-orange-eagle-foo.trycloudflare.com';
+    assert.equal(extractTunnelUrl(noMarker, { requireMarker: true }), null);
+    assert.equal(
+      extractTunnelUrl(withMarker, { requireMarker: true }),
+      'https://wise-orange-eagle-foo.trycloudflare.com'
+    );
+  });
+
+  it('READY_MARKER is case-insensitive', () => {
+    assert.equal(READY_MARKER.test('your quick tunnel has been created!'), true);
+    assert.equal(READY_MARKER.test('YOUR QUICK TUNNEL HAS BEEN CREATED'), true);
+    assert.equal(READY_MARKER.test('Your Quick Tunnel has been created'), true);
+    assert.equal(READY_MARKER.test('something unrelated'), false);
+  });
+
+  it('QUICK_TUNNEL_URL rejects URLs missing a hyphen in the subdomain', () => {
+    assert.equal(QUICK_TUNNEL_URL.test('https://abc.trycloudflare.com'), false);
+    assert.equal(QUICK_TUNNEL_URL.test('https://abc-def.trycloudflare.com'), true);
+    assert.equal(QUICK_TUNNEL_URL.test('https://a-b-c-d.trycloudflare.com'), true);
+  });
+});
