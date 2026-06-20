@@ -475,7 +475,7 @@ POLPO_MIND=1 node bin/polpo.js server
 The mind appears as a purple "Mind" instance in the dashboard. Send it a goal like "Refactor the auth module and update the tests" and it will:
 
 1. Plan the work by decomposing it into tasks with dependencies
-2. Assign each task to the best available idle agent (matching project/cwd)
+2. Dispatch each task as an isolated **one-shot agent** (fresh spawn, single prompt, captured result, terminate)
 3. Run independent tasks in parallel, sequential tasks in order
 4. Share findings between dependent arms automatically (inter-arm context)
 5. Re-plan failed tasks (retry / split / abandon) before giving up
@@ -483,7 +483,7 @@ The mind appears as a purple "Mind" instance in the dashboard. Send it a goal li
 7. Recover gracefully across server restarts (in-flight goal persistence)
 8. Optionally cancel stuck tasks autonomously (policy-gated watcher)
 
-The mind supports DAG-based task plans: parallel, sequential, and diamond dependency patterns. It reuses idle agents when possible and can spawn new ones (up to a configurable limit). All progress is visible in the mind's conversation in the dashboard.
+The mind supports DAG-based task plans: parallel, sequential, and diamond dependency patterns. Each arm is **stateless**: spawned for one task, terminated when the task finishes. The coordinator holds all the durable state (world-model, dependency graph, memory, goal store) and injects predecessor task output into successor prompts so dependent arms see what came before. This is the same one-shot lifecycle the HTTP gateway exposes to external apps — the mind is effectively a planner that calls polpo's own gateway internally. Each mind-spawned arm appears in the dashboard with `source: 'mind:<goalId-tail>'`.
 
 See [docs/alien-mind.md](docs/alien-mind.md) for full documentation, architecture, commands, and configuration.
 
@@ -512,7 +512,7 @@ GET    /v1/tasks/:id/artifacts/:name     host → caller (sealed, signed-attachm
 
 Gateway-spawned agents register in the dashboard with `source: 'gateway:<client>'`, so you can watch what the remote caller is doing from your phone and intervene if needed.
 
-Security: separate Bearer key, per-token rate limits, path-traversal defense at every fs touchpoint, sealed-artifact pattern that defeats TOCTOU, fail-closed approvals (no human-in-the-loop confirmation), and no new dependencies. Full reference: [docs/gateway.md](docs/gateway.md).
+Security: separate Bearer key, per-token rate limits, path-traversal defense at every fs touchpoint, sealed-artifact pattern that defeats TOCTOU, fail-closed approvals (no human-in-the-loop confirmation), and no new dependencies. Full reference: [docs/gateway.md](docs/gateway.md). Building an AI agent that calls the gateway? See [docs/gateway-for-ai-agents.md](docs/gateway-for-ai-agents.md) — a compact, agent-oriented guide.
 
 ## Terminal Sync (Hooks)
 
@@ -562,6 +562,25 @@ Tap the paperclip icon to attach files from your phone. Supported types:
 - **Text/code files** - small files (up to 100KB) are inlined directly in the prompt; larger files are saved to disk and Claude reads them with the Read tool
 - **Any other file** - saved to disk and referenced by path for Claude to read
 
+## Session Outbox (agent → phone files)
+
+The reverse direction. When you ask an agent to produce something downloadable (a report, a CSV, a packed zip, a generated image), tap the **📂 OUTBOX** pill in the session header to switch it on. From that turn forward polpo prepends a `<polpo:outbox dir="...">` directive to every prompt sent in this session, telling the agent which directory to drop output files into. When the agent goes idle, any new files appear as download chips on the assistant's response bubble — tap a chip to download.
+
+```
+You:    Generate a CSV summary of yesterday's commits.
+Polpo:  [outbox on — directive prepended automatically]
+Claude: I've written commits.csv with 14 rows...
+        ⬇ commits.csv (3.2 KB)   ← tap to download
+```
+
+- **Per-session dir**, mode 0700, under `<tmpdir>/polpo-session-outbox/<sha256(instanceId)[0:32]>/`
+- **Size caps**: 100 MB aggregate, 100 files max
+- **Filename safety**: only `[A-Za-z0-9._-]{1,200}` is exposed; subdirs and symlinks are ignored
+- **Lifecycle**: dir is destroyed on session disconnect or when you tap the toggle off
+- **Download safety**: every read enforces the per-instance prefix-check, sends `X-Content-Type-Options: nosniff`, and serves non-image files with `Content-Disposition: attachment` to defeat MIME sniffing attacks
+
+The mechanism is the dashboard-side mirror of the gateway's sealed-artifact pattern (`<polpo:artifacts>`), tuned for long-lived dashboard sessions instead of one-shot tasks. Full reference: [docs/outbox.md](docs/outbox.md) (lifecycle, security, API).
+
 ## Conversation Search
 
 Search past conversations across all supported agents directly from the dashboard. Type a query and tap the search button (or press Enter) to find matching messages.
@@ -576,6 +595,29 @@ Search past conversations across all supported agents directly from the dashboar
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/search?q=<query>` | Search conversations across all agents (max 50 results, 10s deadline) |
+
+## Builder Profile
+
+A "how you work with AI agents" report computed entirely on your machine, inspired by YC's Paxel experiment but with Polpo's privacy posture: no LLM calls, no telemetry, no data egress. The analyzer reads the session transcripts polpo already has on disk and derives statistics: archetype, five dimension scores (steering / execution / engineering / product instinct / planning), activity patterns, tool usage, shell habits.
+
+Three ways to see it:
+
+```bash
+# CLI
+polpo profile                      # last 90 days, all agents
+polpo profile --days 30 --agent claude
+polpo profile --json               # raw JSON
+
+# Dashboard
+# Open the dashboard — the "Builder Profile" card appears in the sidebar
+# with a radar chart, archetype, and headline stats.
+
+# Gateway (for external agents)
+curl -H "Authorization: Bearer $POLPO_GATEWAY_KEY" \
+     "http://localhost:7890/v1/profile?days=90"
+```
+
+The profile object contains statistics only, never raw conversation text. See [docs/profile.md](docs/profile.md) for the full reference, the heuristics behind each dimension, and the privacy model.
 
 ## Skills Management
 
@@ -766,7 +808,7 @@ graph TD
     Browser -->|"reads"| GooseDB
 ```
 
-See [docs/diagrams.md](docs/diagrams.md) for auth, tunnel, session, auto-discovery, takeover, hook, gateway, and Alien Mind flow diagrams. See [docs/alien-mind.md](docs/alien-mind.md) for Alien Mind coordination documentation and [docs/gateway.md](docs/gateway.md) for the programmatic gateway API reference.
+See [docs/diagrams.md](docs/diagrams.md) for auth, tunnel, session, auto-discovery, takeover, hook, gateway, and Alien Mind flow diagrams. See [docs/alien-mind.md](docs/alien-mind.md) for Alien Mind coordination documentation, [docs/outbox.md](docs/outbox.md) for the agent → phone file transfer reference, [docs/gateway.md](docs/gateway.md) for the programmatic gateway API reference, and [docs/gateway-for-ai-agents.md](docs/gateway-for-ai-agents.md) for instructions an AI agent can use to drive polpo over HTTP.
 
 ## Disclaimer
 

@@ -4,6 +4,8 @@ The polpo gateway turns the dashboard into a **remote intelligent worker** for e
 
 Typical use case: your laptop reaches a home PC over VPN, and an external orchestrator (openclaw, a Slack bot, a CI runner, a custom script) delegates concrete work (read this PDF, generate that document, refactor this file) to the agents installed on the PC.
 
+> **Building an AI agent that calls this API?** See [gateway-for-ai-agents.md](gateway-for-ai-agents.md) — a compact, agent-oriented guide you can drop into a system prompt.
+
 ## Quick Start
 
 ```bash
@@ -276,6 +278,267 @@ This split (`write/` open during the run, `sealed/` immutable after) defeats TOC
 
 Artifacts are removed when the task's TTL fires (default 5 min after `done`).
 
+## Session Discovery
+
+A chatbot or other orchestrator usually wants to **route a query to the right session**, not just execute a fresh task. The gateway exposes four read-only endpoints for that: search across past and live conversations, list the catalogue, and read a single session's history.
+
+All four require the same Bearer key as the rest of `/v1/*`. Per-token rate limits apply: 30/min for the search endpoints, 60/min for the catalogue. Search returns hits from both on-disk past sessions and live in-memory conversations on the host.
+
+> **Trust note**: the gateway key is a master key for these endpoints today. Any holder can search every session on the host. Future multi-key support will scope results by token ownership; the response shape is already forward-compatible (each result carries its origin).
+
+### `GET /v1/search`
+
+Low-level: per-message hits, sorted newest-first. Mirrors the existing dashboard `/api/search` shape, plus an `include` filter and a `source` field on each hit.
+
+```
+?q=<2..200 chars>&limit=<1..100, default 20>&include=<disk|memory|all, default all>
+→ {
+    results: [{
+      sessionId, role, snippet, matchIndex, matchLength, timestamp,
+      source: "disk" | "memory",
+      instanceId?         // present only when source === "memory"
+    }],
+    partial: boolean
+  }
+```
+
+Errors: 400 `invalid_query` (length out of bounds), 400 `invalid_include`, 429 `rate_limited`, 429 `search_in_progress` (another scan is already running on the host).
+
+### `GET /v1/sessions/search`
+
+High-level: results grouped per session, ranked for routing. Use this when you don't care about individual matches — you want to pick the right session out of many.
+
+```
+?q=<2..200 chars>&limit=<1..50, default 10>&snippets=<0..5, default 3>
+→ {
+    sessions: [{
+      sessionId,
+      instanceId,           // null unless this session is currently live
+      project, cwd, agentType,
+      firstPrompt,          // truncated to 200 chars
+      lastActivity,         // epoch ms; live instance's value when available
+      matchCount,
+      score,                // higher is more relevant
+      topSnippets: [{ snippet, role, timestamp, matchIndex, matchLength }]
+    }],
+    partial: boolean
+  }
+```
+
+Ranking: `score = matchCount + recencyBoost`, where the boost adds up to 5 points for a match today and decays linearly to 0 at 30 days old. A session with 5 matches today (score ≈ 10) outranks one with 5 matches a year ago (score = 5). Sessions tie-break on `lastActivity` desc.
+
+### `GET /v1/sessions`
+
+Catalogue of every session on the host, live and past, sorted by `lastActivity` desc.
+
+```
+?source=<claude|codex|gemini|opencode|pi|goose|gateway|mind|all, default all>
+&days=<1..365, default 30>
+&limit=<1..200, default 50>
+→ {
+    sessions: [{
+      sessionId,
+      instanceId,           // present when the session is live
+      project, cwd, agentType,
+      firstPrompt,          // truncated to 200 chars
+      lastActivity,
+      isLive: boolean,
+      source: "gateway:<client>" | "mind:<goalId-tail>" | null
+    }]
+  }
+```
+
+`source=gateway` filters to instances spawned via `POST /v1/tasks` (tagged `source: "gateway:<client>"`). `source=mind` filters to arms spawned by the Alien Mind coordinator (tagged `source: "mind:<goalId-tail>"`). Both `gateway` and `mind` tags only exist on **live** instances — the tags are not persisted to the on-disk transcript — so those two filters return live results only. The other `source=*` values filter by agent type and include both live and past sessions.
+
+Errors: 400 `invalid_source`, 429 `rate_limited`.
+
+### `GET /v1/sessions/:id`
+
+Read one session's history. The id is validated against `^[A-Za-z0-9._-]{1,200}$` before any filesystem access; traversal attempts (`..`, `/`, NUL, control chars) return 400 immediately.
+
+If a live instance matches the id, its in-memory conversation is returned. Otherwise polpo falls back to the on-disk transcript via `loadHistory(id)`.
+
+```
+?tail=<1..500>             # default: last 100 messages
+or ?offset=<int>&limit=<1..500>
+→ {
+    messages: [{ role, content, timestamp, type?, contentType?, toolUseId? }],
+    total,
+    hasMore,
+    isLive: boolean,
+    instanceId: string | null
+  }
+```
+
+Errors: 400 `invalid_session_id` (regex), 404 `session_not_found` (neither live nor on disk).
+
+### Chatbot routing example
+
+Imagine a Telegram bot fronting your laptop, asked "what's the current status of the auth-refactor feature?" The bot fans out to N polpo nodes over VPN, asks each "which session?", picks the highest-scoring match, then pulls or resumes context:
+
+```bash
+KEY=$POLPO_GATEWAY_KEY
+
+# 1. Find candidate sessions across every reachable polpo node
+for HOST in pc-laptop.vpn pc-desktop.vpn pc-homeserver.vpn; do
+  curl -sf -H "Authorization: Bearer $KEY" \
+    "https://$HOST:7890/v1/sessions/search?q=auth+refactor&limit=3" \
+    | jq --arg host "$HOST" '.sessions[] | . + {host: $host}'
+done | jq -s 'sort_by(-.score) | .[0]' > best.json
+
+HOST=$(jq -r .host best.json)
+SID=$(jq -r .sessionId best.json)
+
+# 2. Pull the last 50 messages from the winning session for context
+curl -sf -H "Authorization: Bearer $KEY" \
+  "https://$HOST:7890/v1/sessions/$SID?tail=50" > history.json
+
+# 3. Now either:
+#    (a) summarise locally and reply to the user, or
+#    (b) POST /v1/tasks on that host with the relevant cwd to spin up
+#        a fresh one-shot agent that has the context (resumeable
+#        sessions live in the dashboard surface, not /v1).
+```
+
+## Alien Mind Goals (`/v1/goals`) — experimental
+
+> ⚠️ **Experimental.** The Alien Mind is still stabilising (see [docs/alien-mind.md](alien-mind.md)). Exposing its goal lifecycle over `/v1/goals` is a v1.2.1 addition with the same caveats: planning quality varies, fan-out can spawn multiple arms concurrently, and the SSE event surface may grow new event types in patch releases. Treat the API as stable for the listed event types only.
+
+When the host has `POLPO_MIND=1` set, external software can submit *goals* — high-level instructions that the mind decomposes into a DAG of tasks and fans out across one or more arms. The mind brokers context between dependent arms (so task B sees task A's output), re-plans on failure (retry / split / abandon), and reports per-task progress over SSE.
+
+If `POLPO_MIND=1` is **not** set, every `/v1/goals` route returns `503 mind_not_enabled`. The rest of `/v1/*` is unaffected.
+
+### `POST /v1/goals`
+
+```
+POST /v1/goals
+Authorization: Bearer $POLPO_GATEWAY_KEY
+{
+  "goal": "Refactor the auth module and update the tests",
+  "client": "openclaw"
+}
+
+→ 201 {
+    "goalId": "goal-deadbeef",
+    "streamUrl": "/v1/goals/goal-deadbeef/stream"
+  }
+```
+
+Rate limit: **10 per minute per token** (goals fan out across N arms — much heavier than one-shot tasks).
+
+Errors: 400 `invalid_goal` (empty or > 50 000 chars), 400 `invalid_client` (non-string), 429 `rate_limited`, 503 `mind_not_enabled`.
+
+### `GET /v1/goals/:id/stream` (SSE)
+
+Streams the mind's progress for the goal. Events appear in roughly this order; some may repeat, some may be skipped depending on the plan:
+
+```
+event: snapshot      data: { goalId, status, prompt, plan, replayed: true }  ← only for late subscribers
+event: planning      data: { goalId, prompt, timestamp }
+event: plan_ready    data: { goalId, tasks: [{id, description, agentType, dependsOn}], timestamp }
+event: task_started  data: { goalId, taskId, description, agentInstanceId, agentName, agentType }
+event: task_chunk    data: { goalId, taskId, text }                          ← assistant output, possibly many
+event: task_done     data: { goalId, taskId, success, summary, durationMs }
+event: task_failed   data: { goalId, taskId, reason, terminal?, abandoned? }
+event: replanning    data: { goalId, taskId, attempt, maxAttempts, reason }
+event: cancelled     data: { goalId, reason }                                 ← from DELETE
+event: done          data: { goalId, status, result, taskSummaries, durationMs }
+event: error         data: { goalId, message, detail }
+```
+
+The stream closes after `done`, `cancelled`, or `error`. `: ping` comment lines arrive every 15 s.
+
+**Late-subscriber handling.** Because the gateway emits a per-goal event stream as a live broadcast, a subscriber that connects *after* `planning` / `plan_ready` already fired would otherwise miss them. The gateway sends a synthetic `snapshot` event on connect for any goal in `running` state, containing the current plan and per-task status. Use this to bootstrap the UI; subsequent live events follow. Already-terminal goals receive a `done`/`error` replay and the stream closes immediately.
+
+### `GET /v1/goals`
+
+List the currently-active goals on this host.
+
+```
+→ {
+    "goals": [{
+      "id":         "goal-...",
+      "status":     "planning" | "running" | "completed" | "failed",
+      "prompt":     "...",            // truncated to 500 chars
+      "result":     "..." | null,
+      "createdAt":  1700000000000,
+      "plan": {
+        "tasks": [{
+          "id", "description", "agentType", "status",
+          "dependsOn", "startedAt", "completedAt", "durationMs", "summary"
+        }]
+      }
+    }]
+  }
+```
+
+### `GET /v1/goals/:id`
+
+Same shape as one entry from `GET /v1/goals`. Returns `404 goal_not_found` for unknown ids, `400 invalid_goal_id` for ids that don't match `^goal-[a-z0-9-]{4,32}$`.
+
+### `DELETE /v1/goals/:id`
+
+Cancels the goal: aborts every running arm, marks every pending task failed, closes any open SSE streams with a `cancelled` event.
+
+```
+→ 204               (cancelled)
+  | 409 goal_already_terminal { status }
+  | 404 goal_not_found
+  | 400 invalid_goal_id
+```
+
+### Chatbot example: delegate a goal across arms
+
+```bash
+KEY=$POLPO_GATEWAY_KEY
+HOST=http://my-pc:7890
+
+CREATE=$(curl -s -X POST $HOST/v1/goals \
+  -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -H "X-Polpo-Client: openclaw" \
+  -d '{"goal":"Refactor the auth module: identify all callers, propose a new API, update them, then run the tests."}')
+
+GOAL_ID=$(echo "$CREATE" | jq -r .goalId)
+
+# Stream the mind's progress live
+curl -N -H "Authorization: Bearer $KEY" $HOST/v1/goals/$GOAL_ID/stream
+```
+
+You'll see the mind plan the work, dispatch it to arms (some in parallel), broker context between dependent tasks, and finally emit `done` when every task is in a terminal state.
+
+## Builder Profile (`/v1/profile`)
+
+Returns a "how this host's operator works with AI agents" report. Computed entirely from local session transcripts — no LLM calls, no transcript content leaves the machine. Useful for an external bot that wants to introspect a host before deciding how to phrase a task ("the operator is heavy on tests and commits, I can be terse" vs. "the operator is heavy on plans, I should structure my request").
+
+```
+GET /v1/profile?days=<1..365, default 90>
+&agent=<all|claude|codex|gemini|opencode|pi|goose, default all>
+
+→ 200 {
+    archetype: { key, name, blurb, dimension },
+    dimensions: { steering, execution, engineering, productInstinct, planning },  // each 0..100
+    activity: { totalSessions, analyzedSessions, activeDays, spanDays,
+                sessionsPerActiveDay, firstActivity, lastActivity,
+                peakHour, peakDay, hourHistogram, dowHistogram },
+    agents:   [{ name, count }],
+    models:   [{ name, count }],
+    projects: [{ name, count }],
+    prompts:  { count, avgWords, medianWords, longestWords,
+                questionRatio, codeRatio, politeRatio, productRatio },
+    tools:    { total, byCategory, top },
+    shell:    { total, byCategory, gitCommits, testRuns },
+    messages: { assistant, userPrompts },
+    generatedAt
+  }
+```
+
+Rate limit: **6/min per token** (the scan touches every session file on disk). Single in-flight call per host: concurrent requests return `429 profile_in_progress`. Server-side cache: 60 s per `(days, agent)` key.
+
+Errors: 400 `invalid_source`, 429 `rate_limited`, 429 `profile_in_progress`, 500 `profile_failed`.
+
+The full reference for the response shape, scoring heuristics, and privacy model lives in [docs/profile.md](profile.md).
+
 ## Security Model
 
 - **Filesystem isolation**: uploads live under `<tmpdir>/polpo-gateway-uploads/<uploadId>/`, dirs 0o700, data files 0o600. Artifacts live under `<tmpdir>/polpo-gateway-artifacts/<taskId>/` with `sealed/` files 0o400.
@@ -299,14 +562,33 @@ Artifacts are removed when the task's TTL fires (default 5 min after `done`).
 ## File Layout (server-side)
 
 ```
+src/agent/
+  one-shot-runner.js    # Shared spawn → prompt → terminate primitive. ALSO consumed
+                        #   by the Alien Mind, so the spawn/timeout/teardown logic is
+                        #   identical between external HTTP callers and internal mind
+                        #   orchestration. Owns: WS handshake, per-run timeout,
+                        #   instance-manager event routing, approval fail-closed,
+                        #   agent stop + unregister.
+
 src/server/
   upload-constants.js   # shared UPLOAD_DIR, byte caps, regexes, sanitize helpers
   gateway-auth.js       # Bearer middleware, tokenFingerprint, per-token rate limit
   gateway-uploads.js    # GatewayUploadStore: put/get/pin/release/gcExpired
   gateway-artifacts.js  # GatewayArtifactStore: createDir/sealOnFinalize/openSealed/destroyTask
-  gateway-tasks.js      # GatewayTaskManager: task lifecycle, SSE fanout, attachments+artifacts
+  gateway-tasks.js      # GatewayTaskManager: task records + SSE fanout + attachments
+                        #   + artifacts. Delegates spawn-and-lifecycle to OneShotAgentRunner.
   gateway.js            # Express router mounted at /v1
 ```
+
+### Why the runner is shared
+
+The HTTP gateway and the Alien Mind have the same atomic operation underneath: "spawn an agent, give it one prompt, capture the result, terminate". The shared runner means:
+
+- Bug fixes to spawn timing, approval handling, or teardown ordering land in one place and apply to both call sites.
+- A mind-spawned arm shows up in the dashboard with the same kind of source-tag visibility (`source: 'mind:<goalId-tail>'`) that gateway-spawned arms get (`source: 'gateway:<client>'`).
+- The session-discovery endpoints documented in the "Session discovery" section above accept `source=mind` alongside `source=gateway` for filtering.
+
+External callers don't need to care about the runner directly — it's a private implementation detail. But if you're reading the codebase or debugging spawn issues, that's where the lifecycle lives.
 
 ## Worked Example
 

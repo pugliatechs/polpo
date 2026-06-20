@@ -264,15 +264,17 @@ sequenceDiagram
 
 ## Alien Mind Flow (Multi-Agent Coordination)
 
+Every mind-spawned arm goes through the same `OneShotAgentRunner` primitive the HTTP gateway uses. Each task = one fresh agent + one prompt + one captured result + terminate. No pool, no reuse.
+
 ```mermaid
 sequenceDiagram
     participant User
     participant Mind as Alien Mind<br/>(instance)
     participant Reasoner as Reasoner<br/>(Claude subprocess)
     participant Store as Memory + GoalStore
-    participant Pool as AgentPool
-    participant ArmA as Arm A
-    participant ArmB as Arm B
+    participant Runner as OneShotAgentRunner<br/>(shared with gateway)
+    participant ArmA as Arm A<br/>(spawn → run → terminate)
+    participant ArmB as Arm B<br/>(spawn → run → terminate)
 
     User->>Mind: Goal
     Mind->>Store: snapshot (planning) + search past goals
@@ -281,18 +283,22 @@ sequenceDiagram
     Reasoner-->>Mind: { tasks: [A,B], deps: B→A }
     Mind->>Store: snapshot (running)
 
-    Mind->>Pool: acquire(A)
-    Pool-->>ArmA: spawn
-    Mind->>ArmA: prompt
-    ArmA-->>Mind: busy → output → idle
+    Mind->>Runner: run({ prompt: A, source: "mind:<goalId>" })
+    Runner-->>ArmA: spawn + arm timeout + send prompt
+    ArmA-->>Runner: busy → output chunks → idle
+    Runner-->>Mind: onTerminal({ status: completed, output })
+    Runner-->>ArmA: stop + unregister
 
-    Note over Mind: Inter-arm context:<br/>extract A's trailing output
-    Mind->>Pool: acquire(B)
-    Pool-->>ArmB: spawn
-    Mind->>ArmB: prompt + <previous_task_results>A</...>
-    ArmB-->>Mind: busy → output → idle
+    Note over Mind: Inter-arm context:<br/>capture A's output for B's prompt
 
-    alt task fails
+    Mind->>Runner: run({ prompt: <previous_task_results>A</...> + B,<br/>source: "mind:<goalId>" })
+    Runner-->>ArmB: spawn + arm timeout + send prompt
+    ArmB-->>Runner: busy → output chunks → idle
+    Runner-->>Mind: onTerminal({ status: completed, output })
+    Runner-->>ArmB: stop + unregister
+
+    alt task fails (timeout, approval_required, run error)
+        Runner-->>Mind: onTerminal({ status: failed, error })
         Mind->>Reasoner: replan(task, reason, partial)
         Reasoner-->>Mind: retry | split | abandon
     end
@@ -300,5 +306,5 @@ sequenceDiagram
     Mind->>Store: save completed goal + remove in-flight
     Mind-->>User: result + summaries
 
-    Note over Mind: Watcher (30s) alerts on stuck arms.<br/>If policy.autoActOnStuck, calls<br/>coordinator.failAgentTask() at<br/>stuckThreshold × multiplier.
+    Note over Mind: Watcher (30s) alerts on stuck arms.<br/>If policy.autoActOnStuck, calls<br/>coordinator.failAgentTask() which<br/>cancels via Runner.cancel(agentId).
 ```

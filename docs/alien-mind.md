@@ -18,11 +18,12 @@ The "Alien Mind" instance appears in the dashboard with a purple badge. Select i
 
 1. **You send a goal** to the mind instance (e.g., "Refactor the auth module and update the tests")
 2. **The mind plans** by asking Claude to decompose the goal into tasks with dependencies
-3. **Tasks are assigned** to idle agents that match the target project/cwd
-4. **Parallel execution**: independent tasks run simultaneously on different agents
-5. **Sequential execution**: dependent tasks wait for their predecessors to complete
-6. **Completion detection**: the mind watches agent status changes (busy -> idle)
-7. **Results reported**: progress and outcomes appear in the mind's conversation
+3. **Each task spawns a fresh agent** via the shared `OneShotAgentRunner` (the same lifecycle the HTTP gateway uses for external callers)
+4. **Parallel execution**: independent tasks fan out as parallel one-shot runs
+5. **Sequential execution**: dependent tasks wait, then receive predecessor output as injected context
+6. **Completion detection**: each runner.run() resolves when the agent goes idle; the coordinator picks up the captured output synchronously
+7. **Agent terminates**: after each task the agent process is stopped and unregistered — no pool, no reuse
+8. **Results reported**: progress and outcomes appear in the mind's conversation
 
 ## Architecture
 
@@ -35,17 +36,33 @@ User (Phone Dashboard)
 Alien Mind (instance in dashboard)
     |-- WorldModel: observes all agents via InstanceManager events
     |-- Reasoner: spawns Claude Code for goal decomposition + re-planning
-    |-- Coordinator: manages goal/task lifecycle + inter-arm context sharing
-    |-- TaskRunner: DAG executor for parallel + sequential tasks
-    |-- AgentPool: reuses idle arms or spawns new ones
+    |-- Coordinator: goal lifecycle + dependency graph + inter-arm context
+    |-- OneShotAgentRunner: shared spawn/timeout/teardown primitive
+    |     (also used by the HTTP gateway — same hardening for both)
     |-- Memory: long-term JSONL of past goals, surfaced into planning context
     |-- GoalStore: durable snapshot of in-flight goals (recovery after restart)
     |-- Watcher: passive monitoring + policy-gated autonomous action
     |
-    +-- Arm 1 (Claude, /project-backend)  -- Task A
-    +-- Arm 2 (Goose,  /project-infra)    -- Task B
-    +-- Arm 3 (Codex,  /project-frontend) -- Task C (depends on A, gets A's output)
+    +-- Arm 1 (Claude, /project-backend)  -- Task A    (spawned, runs, terminates)
+    +-- Arm 2 (Goose,  /project-infra)    -- Task B    (spawned in parallel)
+    +-- Arm 3 (Codex,  /project-frontend) -- Task C    (spawned after A, gets A's output)
 ```
+
+### Shared one-shot lifecycle
+
+The mind and the gateway are two callers of the **same** primitive — `OneShotAgentRunner` ([src/agent/one-shot-runner.js](../src/agent/one-shot-runner.js)). The runner owns:
+
+- spawning the agent process via the agent factory
+- waiting for the WebSocket handshake (5 s deadline)
+- arming a per-run timeout *before* sending the prompt (so a hung start still trips)
+- sending the prompt with optional pre-staged attachments
+- routing the `instance:status` / `instance:message` / `instance:approval` events that come back
+- aborting and stopping the agent at terminal state (success, timeout, approval-required, external cancel)
+- unregistering the instance and resolving the run with a captured result snapshot
+
+Higher-level callers (gateway, mind) bring only their own *policy*: rate limits + attachments + artifacts + SSE fanout for the gateway; decomposition + replanning + dependency graph + memory for the mind. Bug fixes to spawn/timeout/teardown land in one place and benefit both call sites.
+
+A mind-spawned arm is tagged `source: 'mind:<goalId-tail>'` on the instance, distinguishing it from gateway-spawned arms (`source: 'gateway:<client>'`) and user-started ones (`source: null`). The gateway's session-discovery endpoints accept `source=mind` as a filter.
 
 ## Commands
 
@@ -88,16 +105,31 @@ Goal: "Build, test, and deploy"
   -> 2 and 3 run in parallel after 1, then 4 runs
 ```
 
-## Agent Selection
+## Task dispatch — one-shot, every time
 
-When assigning a task, the mind picks agents in this order:
+There is no pool and no idle-agent reuse. Every task gets a fresh agent process, dispatched through `OneShotAgentRunner.run(...)`:
 
-1. **Idle agent matching target cwd/project**: best match, reuses existing context
-2. **Idle agent matching agent type**: right tool for the job
-3. **Any idle agent**: fallback
-4. **Spawn new agent**: if under the spawn limit (default 4)
+```
+coordinator._assignTask(task)
+   └─ runner.run({
+        agentType, cwd, prompt: <predecessor-context> + task.prompt,
+        name: "Mind arm: <task description>",
+        source: "mind:<goalId-tail>",
+        timeoutMs: <policy.taskTimeoutMs>,
+        onSpawn, onChunk, onApproval, onTerminal
+      })
+```
 
-Spawned agents get `autoApprove: true` since the mind coordinates their work.
+Why one-shot:
+
+- **Eliminates an entire class of bugs** that the old pool reuse path had: agents from a previous task carrying state, idle-detection races, "is this arm available?" guards, etc.
+- **Every "thought" is auditable**: each task is an isolated agent invocation you can replay or attribute.
+- **Failed agents don't poison subsequent attempts**: a stuck or misbehaving arm dies at the end of its run and the next task starts clean.
+- **Lifecycle hardening is shared**: the timeout/approval/cleanup logic the gateway has battle-tested for months also protects every mind arm.
+
+Trade-off: no cross-prompt agent memory. The coordinator addresses this by injecting predecessor task output into successor prompts (see "Inter-Arm Communication" below), and the world-model + memory modules carry state across the goal's lifetime.
+
+Arms spawned by the mind get `permissionMode: 'bypass'` when the policy's `autoApproveSpawned: true` (the default for `balanced` and `autonomous`). If an approval request slips through anyway, the runner fails the task immediately with `approval_required` (fail-closed) — the failure path then asks the reasoner to retry/split/abandon.
 
 ## WorldModel
 
@@ -184,29 +216,38 @@ The store is then cleared, so a clean shutdown after this report is well-defined
 
 ## Failure Handling
 
-- **Task timeout**: 5–15 minutes per task depending on policy. Timed-out tasks go through the re-plan flow.
-- **No arm available**: the mind spawns one (up to `maxSpawned`). If the spawn cap is hit, the task fails.
-- **Agent unreachable**: task fails if `sendToAgent` returns false; the re-plan flow runs.
+- **Task timeout**: 5–15 minutes per task depending on policy, enforced by the runner. Timed-out tasks go through the re-plan flow.
+- **Spawn failure**: if the runner can't bring the agent up (bad cwd, WS handshake timeout, etc.), the run resolves with `status: 'failed'` and the coordinator routes that into the re-plan flow.
+- **Approval requested**: the runner fails closed with `approval_required` (no human in the loop), then re-plan runs.
 - **Dependency failure**: if a task abandons, all transitively-dependent tasks cascade-fail.
 - **Planning failure**: if the reasoner can't produce a plan, the goal fails with the reasoner's error.
+- **External cancel** (`cancelGoal`, watcher-driven `failAgentTask`): the runner aborts the arm; the coordinator marks the task failed with no replan (cancellation is an explicit decision).
 - **Server restart**: all in-flight goals reported as interrupted on next start (see above).
 
 ## File Structure
 
 ```
+src/agent/
+  one-shot-runner.js # Shared spawn → prompt → terminate primitive (also
+                     #   used by the HTTP gateway). Owns the lifecycle:
+                     #   WS handshake, per-run timeout, event routing,
+                     #   approval fail-closed, agent stop + unregister.
+
 src/mind/
-  index.js           # Module entry, createMind(), instance registration, command handling
+  index.js           # Module entry, createMind(), instance registration,
+                     #   command handling, runner construction
   world-model.js     # Real-time agent state mirror via InstanceManager events
-  coordinator.js     # Goal/task lifecycle, assignment, completion detection,
-                     #   inter-arm context, re-plan, memory + goal-store wiring
+  coordinator.js     # Goal/task lifecycle, dispatch via runner.run(),
+                     #   dependency graph, inter-arm context, re-plan,
+                     #   memory + goal-store wiring
   reasoner.js        # LLM planning + evaluate + replan, via Claude Code process
-  task-runner.js     # DAG executor: parallel + sequential tasks
-  agent-pool.js      # Arm reuse/spawning (only reuses mind-spawned arms)
   watcher.js         # Passive monitoring + policy-gated auto-cancel of stuck tasks
   policies.js        # Configurable autonomy levels (conservative/balanced/autonomous)
   memory.js          # Long-term goal memory (JSONL, Jaccard search)
   goal-store.js      # In-flight goal persistence (JSON, atomic rewrite)
 ```
+
+> **Note on dead modules**: earlier versions of polpo had `src/mind/agent-pool.js` (idle-arm reuse + spawn cap) and `src/mind/task-runner.js` (DAG executor that was never wired in). Both were removed when the mind switched to one-shot dispatch through `OneShotAgentRunner`. If you're following an older diff or migration guide that references them, the runner replaces both.
 
 ## Autonomous Monitoring (Watcher)
 
@@ -218,7 +259,7 @@ The watcher runs every 30 seconds and acts in two stages:
 - **Alert deduplication**: each issue is reported once, cleared when resolved, re-reported if it recurs
 
 **Stage 2 — Act (`autoActOnStuck` policies)**
-- If a stuck agent is running a coordinator-owned task AND its busy time exceeds `stuckThreshold × stuckActionMultiplier`, the watcher calls `coordinator.failAgentTask(...)`. This aborts the arm and routes the failure through the normal re-plan path (retry / split / abandon). User sessions and gateway-spawned arms are untouched — only mind-owned tasks are auto-cancelled.
+- If a stuck agent is running a coordinator-owned task AND its busy time exceeds `stuckThreshold × stuckActionMultiplier`, the watcher calls `coordinator.failAgentTask(...)`. Under the hood that marks the task failed (entering the re-plan path) and then calls `runner.cancel(agentId)`, which aborts the arm and stops the agent process. User sessions and gateway-spawned arms are untouched — only mind-owned tasks (`source: 'mind:...'`) are auto-cancelled.
 
 The watcher emits a single "🛑 Auto-cancelled" message in the mind's chat when it acts, so the user always sees what happened.
 
@@ -226,11 +267,13 @@ The watcher emits a single "🛑 Auto-cancelled" message in the mind's chat when
 
 Three autonomy levels control the mind's behavior:
 
-| Policy | Auto-approve spawned | Max concurrent | Max spawned | Task timeout | Stuck threshold | Auto-act on stuck | Action multiplier |
-|--------|---------------------|----------------|-------------|--------------|-----------------|-------------------|-------------------|
-| `conservative`        | No  | 2 | 2 | 5 min  | 10 min | No  | — |
-| `balanced` (default)  | Yes | 4 | 4 | 10 min | 15 min | Yes | 2× (act at 30 min) |
-| `autonomous`          | Yes | 8 | 6 | 15 min | 20 min | Yes | 1× (act at 20 min) |
+| Policy | Auto-approve spawned | Max concurrent tasks | Task timeout | Stuck threshold | Auto-act on stuck | Action multiplier |
+|--------|---------------------|----------------------|--------------|-----------------|-------------------|-------------------|
+| `conservative`        | No  | 2 | 5 min  | 10 min | No  | — |
+| `balanced` (default)  | Yes | 4 | 10 min | 15 min | Yes | 2× (act at 30 min) |
+| `autonomous`          | Yes | 8 | 15 min | 20 min | Yes | 1× (act at 20 min) |
+
+The `maxSpawnedAgents` field in earlier versions was a pool ceiling; with one-shot dispatch every task spawns a fresh agent so the meaningful cap is `maxConcurrentTasks`. The runner enforces concurrency at the call site.
 
 Set via environment variable:
 ```bash
@@ -242,6 +285,7 @@ POLPO_MIND_POLICY=conservative POLPO_MIND=1 node bin/polpo.js server
 - **Opt-in**: only loads when `POLPO_MIND=1` is set
 - **No new dependencies**: pure Node.js, uses existing agent infrastructure
 - **Process isolation**: the reasoner's Claude process uses `--dangerously-skip-permissions` but only generates JSON plans, never touches user code
-- **Spawn limits**: `maxSpawned` prevents unbounded agent creation
-- **Event cleanup**: `destroy()` removes all listeners, kills processes, clears timeouts
+- **Per-task agent isolation**: each arm is spawned fresh and terminated when the task ends — no cross-task state in agent processes
+- **Per-run hardening**: each arm inherits the runner's timeout, approval fail-closed, and clean teardown — the same protections gateway callers get
+- **Source tag**: every arm registers as `source: 'mind:<goalId-tail>'` so operators can audit which goal owned which arm
 - **No secrets handling**: the mind doesn't manage tokens or credentials
