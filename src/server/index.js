@@ -15,6 +15,9 @@ const {
   verifyTotp,
 } = require('./auth');
 const { PushManager } = require('./push');
+const { makeLogger } = require('../util/logger');
+
+const log = makeLogger('polpo');
 
 /**
  * Simple in-memory rate limiter.
@@ -132,11 +135,17 @@ function createServer(options = {}) {
   app.get('/manifest.json', (req, res) => {
     res.sendFile(path.join(__dirname, '..', 'web', 'manifest.json'));
   });
+  // Per-process token appended to the cache name so a server restart
+  // (which is exactly when freshly-edited assets need to be picked up)
+  // invalidates every browser's SW cache without requiring a package
+  // version bump. The token is short enough not to bloat the SW source
+  // and stable for the lifetime of this process.
+  const swBootToken = Date.now().toString(36);
   app.get('/sw.js', (req, res) => {
     const { version } = require('../../package.json');
     const swPath = path.join(__dirname, '..', 'web', 'sw.js');
     const swContent = require('fs').readFileSync(swPath, 'utf8')
-      .replace('__POLPO_VERSION__', version);
+      .replace('__POLPO_VERSION__', version + '-' + swBootToken);
     res.setHeader('Service-Worker-Allowed', '/');
     res.setHeader('Content-Type', 'application/javascript');
     res.setHeader('Cache-Control', 'no-cache');
@@ -220,8 +229,25 @@ function createServer(options = {}) {
   // Push notifications
   const pushManager = new PushManager();
 
+  // Session outbox — per-instance agent→phone file transfer. Wired
+  // through to the API router (toggle/list/download) and the websocket
+  // layer (prompt directive injection + new-file broadcasts on idle).
+  const { SessionOutboxManager } = require('./session-outbox');
+  const outboxManager = new SessionOutboxManager();
+  // Disconnect-cleanup: when an instance unregisters, drop its outbox
+  // dir so we don't leak per-session state across reconnects.
+  instanceManager.on('instance:disconnected', (inst) => {
+    if (outboxManager.isEnabled(inst.id)) outboxManager.disable(inst.id);
+  });
+
   // API routes
-  app.use('/api', createApiRouter(instanceManager, getAuthState, pushManager));
+  app.use('/api', createApiRouter(instanceManager, getAuthState, pushManager, outboxManager));
+
+  // Alien Mind handle — declared up here so the gateway router (mounted
+  // below) can wire /v1/goals to its coordinator. The mind itself is
+  // created inside either the gateway block or the legacy POLPO_MIND
+  // block further down, whichever runs first.
+  let mind = null;
 
   // Optional: programmatic gateway (/v1/*) for external callers
   let gatewayState = null;
@@ -231,6 +257,23 @@ function createServer(options = {}) {
     const { GatewayUploadStore } = require('./gateway-uploads');
     const { GatewayArtifactStore } = require('./gateway-artifacts');
     const { createGatewayRouter } = require('./gateway');
+
+    // The mind is opt-in (POLPO_MIND=1) and must be created BEFORE the
+    // gateway router so the router can wire /v1/goals to its coordinator.
+    // If POLPO_MIND isn't set, the gateway routes return 503 cleanly.
+    if (process.env.POLPO_MIND === '1' && !mind) {
+      try {
+        const { createMind } = require('../mind/index');
+        const mindAuthToken = authState.enabled ? authState.token : null;
+        mind = createMind(instanceManager, {
+          verbose: true,
+          serverPort: port,
+          authToken: mindAuthToken,
+        });
+      } catch (e) {
+        log.error('Mind module failed to load:', e.message);
+      }
+    }
 
     const keyInfo = loadOrCreateGatewayKey({
       key: options.gateway.key || undefined,
@@ -258,6 +301,8 @@ function createServer(options = {}) {
       taskManager,
       getKey: () => keyInfo.key,
       uploadStore,
+      instanceManager,
+      mind: mind ? { coordinator: mind.coordinator } : null,
     }));
     gatewayState = { keyInfo, taskManager, uploadStore, artifactStore };
   }
@@ -269,33 +314,33 @@ function createServer(options = {}) {
   });
 
   // WebSocket
-  const wss = setupWebSocket(server, instanceManager, getAuthState, pushManager);
+  const wss = setupWebSocket(server, instanceManager, getAuthState, pushManager, outboxManager);
 
-  // Alien Mind meta-agent (opt-in: POLPO_MIND=1)
-  let mind = null;
-  if (process.env.POLPO_MIND === '1') {
+  // Alien Mind meta-agent (opt-in: POLPO_MIND=1). When --gateway is on
+  // it was already created above. This block is the dashboard-only path.
+  if (process.env.POLPO_MIND === '1' && !mind) {
     try {
       const { createMind } = require('../mind/index');
       const mindAuthToken = authState.enabled ? authState.token : null;
       mind = createMind(instanceManager, {
-        verbose: true, // Always verbose for mind debugging
+        verbose: true,
         serverPort: port,
         authToken: mindAuthToken,
       });
     } catch (e) {
-      console.error('[polpo] Mind module failed to load:', e.message);
+      log.error('Mind module failed to load:', e.message);
     }
   }
 
   if (verbose) {
     instanceManager.on('instance:registered', (inst) => {
-      console.log(`[polpo] Instance registered: ${inst.name} (${inst.id})`);
+      log.info(`Instance registered: ${inst.name} (${inst.id})`);
     });
     instanceManager.on('instance:disconnected', (inst) => {
-      console.log(`[polpo] Instance disconnected: ${inst.name} (${inst.id})`);
+      log.info(`Instance disconnected: ${inst.name} (${inst.id})`);
     });
     instanceManager.on('instance:status', ({ id, status }) => {
-      console.log(`[polpo] Instance ${id} -> ${status}`);
+      log.info(`Instance ${id} -> ${status}`);
     });
   }
 

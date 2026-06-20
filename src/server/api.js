@@ -12,6 +12,12 @@ const {
   DASHBOARD_MAX_UPLOAD_SIZE,
   SAFE_INLINE_IMAGE_EXTS,
 } = require('./upload-constants');
+const convSearch = require('./conversation-search');
+const { analyzeProfile } = require('./profile-analyzer');
+const { makeLogger } = require('../util/logger');
+
+const log = makeLogger('api');
+const skillsLog = makeLogger('api:skills');
 
 const MAX_UPLOAD_SIZE = DASHBOARD_MAX_UPLOAD_SIZE; // back-compat local alias
 const GEMINI_TMP_DIR = path.join(os.homedir(), '.gemini', 'tmp');
@@ -93,7 +99,12 @@ function parseSkillsSearchOutput(stdout) {
   return results;
 }
 
-function createApiRouter(instanceManager, getAuthState, pushManager) {
+// Re-exported from a tiny helper module so other server modules can
+// depend on it without importing the heavyweight router. The behaviour
+// is unchanged — see src/server/normalize-timestamp.js.
+const { normalizeTimestamp } = require('./normalize-timestamp');
+
+function createApiRouter(instanceManager, getAuthState, pushManager, outboxManager) {
   const router = express.Router();
 
   // Track spawned wrapped agents so we can clean them up
@@ -169,7 +180,7 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
       });
       res.json(sessions);
     } catch (err) {
-      console.error('[api]', err);
+      log.error('error:', err);
       res.status(500).json({ error: 'Internal server error' });
     }
   });
@@ -203,7 +214,7 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
       // Legacy: return flat array for backward compatibility
       res.json(history);
     } catch (err) {
-      console.error('[api]', err);
+      log.error('error:', err);
       res.status(500).json({ error: 'Internal server error' });
     }
   });
@@ -273,7 +284,7 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
 
       res.json({ instanceId: agent.instanceId });
     } catch (err) {
-      console.error('[api]', err);
+      log.error('error:', err);
       res.status(500).json({ error: 'Internal server error' });
     }
   });
@@ -322,7 +333,7 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
 
       res.json({ instanceId: agent.instanceId });
     } catch (err) {
-      console.error('[api]', err);
+      log.error('error:', err);
       res.status(500).json({ error: 'Internal server error' });
     }
   });
@@ -388,6 +399,78 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
     } else {
       res.status(502).json({ error: 'Agent not connected' });
     }
+  });
+
+  // ----- Outbox (agent → phone file transfer) -----
+  //
+  // When outbox is enabled for an instance, the websocket layer
+  // prepends a <polpo:outbox dir=...> directive to every send_prompt,
+  // telling the agent where to drop output files. The dashboard then
+  // pulls the list and downloads files via these routes. The agent has
+  // write access to a per-instance dir; the dashboard side enforces
+  // filename safety + prefix-check at every read.
+  //
+  // These routes share the dashboard's Bearer/session auth middleware
+  // applied at /api mount time, so no separate token is required.
+
+  router.post('/instances/:id/outbox/enable', (req, res) => {
+    if (!outboxManager) return res.status(503).json({ error: 'outbox_not_available' });
+    if (!instanceManager.get(req.params.id)) {
+      return res.status(404).json({ error: 'instance_not_found' });
+    }
+    try {
+      outboxManager.enable(req.params.id);
+      res.json({ enabled: true });
+    } catch (err) {
+      log.error('outbox enable failed:', err.message);
+      res.status(500).json({ error: 'outbox_enable_failed' });
+    }
+  });
+
+  router.post('/instances/:id/outbox/disable', (req, res) => {
+    if (!outboxManager) return res.status(503).json({ error: 'outbox_not_available' });
+    outboxManager.disable(req.params.id);
+    res.json({ enabled: false });
+  });
+
+  router.get('/instances/:id/outbox', (req, res) => {
+    if (!outboxManager) return res.status(503).json({ error: 'outbox_not_available' });
+    res.json({
+      enabled: outboxManager.isEnabled(req.params.id),
+      files: outboxManager.list(req.params.id),
+    });
+  });
+
+  router.get('/instances/:id/outbox/:name', (req, res) => {
+    if (!outboxManager) return res.status(503).json({ error: 'outbox_not_available' });
+    let opened;
+    try {
+      opened = outboxManager.open(req.params.id, req.params.name);
+    } catch (err) {
+      const code = err.code || 'outbox_failed';
+      const status = code === 'outbox_not_enabled' ? 409
+        : code === 'invalid_name' ? 400
+        : code === 'file_not_found' ? 404
+        : 500;
+      return res.status(status).json({ error: code });
+    }
+    // Mirror the gateway's signed-attachment + nosniff defence.
+    // Inline-safe images keep their media type so the dashboard can
+    // render thumbnails; everything else is force-downloaded.
+    if (opened.isInlineSafe) {
+      res.setHeader('Content-Type', opened.mediaType);
+      res.setHeader('Content-Disposition', 'inline; filename="' + opened.filename + '"');
+    } else {
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Disposition', 'attachment; filename="' + opened.filename + '"');
+    }
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Length', String(opened.size));
+    opened.stream.pipe(res);
+    opened.stream.on('error', (streamErr) => {
+      log.error('outbox stream error:', streamErr.message);
+      if (!res.headersSent) res.status(500).end();
+    });
   });
 
   // Permission request from MCP server (long-poll).
@@ -649,7 +732,7 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
         warning: 'Session taken over. You can now send prompts from your phone.',
       });
     } catch (err) {
-      console.error('[api] takeover failed:', err);
+      log.error('takeover failed:', err);
       res.status(500).json({ error: 'Takeover failed. Check server logs for details.' });
     }
   });
@@ -819,7 +902,7 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
       }
       res.json(skills);
     } catch (err) {
-      console.error('[api:skills]', err);
+      skillsLog.error('error:', err);
       res.status(500).json({ error: 'Failed to list skills' });
     }
   });
@@ -842,7 +925,7 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
       env: { ...process.env, FORCE_COLOR: '0' },
     }, (err, stdout) => {
       if (err) {
-        console.error('[api:skills:search]', err.message);
+        skillsLog.error('search failed:', err.message);
         return res.status(500).json({ error: 'Search failed' });
       }
       const results = parseSkillsSearchOutput(stdout);
@@ -864,7 +947,7 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
       timeout: 30000,
     }, (err, stdout, stderr) => {
       if (err) {
-        console.error('[api:skills:install]', err.message, stderr);
+        skillsLog.error('install failed:', err.message, stderr);
         return res.status(500).json({ error: 'Install failed. Check server logs for details.' });
       }
       res.json({ ok: true });
@@ -899,7 +982,7 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
       timeout: 15000,
     }, (err, stdout, stderr) => {
       if (err) {
-        console.error('[api:skills:remove]', err.message, stderr);
+        skillsLog.error('remove failed:', err.message, stderr);
         return res.status(500).json({ error: 'Remove failed. Check server logs for details.' });
       }
       res.json({ ok: true });
@@ -918,13 +1001,44 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
     }
   });
 
-  // ---- Conversation Search ----
-  const readline = require('readline');
-  const CLAUDE_PROJECTS = path.join(os.homedir(), '.claude', 'projects');
-  const CODEX_SESSIONS = path.join(os.homedir(), '.codex', 'sessions');
-  const GEMINI_TMP = path.join(os.homedir(), '.gemini', 'tmp');
-  const PI_SESSIONS = path.join(os.homedir(), '.pi', 'agent', 'sessions');
+  // ---- Builder Profile ----
+  // Paxel-style "how you work with AI agents" report, computed locally
+  // from the same transcripts Polpo already reads. Expensive (scans +
+  // loads session histories), so guarded against concurrent runs and
+  // cached briefly to keep repeated dashboard opens cheap.
+  let profileInProgress = false;
+  let profileCache = null; // { key, at, data }
+  const PROFILE_CACHE_TTL_MS = 60_000;
 
+  router.get('/profile', async (req, res) => {
+    const days = Math.min(Math.max(parseInt(req.query.days, 10) || 90, 1), 365);
+    const source = ['all', 'claude', 'codex', 'gemini', 'opencode', 'pi', 'goose'].includes(req.query.agent)
+      ? req.query.agent : 'all';
+    const cacheKey = days + ':' + source;
+
+    if (profileCache && profileCache.key === cacheKey && Date.now() - profileCache.at < PROFILE_CACHE_TTL_MS) {
+      return res.json(profileCache.data);
+    }
+    if (profileInProgress) {
+      return res.status(429).json({ error: 'Profile analysis already in progress' });
+    }
+    profileInProgress = true;
+    try {
+      const data = await analyzeProfile({ days, source });
+      profileCache = { key: cacheKey, at: Date.now(), data };
+      res.json(data);
+    } catch (err) {
+      log.error('/profile failed:', err && err.message);
+      res.status(500).json({ error: 'Profile analysis failed' });
+    } finally {
+      profileInProgress = false;
+    }
+  });
+
+  // ---- Conversation Search ----
+  // Implementation moved to src/server/conversation-search.js so the
+  // gateway (/v1/search, /v1/sessions/search) can reuse the same engine.
+  // This route preserves its original response shape — UI tests still pass.
   let searchInProgress = false;
 
   router.get('/search', async (req, res) => {
@@ -937,220 +1051,19 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
     }
     searchInProgress = true;
     const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
-    const lowerQuery = query.toLowerCase();
+    const candidatePool = Math.min(Math.max(limit * 3, 60), 300);
 
     try {
-      const results = [];
-
-      // Gather searchable files from all agents
-      const files = [];
-      const sources = [
-        { dir: CLAUDE_PROJECTS, ext: '.jsonl', agent: 'claude', skip: ['subagents'] },
-        { dir: CODEX_SESSIONS, ext: '.jsonl', agent: 'codex' },
-        { dir: GEMINI_TMP, ext: '.json', agent: 'gemini' },
-        { dir: PI_SESSIONS, ext: '.jsonl', agent: 'pi' },
-      ];
-      for (const src of sources) {
-        let realBase;
-        try { realBase = fs.realpathSync(src.dir); } catch { continue; }
-        for (const f of await findSessionFiles(src.dir, src.ext, src.skip)) {
-          files.push({ path: f, agent: src.agent, realBase });
-        }
-      }
-
-      // Sort by modification time (newest first) so recent conversations are searched first
-      files.sort((a, b) => {
-        try {
-          return fs.statSync(b.path).mtimeMs - fs.statSync(a.path).mtimeMs;
-        } catch { return 0; }
-      });
-
-      const deadline = Date.now() + 10000; // 10s timeout
-
-      for (const file of files) {
-        if (Date.now() > deadline || results.length >= limit) break;
-
-        // Security: resolve symlinks and ensure file is inside its base directory
-        let resolved;
-        try { resolved = fs.realpathSync(file.path); } catch { continue; }
-        if (!resolved.startsWith(file.realBase + path.sep)) continue;
-
-        const remaining = limit - results.length;
-        if (file.agent === 'gemini') {
-          const matches = searchGeminiFile(file.path, lowerQuery, remaining);
-          results.push(...matches);
-        } else {
-          const extractor = file.agent === 'codex' ? extractCodexContent
-            : file.agent === 'pi' ? extractPiContent
-            : extractClaudeContent;
-          const matches = await searchJsonlFile(file.path, lowerQuery, remaining, deadline, extractor);
-          results.push(...matches);
-        }
-      }
-
+      const out = await convSearch.searchOnDisk(query, { limit: candidatePool });
       searchInProgress = false;
-      res.json({ results: results.slice(0, limit), partial: Date.now() > deadline });
+      res.json({ results: out.results.slice(0, limit), partial: out.partial });
     } catch (err) {
+      // Don't surface internal error messages — only generic codes.
+      log.error('/search failed:', err && err.message);
       searchInProgress = false;
       res.status(500).json({ error: 'Search failed' });
     }
   });
-
-  async function findSessionFiles(dir, ext, skipDirs) {
-    const files = [];
-    try {
-      const entries = fs.readdirSync(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        if (skipDirs && skipDirs.includes(entry.name)) continue;
-        // Skip symbolic links — prevents traversal outside intended directories
-        if (entry.isSymbolicLink()) continue;
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory()) {
-          files.push(...await findSessionFiles(full, ext, skipDirs));
-        } else if (entry.name.endsWith(ext)) {
-          files.push(full);
-        }
-      }
-    } catch {
-      // skip unreadable dirs
-    }
-    return files;
-  }
-
-  function searchJsonlFile(filePath, query, maxResults, deadline, extractContent) {
-    return new Promise((resolve) => {
-      const results = [];
-      const sessionId = path.basename(filePath, '.jsonl');
-      const stream = fs.createReadStream(filePath, { encoding: 'utf8' });
-      const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
-
-      rl.on('line', (line) => {
-        if (results.length >= maxResults || Date.now() > deadline) {
-          rl.close();
-          stream.destroy();
-          return;
-        }
-        if (!line.trim()) return;
-        try {
-          const obj = JSON.parse(line);
-          const extracted = extractContent(obj);
-          if (!extracted) return;
-          const idx = extracted.content.toLowerCase().indexOf(query);
-          if (idx === -1) return;
-
-          const content = extracted.content;
-          const start = Math.max(0, idx - 80);
-          const end = Math.min(content.length, idx + query.length + 80);
-          const snippet = (start > 0 ? '...' : '') +
-            content.slice(start, end) +
-            (end < content.length ? '...' : '');
-
-          results.push({
-            sessionId,
-            role: extracted.role,
-            snippet,
-            matchIndex: idx - start + (start > 0 ? 3 : 0),
-            matchLength: query.length,
-            timestamp: obj.timestamp || null,
-          });
-        } catch {
-          // skip unparseable
-        }
-      });
-
-      rl.on('close', () => resolve(results));
-      rl.on('error', () => resolve(results));
-    });
-  }
-
-  // Search Gemini JSON files (not JSONL — entire file is one JSON object)
-  function searchGeminiFile(filePath, query, maxResults) {
-    const results = [];
-    try {
-      const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-      const sessionId = data.sessionId || path.basename(filePath, '.json');
-      const messages = data.messages || [];
-
-      for (const msg of messages) {
-        if (results.length >= maxResults) break;
-        const text = extractGeminiText(msg.content);
-        if (!text) continue;
-        const idx = text.toLowerCase().indexOf(query);
-        if (idx === -1) continue;
-
-        const start = Math.max(0, idx - 80);
-        const end = Math.min(text.length, idx + query.length + 80);
-        const snippet = (start > 0 ? '...' : '') +
-          text.slice(start, end) +
-          (end < text.length ? '...' : '');
-
-        results.push({
-          sessionId,
-          role: msg.type === 'user' ? 'user' : 'assistant',
-          snippet,
-          matchIndex: idx - start + (start > 0 ? 3 : 0),
-          matchLength: query.length,
-          timestamp: msg.timestamp || null,
-        });
-      }
-    } catch {
-      // skip unparseable
-    }
-    return results;
-  }
-
-  function extractGeminiText(content) {
-    if (typeof content === 'string') return content;
-    if (Array.isArray(content)) {
-      return content.filter(b => b.type === 'text' && b.text).map(b => b.text).join(' ') || null;
-    }
-    return null;
-  }
-
-  // Claude: { type: 'user'|'assistant', message: { content: string|[{type:'text',text}] } }
-  function extractClaudeContent(obj) {
-    const msg = obj.message;
-    if (!msg || !msg.content) return null;
-    if (typeof msg.content === 'string') {
-      return { content: msg.content, role: obj.type || 'unknown' };
-    }
-    if (Array.isArray(msg.content)) {
-      const text = msg.content.filter(b => b.type === 'text' && b.text).map(b => b.text).join(' ');
-      return text ? { content: text, role: obj.type || 'unknown' } : null;
-    }
-    return null;
-  }
-
-  // Codex: { type: 'event_msg', payload: { type: 'user_message', message: '...' } }
-  //    or: { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{type:'output_text',text}] } }
-  function extractCodexContent(obj) {
-    const payload = obj.payload || {};
-    if (obj.type === 'event_msg' && payload.type === 'user_message' && payload.message) {
-      return { content: payload.message, role: 'user' };
-    }
-    if (obj.type === 'response_item' && payload.type === 'message' && payload.role === 'assistant') {
-      const blocks = payload.content;
-      if (Array.isArray(blocks)) {
-        const text = blocks.filter(b => b.type === 'output_text' && b.text).map(b => b.text).join(' ');
-        if (text) return { content: text, role: 'assistant' };
-      }
-    }
-    return null;
-  }
-
-  // Pi: { type: 'message', role: 'user'|'assistant', content: string|[{type:'text',text}] }
-  function extractPiContent(obj) {
-    if (obj.type !== 'message') return null;
-    const content = obj.content;
-    if (typeof content === 'string') {
-      return { content, role: obj.role || 'unknown' };
-    }
-    if (Array.isArray(content)) {
-      const text = content.filter(b => b.type === 'text' && b.text).map(b => b.text).join(' ');
-      return text ? { content: text, role: obj.role || 'unknown' } : null;
-    }
-    return null;
-  }
 
   // ---- Push Notifications ----
   router.get('/push/vapid-key', (req, res) => {
@@ -1273,4 +1186,4 @@ function createApiRouter(instanceManager, getAuthState, pushManager) {
   return router;
 }
 
-module.exports = { createApiRouter, parseSkillFrontmatter, parseSkillsSearchOutput };
+module.exports = { createApiRouter, parseSkillFrontmatter, parseSkillsSearchOutput, normalizeTimestamp };

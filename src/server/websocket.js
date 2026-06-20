@@ -13,7 +13,7 @@ const { PiJsonlAdapter } = require('./pi-jsonl-adapter');
 const { GooseScanner } = require('./goose-scanner');
 const { CostTracker } = require('./cost-tracker');
 
-function setupWebSocket(server, instanceManager, getAuthState, pushManager) {
+function setupWebSocket(server, instanceManager, getAuthState, pushManager, outboxManager) {
   const wss = new WebSocket.Server({ server });
 
   // Track mobile/browser clients
@@ -68,6 +68,11 @@ function setupWebSocket(server, instanceManager, getAuthState, pushManager) {
         canReceivePrompts: instance.canReceivePrompts,
         firstPrompt: instance.firstPrompt,
         agentType: instance.agentType,
+        // Origin tag ('gateway:<client>', 'mind:<goalId-tail>', or null).
+        // Required so the dashboard's sidebar grouping can identify
+        // arms registered AFTER the dashboard connected (the snapshot
+        // path already carries source via instanceManager.getAll()).
+        source: instance.source,
       },
     });
   });
@@ -93,6 +98,21 @@ function setupWebSocket(server, instanceManager, getAuthState, pushManager) {
       const inst = instanceManager.get(data.id);
       const name = inst ? (inst.name || 'Agent') : 'Agent';
       pushManager.sendToAll('Task Complete', name + ' finished.', 'done-' + data.id);
+    }
+    // Outbox: when an instance with outbox enabled goes idle, diff
+    // the dir against the previous snapshot and broadcast any newly-
+    // produced files so the dashboard can render download chips on
+    // the most recent assistant message.
+    if (outboxManager && data.status === 'idle' && outboxManager.isEnabled(data.id)) {
+      const added = outboxManager.diffSinceLastIdle(data.id);
+      if (added.length > 0) {
+        broadcastToDashboards({
+          type: 'outbox_update',
+          instanceId: data.id,
+          newFiles: added,
+          files: outboxManager.list(data.id),
+        });
+      }
     }
   });
 
@@ -474,7 +494,7 @@ function setupWebSocket(server, instanceManager, getAuthState, pushManager) {
             }
             return;
           }
-          handleDashboardMessage(msg, instanceManager);
+          handleDashboardMessage(msg, instanceManager, outboxManager);
         } catch (e) {
           // ignore malformed messages
         }
@@ -526,14 +546,27 @@ function setupWebSocket(server, instanceManager, getAuthState, pushManager) {
   return wss;
 }
 
-function handleDashboardMessage(msg, instanceManager) {
+function handleDashboardMessage(msg, instanceManager, outboxManager) {
   switch (msg.type) {
     case 'send_prompt': {
-      // Send a user prompt to a specific Claude Code instance
-      const { instanceId, text, attachments } = msg;
+      // Send a user prompt to a specific Claude Code instance.
+      // When the session has outbox enabled, prepend the
+      // <polpo:outbox> directive so the agent knows where to drop any
+      // files the user should be able to download later. The original
+      // user text is what we mirror into the conversation log; the
+      // directive is internal plumbing that the dashboard shouldn't show.
+      //
+      // `clientMsgId`, when present, is a UUID the dashboard generated
+      // for its optimistic local render. We round-trip it back through
+      // `addMessage` so the dashboard can match the broadcast against
+      // its pending bubble and reconcile (vs. rendering a duplicate).
+      const { instanceId, text, attachments, clientMsgId } = msg;
+      const promptText = outboxManager
+        ? outboxManager.injectDirective(instanceId, text)
+        : text;
       instanceManager.sendToAgent(instanceId, {
         type: 'prompt',
-        text,
+        text: promptText,
         attachments: attachments || [],
       });
       instanceManager.addMessage(instanceId, {
@@ -541,6 +574,7 @@ function handleDashboardMessage(msg, instanceManager) {
         content: text,
         source: 'mobile',
         attachments: attachments || [],
+        clientMsgId: typeof clientMsgId === 'string' ? clientMsgId : undefined,
       });
       break;
     }
