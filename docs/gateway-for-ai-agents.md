@@ -98,6 +98,7 @@ Request body:
   "prompt":     "the instruction for the agent",
   "timeoutMs":  300000,
   "client":     "your-label",
+  "model":      "claude-opus-4-7",
   "attachments":      [{ "uploadId": "u-..." }],
   "captureArtifacts": true
 }
@@ -110,8 +111,22 @@ Request body:
 | `prompt` | yes | ≤ 50 000 chars. Be specific and self-sufficient — see Section 8. |
 | `timeoutMs` | no | Default 5 min, max 30 min. |
 | `client` | no | Free label; also overrideable via `X-Polpo-Client` header. |
+| `model` | no | Opaque string passed to the agent. Format is agent-specific (see below). Omit to use the host's CLI default. |
 | `attachments` | no | ≤ 20 entries, each referencing an `uploadId` you created earlier. |
 | `captureArtifacts` | no | `true` to receive files back. |
+
+**`model` per agent type:**
+
+| `agentType` | Format | Examples |
+|---|---|---|
+| `claude` | model id | `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5` |
+| `codex` | model id | `gpt-5`, `o4-mini` |
+| `gemini` | model id | `gemini-2.5-pro`, `gemini-2.5-flash` |
+| `opencode` | `provider/model` | `anthropic/claude-sonnet-4-6`, `openai/gpt-5` |
+| `pi` | model id | (single model today) |
+| `goose` | `provider/model` | `ollama/qwen2.5`, `anthropic/claude-haiku-4-5`, `bedrock/anthropic.claude-3-5-sonnet`, `openai/gpt-5` |
+
+The gateway does not validate the model against the agent's catalogue. If the agent rejects the model id, the task fails with the agent's error.
 
 On success: `201 { taskId, streamUrl }`.
 
@@ -120,6 +135,7 @@ On error, the body has an `error` code. Common ones:
 | Status | Code | Action |
 |---|---|---|
 | 400 | `invalid_agentType` | Use one from the list above |
+| 400 | `invalid_model` | `model` is empty, > 200 chars, or contains control characters. Pass a clean string in the agent-specific format. |
 | 400 | `cwd_does_not_exist` | The path doesn't exist on the host. Discover paths via `/v1/sessions` instead of guessing. |
 | 400 | `prompt_too_long` | Trim or split the work into multiple tasks |
 | 403 | `upload_forbidden` | Your `uploadId` belongs to a different bearer key |

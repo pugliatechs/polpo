@@ -139,6 +139,7 @@ class GatewayTaskManager extends EventEmitter {
       client: args.client,
       userAgent: userAgent,
       agentType: args.agentType,
+      model: args.model,
       cwd: args.cwd,
       prompt: args.prompt,
       timeoutMs: args.timeoutMs,
@@ -188,6 +189,7 @@ class GatewayTaskManager extends EventEmitter {
       clientLabel: t.clientLabel || resolveClientLabel(t),
       userAgent: t.userAgent || null,
       agentType: t.agentType,
+      model: t.model || null,
       cwd: t.cwd,
       prompt: t.prompt,
       status: t.status,
@@ -272,6 +274,7 @@ class GatewayTaskManager extends EventEmitter {
       'client=' + clientLabel,
       'token-fp=' + fp,
       'agent=' + task.agentType,
+      'model=' + (task.model || '-'),
       'ua=' + ua,
       'cwd=' + task.cwd,
       'prompt-len=' + (task.prompt ? task.prompt.length : 0),
@@ -368,6 +371,12 @@ class GatewayTaskManager extends EventEmitter {
       project: path.basename(task.cwd),
       timeoutMs: task.timeoutMs,
       attachments: attachmentsForAgent.length > 0 ? attachmentsForAgent : undefined,
+      // Optional caller-supplied model string. The runner forwards it
+      // straight to createAgent(); each agent type interprets it in
+      // its own way (CLI flag for claude/codex/gemini/opencode/pi,
+      // env vars GOOSE_PROVIDER/GOOSE_MODEL for goose). When omitted,
+      // the agent uses whatever its CLI defaults to on the host.
+      model: task.model || undefined,
 
       onSpawn: (agentInstanceId) => {
         task.agentInstanceId = agentInstanceId;
@@ -625,7 +634,7 @@ function validateInput(input, maxTimeoutMs) {
     err.code = 'invalid_body';
     throw err;
   }
-  const { agentType, cwd, prompt, timeoutMs, client, attachments, captureArtifacts } = input;
+  const { agentType, cwd, prompt, timeoutMs, client, attachments, captureArtifacts, model } = input;
 
   if (typeof agentType !== 'string' || !VALID_AGENT_TYPES.has(agentType)) {
     const err = new Error('invalid_agentType');
@@ -686,6 +695,36 @@ function validateInput(input, maxTimeoutMs) {
     throw err;
   }
 
+  // model: optional string the caller passes through to the spawned
+  // agent. Format is agent-specific:
+  //   claude   --> "claude-opus-4-7" | "sonnet" | "haiku"
+  //   codex    --> "gpt-5" | "o4-mini"
+  //   gemini   --> "gemini-2.5-pro" | "gemini-2.5-flash"
+  //   opencode --> provider-prefixed, e.g. "anthropic/claude-sonnet-4-6"
+  //   pi       --> (currently single model)
+  //   goose    --> provider/model, e.g. "ollama/qwen2.5",
+  //                "anthropic/claude-haiku-4-5", "openai/gpt-5"
+  // The gateway treats this as an opaque string; the agent code is
+  // responsible for interpreting it. Cap length to keep the spawn-log
+  // line bounded and to refuse pathological inputs.
+  if (model !== undefined && model !== null) {
+    if (typeof model !== 'string' || model.length === 0 || model.length > 200) {
+      const err = new Error('invalid_model');
+      err.code = 'invalid_model';
+      throw err;
+    }
+    // Defence in depth: refuse newlines / control chars / null bytes so
+    // the value can't break out of the env-var or CLI-arg passing
+    // context downstream. The agent-specific charset for valid models
+    // is much narrower than this, but those agents will reject unknown
+    // models on their own.
+    if (/[\x00-\x1f\x7f]/.test(model)) {
+      const err = new Error('invalid_model');
+      err.code = 'invalid_model';
+      throw err;
+    }
+  }
+
   // attachments: optional array of { uploadId }
   let resolvedAttachments = [];
   if (attachments !== undefined && attachments !== null) {
@@ -739,6 +778,7 @@ function validateInput(input, maxTimeoutMs) {
     client: client ? client.slice(0, 64) : null,
     attachments: resolvedAttachments,
     captureArtifacts: !!captureArtifacts,
+    model: typeof model === 'string' ? model.trim() : null,
   };
 }
 

@@ -163,6 +163,29 @@ describe('GatewayTaskManager: validation', () => {
     );
   });
 
+  it('rejects non-string, empty, oversized, or control-char model', async () => {
+    await assert.rejects(
+      () => tm.createTask({ agentType: 'claude', cwd: '/tmp', prompt: 'x', model: 42 }),
+      /invalid_model/
+    );
+    await assert.rejects(
+      () => tm.createTask({ agentType: 'claude', cwd: '/tmp', prompt: 'x', model: '' }),
+      /invalid_model/
+    );
+    await assert.rejects(
+      () => tm.createTask({ agentType: 'claude', cwd: '/tmp', prompt: 'x', model: 'x'.repeat(201) }),
+      /invalid_model/
+    );
+    await assert.rejects(
+      () => tm.createTask({ agentType: 'claude', cwd: '/tmp', prompt: 'x', model: 'evil\nmodel' }),
+      /invalid_model/
+    );
+    await assert.rejects(
+      () => tm.createTask({ agentType: 'claude', cwd: '/tmp', prompt: 'x', model: 'with\x00null' }),
+      /invalid_model/
+    );
+  });
+
   it('clamps oversized timeout to the configured max', async () => {
     tm.destroy();
     tm = new GatewayTaskManager({
@@ -240,6 +263,41 @@ describe('GatewayTaskManager: lifecycle', () => {
     const { taskId } = await tm.createTask({ agentType: 'claude', cwd: '/tmp', prompt: 'x' });
     const snap = tm.getTask(taskId);
     assert.equal(snap.clientLabel, 'unknown');
+  });
+
+  it('forwards an explicit model through to createAgent and exposes it in the task snapshot', async () => {
+    // Capture the options the agent factory was called with so we can
+    // confirm the model rode all the way through validateInput ->
+    // task record -> runner.run -> createAgent.
+    const captured = [];
+    tm.destroy();
+    tm = new GatewayTaskManager({
+      instanceManager: im, hubPort: 7890,
+      createAgent: (type, opts) => {
+        captured.push({ type, opts });
+        return createFakeAgent(im, type, opts);
+      },
+      waitForSocket: async () => {},
+    });
+    const { taskId } = await tm.createTask({
+      agentType: 'goose',
+      cwd: '/tmp',
+      prompt: 'pick something local',
+      model: 'ollama/qwen2.5',
+    });
+    assert.equal(captured.length, 1);
+    assert.equal(captured[0].type, 'goose');
+    assert.equal(captured[0].opts.model, 'ollama/qwen2.5');
+    const snap = tm.getTask(taskId);
+    assert.equal(snap.model, 'ollama/qwen2.5');
+  });
+
+  it('snapshot.model is null when the caller did not specify one', async () => {
+    const { taskId } = await tm.createTask({
+      agentType: 'claude', cwd: '/tmp', prompt: 'x',
+    });
+    const snap = tm.getTask(taskId);
+    assert.equal(snap.model, null);
   });
 
   it('sanitises shell-unsafe characters in client and UA labels', async () => {

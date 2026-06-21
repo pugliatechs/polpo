@@ -96,6 +96,7 @@ Create a one-shot task. The body:
   "prompt":     "the instruction for the agent",
   "timeoutMs":  300000,
   "client":     "remote-claude",
+  "model":      "claude-opus-4-7",
   "attachments":      [{ "uploadId": "u-..." }],
   "captureArtifacts": true
 }
@@ -108,8 +109,22 @@ Create a one-shot task. The body:
 | `prompt` | yes | ≤ 50 000 chars |
 | `timeoutMs` | no | Default 5 min, hard-capped at `POLPO_GATEWAY_MAX_TIMEOUT_MS` (default 30 min) |
 | `client` | no | Free-form label, also overrideable via `X-Polpo-Client` header. Becomes `source: 'gateway:<client>'` on the spawned instance and shows up in the dashboard. |
+| `model` | no | Opaque string the gateway forwards to the spawned agent. Format is agent-specific (see table below). When omitted, the agent uses whatever its CLI defaults to on the host. |
 | `attachments` | no | Up to 20 entries. Each must reference an `uploadId` created earlier by the same caller. |
 | `captureArtifacts` | no | When `true`, polpo creates a sealed dir and prepends a `<polpo:artifacts>` directive to the prompt (see [Artifacts](#artifacts)). |
+
+**Model format per agent.** The `model` field is an opaque string at the gateway boundary; each agent interprets it in its own way:
+
+| `agentType` | `model` format | Example |
+|---|---|---|
+| `claude` | model id from Anthropic's catalogue, passed as `--model` | `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5` |
+| `codex` | model id passed as `-m` | `gpt-5`, `o4-mini` |
+| `gemini` | model id passed as `-m` | `gemini-2.5-pro`, `gemini-2.5-flash` |
+| `opencode` | provider-prefixed model id, passed as `-m` | `anthropic/claude-sonnet-4-6`, `openai/gpt-5` |
+| `pi` | model id passed as `--model` | (single model today; flag accepted) |
+| `goose` | `provider/model` slash-form, parsed into `GOOSE_PROVIDER` + `GOOSE_MODEL` env vars | `ollama/qwen2.5`, `anthropic/claude-haiku-4-5`, `bedrock/anthropic.claude-3-5-sonnet`, `openai/gpt-5` |
+
+The gateway validates only that `model` is a non-empty string ≤ 200 chars with no control characters / NUL bytes; it does NOT validate the model id against the agent's own catalogue. If you pass a model the agent doesn't recognise, the task will fail with whatever error the agent surfaces (typically a 4xx from the underlying provider).
 
 Response `201`:
 
@@ -127,6 +142,7 @@ Common error responses:
 | 400 | `invalid_agentType` | Not in the accepted set |
 | 400 | `invalid_cwd` \| `cwd_must_be_absolute` \| `cwd_does_not_exist` \| `cwd_not_a_directory` | Bad cwd. `detail` field contains the offending path. |
 | 400 | `invalid_prompt` \| `prompt_too_long` | Empty or > 50 KB |
+| 400 | `invalid_model` | `model` is not a string, empty, > 200 chars, or contains control characters / NUL |
 | 400 | `invalid_attachments` \| `duplicate_attachment` \| `too_many_attachments` | `attachments` shape problems |
 | 400 | `invalid_upload_id` | An `uploadId` doesn't match the UUID-v4 prefix |
 | 403 | `upload_forbidden` | The upload was created by a different bearer token |
