@@ -176,7 +176,7 @@ function createMind(instanceManager, options) {
 
     if (text.startsWith('/cancel')) {
       var goals = coordinator.getActiveGoals().filter(function (g) {
-        return g.status === 'running' || g.status === 'planning';
+        return g.status === 'running' || g.status === 'planning' || g.status === 'awaiting_approval';
       });
       if (goals.length === 0) {
         instanceManager.addMessage(mindId, {
@@ -190,9 +190,112 @@ function createMind(instanceManager, options) {
       return;
     }
 
-    // Everything else is a goal
+    // ---- Interactive-mode slash commands ----
+    //
+    // These resolve to the most-recent awaiting_approval goal OR
+    // awaiting_user_input task automatically, so the user rarely
+    // needs to type an explicit id. If the chat layout grows multiple
+    // pending questions at once they can use the explicit form, e.g.
+    //   /approve goal-abc1234
+    //   /retry task-def5678 here's the missing context...
+
+    if (text === '/approve' || text.startsWith('/approve ')) {
+      var explicitGoalId = text.slice('/approve'.length).trim() || null;
+      var approved = coordinator.approvePlan(explicitGoalId);
+      if (!approved) {
+        instanceManager.addMessage(mindId, {
+          role: 'assistant',
+          content: 'No plan is awaiting approval right now.',
+          source: 'mind',
+        });
+      }
+      return;
+    }
+
+    if (text.startsWith('/tweak')) {
+      var feedback = text.slice('/tweak'.length).trim();
+      coordinator.tweakPlan(null, feedback).catch(function (err) {
+        instanceManager.addMessage(mindId, {
+          role: 'assistant',
+          content: 'Tweak failed: ' + err.message,
+          source: 'mind',
+        });
+      });
+      return;
+    }
+
+    if (text === '/abandon' || text.startsWith('/abandon ')) {
+      // /abandon resolves to whichever pending question the user has —
+      // if a plan is awaiting approval, cancel it; if a task is
+      // escalated, cancel its goal. Either way the goal terminates.
+      var abandonGoalId = text.slice('/abandon'.length).trim() || null;
+      var abandoned = coordinator.abandonAwaitingPlan(abandonGoalId);
+      if (!abandoned) {
+        abandoned = coordinator.userAbandonEscalatedGoal(null);
+      }
+      if (!abandoned) {
+        instanceManager.addMessage(mindId, {
+          role: 'assistant',
+          content: 'Nothing to abandon — no plan awaiting approval and no escalated arm.',
+          source: 'mind',
+        });
+      }
+      return;
+    }
+
+    if (text === '/retry' || text.startsWith('/retry ')) {
+      var hint = text.slice('/retry'.length).trim();
+      coordinator.userRetryEscalatedTask(null, hint).then(function (ok) {
+        if (!ok) {
+          instanceManager.addMessage(mindId, {
+            role: 'assistant',
+            content: 'No escalated arm waiting for a /retry.',
+            source: 'mind',
+          });
+        }
+      }).catch(function (err) {
+        instanceManager.addMessage(mindId, {
+          role: 'assistant',
+          content: 'Retry failed: ' + err.message,
+          source: 'mind',
+        });
+      });
+      return;
+    }
+
+    if (text === '/skip' || text.startsWith('/skip ')) {
+      var skipped = coordinator.userSkipEscalatedTask(null);
+      if (!skipped) {
+        instanceManager.addMessage(mindId, {
+          role: 'assistant',
+          content: 'No escalated arm to skip.',
+          source: 'mind',
+        });
+      }
+      return;
+    }
+
+    // Everything else is a goal. By default goals submitted via chat
+    // are *interactive*: the mind plans, posts the plan preview, and
+    // waits for /approve before dispatching. Operators who want the
+    // old fire-and-forget behaviour can set POLPO_MIND_AUTO_DISPATCH=1
+    // OR prefix the goal with "/auto " for a single-shot bypass.
+    var autoDispatch = process.env.POLPO_MIND_AUTO_DISPATCH === '1';
+    var goalPrompt = text;
+    if (text.startsWith('/auto ')) {
+      autoDispatch = true;
+      goalPrompt = text.slice('/auto '.length).trim();
+    }
+    if (!goalPrompt) {
+      instanceManager.addMessage(mindId, {
+        role: 'assistant',
+        content: 'Empty goal. Type something for the mind to plan, e.g. "Refactor the auth module".',
+        source: 'mind',
+      });
+      return;
+    }
     instanceManager.updateStatus(mindId, 'busy');
-    coordinator.submitGoal(text).then(function () {
+    coordinator.submitGoal(goalPrompt, { autoDispatch: autoDispatch }).then(function () {
       instanceManager.updateStatus(mindId, 'idle');
     }).catch(function (err) {
       instanceManager.addMessage(mindId, {

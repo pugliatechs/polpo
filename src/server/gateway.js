@@ -715,7 +715,11 @@ function createGatewayRouter(opts) {
     }
 
     try {
-      const result = await coordinator.submitGoal(prompt);
+      // Gateway-submitted goals MUST auto-dispatch. There is no human
+      // in the loop on this API surface to /approve a plan preview or
+      // /retry an escalated arm; treating gateway callers as
+      // interactive would deadlock them on the first plan.
+      const result = await coordinator.submitGoal(prompt, { autoDispatch: true });
       if (!result || !result.goalId) {
         return res.status(500).json({ error: 'goal_create_failed' });
       }

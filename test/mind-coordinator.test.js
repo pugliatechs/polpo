@@ -178,13 +178,23 @@ function createMockReasoner(plan, replanResponse) {
 }
 
 function newCoord(im, wm, reasoner, runner, extra) {
-  return new Coordinator(Object.assign({
+  const c = new Coordinator(Object.assign({
     instanceManager: im,
     worldModel: wm,
     reasoner,
     runner,
     mindInstanceId: 'mind-001',
   }, extra || {}));
+  // The interactive plan-approval flow (v1.2.2) makes submitGoal hold
+  // dispatch until /approve. The existing test suite was written
+  // assuming the legacy fire-and-forget behaviour, so we wrap
+  // submitGoal here to default autoDispatch:true. Tests that want to
+  // exercise the interactive path explicitly pass {autoDispatch:false}.
+  const origSubmit = c.submitGoal.bind(c);
+  c.submitGoal = function (prompt, opts) {
+    return origSubmit(prompt, Object.assign({ autoDispatch: true }, opts || {}));
+  };
+  return c;
 }
 
 describe('Coordinator: basic lifecycle', () => {
@@ -731,5 +741,256 @@ describe('Coordinator: goal:event emissions', () => {
   it('does not crash when an emit happens without listeners', async () => {
     coordinator = newCoord(im, wm, createMockReasoner(), runner, { mindInstanceId: MIND_ID });
     await coordinator.submitGoal('silent');
+  });
+});
+
+// ---- v1.2.2: interactive plan-approval + escalation ----
+
+describe('Coordinator: interactive plan approval', () => {
+  let im, wm, runner, coordinator;
+  const MIND_ID = 'mind-001';
+
+  beforeEach(() => {
+    im = createMockIM();
+    im.register({ id: MIND_ID, name: 'Alien Mind', agentType: 'mind' });
+    wm = new WorldModel(im, MIND_ID);
+    runner = createMockRunner(im);
+  });
+
+  afterEach(() => {
+    if (coordinator) coordinator.destroy();
+    runner.destroy();
+    wm.destroy();
+  });
+
+  it('submitGoal({autoDispatch:false}) stays in awaiting_approval until /approve', async () => {
+    coordinator = newCoord(im, wm, createMockReasoner(), runner, { mindInstanceId: MIND_ID });
+    const { goalId } = await coordinator.submitGoal('Plan something', { autoDispatch: false });
+    const goal = coordinator.getActiveGoals().find((g) => g.id === goalId);
+    assert.equal(goal.status, 'awaiting_approval');
+    assert.equal(runner._allRuns.length, 0, 'no arms spawned yet');
+
+    // Plan preview should have been posted to chat
+    const conv = im.getConversation(MIND_ID, 30);
+    const preview = conv.find((m) => m.content && m.content.includes('/approve'));
+    assert.ok(preview, 'plan preview posted to mind chat');
+  });
+
+  it('/approve dispatches the plan and the goal transitions to running', async () => {
+    coordinator = newCoord(im, wm, createMockReasoner(), runner, { mindInstanceId: MIND_ID });
+    const { goalId } = await coordinator.submitGoal('Ship it', { autoDispatch: false });
+    assert.equal(runner._allRuns.length, 0);
+
+    const ok = coordinator.approvePlan(null); // resolve to pending
+    assert.equal(ok, true);
+    const goal = coordinator.getActiveGoals().find((g) => g.id === goalId);
+    assert.equal(goal.status, 'running');
+    assert.equal(runner._allRuns.length, 1);
+  });
+
+  it('/approve with an unknown goalId returns false', async () => {
+    coordinator = newCoord(im, wm, createMockReasoner(), runner, { mindInstanceId: MIND_ID });
+    await coordinator.submitGoal('p', { autoDispatch: false });
+    assert.equal(coordinator.approvePlan('goal-doesnotexist'), false);
+  });
+
+  it('/tweak re-invokes the reasoner with the original prompt + feedback appended', async () => {
+    let lastPlanPrompt = null;
+    const reasoner = {
+      plan: async (_world, prompt) => { lastPlanPrompt = prompt; return { tasks: [{ description: 'do', agentType: 'claude', targetCwd: '/tmp', prompt: 'p', dependsOn: [] }] }; },
+      replan: async () => ({ action: 'abandon', reason: 'mock' }),
+      evaluate: async () => ({ success: true, summary: 'ok' }),
+      destroy: () => {},
+    };
+    coordinator = newCoord(im, wm, reasoner, runner, { mindInstanceId: MIND_ID });
+    await coordinator.submitGoal('original goal', { autoDispatch: false });
+    lastPlanPrompt = null;
+    const ok = await coordinator.tweakPlan(null, 'narrower scope, just auth tests');
+    assert.equal(ok, true);
+    assert.ok(lastPlanPrompt.includes('original goal'), 'original prompt preserved');
+    assert.ok(lastPlanPrompt.includes('narrower scope, just auth tests'), 'feedback appended');
+    // Still awaiting approval after tweak — the user must /approve again
+    const goal = coordinator.getActiveGoals()[0];
+    assert.equal(goal.status, 'awaiting_approval');
+  });
+
+  it('/tweak with empty feedback no-ops and reports a hint', async () => {
+    coordinator = newCoord(im, wm, createMockReasoner(), runner, { mindInstanceId: MIND_ID });
+    await coordinator.submitGoal('p', { autoDispatch: false });
+    const ok = await coordinator.tweakPlan(null, '');
+    assert.equal(ok, false);
+  });
+
+  it('/abandon on an awaiting_approval goal terminates without dispatching', async () => {
+    coordinator = newCoord(im, wm, createMockReasoner(), runner, { mindInstanceId: MIND_ID });
+    const { goalId } = await coordinator.submitGoal('p', { autoDispatch: false });
+    const ok = coordinator.abandonAwaitingPlan(null);
+    assert.equal(ok, true);
+    const goal = coordinator.getActiveGoals().find((g) => g.id === goalId);
+    assert.equal(goal.status, 'failed');
+    assert.equal(runner._allRuns.length, 0);
+  });
+
+  it('emits awaiting_approval + plan_approved goal:events', async () => {
+    coordinator = newCoord(im, wm, createMockReasoner(), runner, { mindInstanceId: MIND_ID });
+    const events = [];
+    coordinator.on('goal:event', (ev) => events.push(ev));
+    await coordinator.submitGoal('p', { autoDispatch: false });
+    coordinator.approvePlan(null);
+    const types = events.map((e) => e.type);
+    assert.ok(types.includes('awaiting_approval'));
+    assert.ok(types.includes('plan_approved'));
+    assert.ok(types.indexOf('awaiting_approval') < types.indexOf('plan_approved'));
+  });
+
+  it('autoDispatch:true preserves the legacy fire-and-forget behaviour', async () => {
+    coordinator = newCoord(im, wm, createMockReasoner(), runner, { mindInstanceId: MIND_ID });
+    // newCoord defaults to autoDispatch:true; this asserts the
+    // default-path still dispatches immediately.
+    const { goalId } = await coordinator.submitGoal('legacy');
+    const goal = coordinator.getActiveGoals().find((g) => g.id === goalId);
+    assert.equal(goal.status, 'running');
+    assert.equal(runner._allRuns.length, 1);
+  });
+});
+
+describe('Coordinator: interactive task escalation', () => {
+  let im, wm, runner, coordinator;
+  const MIND_ID = 'mind-001';
+
+  beforeEach(() => {
+    im = createMockIM();
+    im.register({ id: MIND_ID, name: 'Alien Mind', agentType: 'mind' });
+    wm = new WorldModel(im, MIND_ID);
+    runner = createMockRunner(im);
+  });
+
+  afterEach(() => {
+    if (coordinator) coordinator.destroy();
+    runner.destroy();
+    wm.destroy();
+  });
+
+  it('a task at MAX_REPLANS escalates to awaiting_user_input instead of failing permanently', async () => {
+    // reasoner.replan returns 'retry' to keep re-failing through the budget
+    const reasoner = {
+      plan: async () => ({ tasks: [{ description: 'risky', agentType: 'claude', targetCwd: '/tmp', prompt: 'p', dependsOn: [] }] }),
+      replan: async () => ({ action: 'retry', prompt: 'retry p' }),
+      evaluate: async () => ({ success: true, summary: 'ok' }),
+      destroy: () => {},
+    };
+    coordinator = newCoord(im, wm, reasoner, runner, { mindInstanceId: MIND_ID });
+    const { goalId } = await coordinator.submitGoal('Risk', { autoDispatch: false });
+    coordinator.approvePlan(null);
+    const taskId = coordinator.getActiveGoals()[0].plan.tasks[0].id;
+
+    // Burn through the replan budget
+    for (let i = 0; i <= coordinator.MAX_REPLANS; i++) {
+      coordinator._failTask(taskId, 'still stuck #' + i);
+      await new Promise((r) => setTimeout(r, 20));
+    }
+
+    const task = coordinator.getActiveGoals()[0].plan.tasks[0];
+    assert.equal(task.status, 'awaiting_user_input');
+    // Goal should still be running (escalation is non-terminal)
+    const goal = coordinator.getActiveGoals().find((g) => g.id === goalId);
+    assert.equal(goal.status, 'running');
+  });
+
+  it('autoDispatch goals do NOT escalate — they fail permanently (legacy behaviour)', async () => {
+    const reasoner = {
+      plan: async () => ({ tasks: [{ description: 'x', agentType: 'claude', targetCwd: '/tmp', prompt: 'p', dependsOn: [] }] }),
+      replan: async () => ({ action: 'retry', prompt: 'retry' }),
+      evaluate: async () => ({ success: true, summary: 'ok' }),
+      destroy: () => {},
+    };
+    coordinator = newCoord(im, wm, reasoner, runner, { mindInstanceId: MIND_ID });
+    await coordinator.submitGoal('auto');
+    const taskId = coordinator.getActiveGoals()[0].plan.tasks[0].id;
+    for (let i = 0; i <= coordinator.MAX_REPLANS; i++) {
+      coordinator._failTask(taskId, 'again ' + i);
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    const task = coordinator.getActiveGoals()[0].plan.tasks[0];
+    assert.equal(task.status, 'failed');
+  });
+
+  it('/retry with a hint resets the replan budget and feeds the hint to the reasoner', async () => {
+    let replanCallReason = null;
+    const reasoner = {
+      plan: async () => ({ tasks: [{ description: 'x', agentType: 'claude', targetCwd: '/tmp', prompt: 'p', dependsOn: [] }] }),
+      replan: async (args) => { replanCallReason = args.failureReason; return { action: 'retry', prompt: 'retry' }; },
+      evaluate: async () => ({ success: true, summary: 'ok' }),
+      destroy: () => {},
+    };
+    coordinator = newCoord(im, wm, reasoner, runner, { mindInstanceId: MIND_ID });
+    await coordinator.submitGoal('p', { autoDispatch: false });
+    coordinator.approvePlan(null);
+    const taskId = coordinator.getActiveGoals()[0].plan.tasks[0].id;
+    // Escalate
+    for (let i = 0; i <= coordinator.MAX_REPLANS; i++) {
+      coordinator._failTask(taskId, 'original failure');
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.equal(coordinator.getActiveGoals()[0].plan.tasks[0].status, 'awaiting_user_input');
+
+    // User retries with guidance
+    const ok = await coordinator.userRetryEscalatedTask(null, 'try with --verbose');
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(ok, true);
+    assert.ok(replanCallReason.includes('USER GUIDANCE: try with --verbose'));
+    // replanCount reset so subsequent failures can re-iterate
+    assert.equal(coordinator.getActiveGoals()[0].plan.tasks[0].replanCount, 1);
+  });
+
+  it('/skip marks the escalated task failed and cascades to its dependents', async () => {
+    const plan = { tasks: [
+      { description: 'A', agentType: 'claude', targetCwd: '/tmp', prompt: 'a', dependsOn: [] },
+      { description: 'B depends on A', agentType: 'claude', targetCwd: '/tmp', prompt: 'b', dependsOn: [0] },
+      { description: 'C depends on B', agentType: 'claude', targetCwd: '/tmp', prompt: 'c', dependsOn: [1] },
+    ] };
+    const reasoner = {
+      plan: async () => plan,
+      replan: async () => ({ action: 'retry', prompt: 'r' }),
+      evaluate: async () => ({ success: true, summary: 'ok' }),
+      destroy: () => {},
+    };
+    coordinator = newCoord(im, wm, reasoner, runner, { mindInstanceId: MIND_ID });
+    await coordinator.submitGoal('p', { autoDispatch: false });
+    coordinator.approvePlan(null);
+    const taskA_id = coordinator.getActiveGoals()[0].plan.tasks[0].id;
+    // Escalate A
+    for (let i = 0; i <= coordinator.MAX_REPLANS; i++) {
+      coordinator._failTask(taskA_id, 'A stuck');
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    // Skip
+    const ok = coordinator.userSkipEscalatedTask(null);
+    assert.equal(ok, true);
+    const tasks = coordinator.getActiveGoals()[0].plan.tasks;
+    assert.equal(tasks[0].status, 'failed');
+    assert.equal(tasks[1].status, 'failed', 'B (depends on A) cascade-failed');
+    assert.equal(tasks[2].status, 'failed', 'C (depends on B) cascade-failed');
+  });
+
+  it('/abandon while awaiting_user_input cancels the goal', async () => {
+    const reasoner = {
+      plan: async () => ({ tasks: [{ description: 'x', agentType: 'claude', targetCwd: '/tmp', prompt: 'p', dependsOn: [] }] }),
+      replan: async () => ({ action: 'retry', prompt: 'r' }),
+      evaluate: async () => ({ success: true, summary: 'ok' }),
+      destroy: () => {},
+    };
+    coordinator = newCoord(im, wm, reasoner, runner, { mindInstanceId: MIND_ID });
+    const { goalId } = await coordinator.submitGoal('p', { autoDispatch: false });
+    coordinator.approvePlan(null);
+    const taskId = coordinator.getActiveGoals()[0].plan.tasks[0].id;
+    for (let i = 0; i <= coordinator.MAX_REPLANS; i++) {
+      coordinator._failTask(taskId, 'stuck');
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    const ok = coordinator.userAbandonEscalatedGoal(null);
+    assert.equal(ok, true);
+    const goal = coordinator.getActiveGoals().find((g) => g.id === goalId);
+    assert.equal(goal.status, 'failed');
   });
 });

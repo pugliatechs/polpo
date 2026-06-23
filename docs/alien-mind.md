@@ -64,16 +64,93 @@ Higher-level callers (gateway, mind) bring only their own *policy*: rate limits 
 
 A mind-spawned arm is tagged `source: 'mind:<goalId-tail>'` on the instance, distinguishing it from gateway-spawned arms (`source: 'gateway:<client>'`) and user-started ones (`source: null`). The gateway's session-discovery endpoints accept `source=mind` as a filter.
 
+## Interactive Mode (default for chat-submitted goals)
+
+Goals submitted via the mind's chat are **interactive by default**. The mind plans, posts a plan preview, and **waits for you to approve** before dispatching arms. If an arm gets stuck after the replan budget is exhausted (`MAX_REPLANS = 2`), the mind **escalates to chat** instead of permanently abandoning the task — you decide whether to retry with guidance, skip the task, or abandon the whole goal.
+
+Gateway-submitted goals (`POST /v1/goals`) always run **auto-dispatch** (legacy fire-and-forget) because there's no human in the loop on the API. To submit a chat goal in the autonomous mode, prefix with `/auto ` or set `POLPO_MIND_AUTO_DISPATCH=1`.
+
+### Approval round-trip
+
+```
+You:    Refactor the auth module and update its tests.
+
+Mind:   Plan ready (3 tasks):
+          1. Audit current auth module call sites
+          2. Rewrite auth module
+          3. Update tests against the new module
+
+        Reply:
+          /approve            — dispatch the plan as-is
+          /tweak <feedback>   — revise the plan with your feedback
+          /abandon            — cancel this goal
+
+You:    /tweak start with task 3 (regression tests first)
+
+Mind:   Revising plan with your feedback…
+        Plan ready (3 tasks):
+          1. Snapshot current test behaviour
+          2. Rewrite auth module
+          3. Update tests against the new module
+        …(reply with /approve, /tweak, or /abandon)
+
+You:    /approve
+
+Mind:   Plan approved. Dispatching 3 arms…
+```
+
+### Escalation round-trip
+
+```
+Mind:   🛑 Arm stuck on: Rewrite auth module
+
+        Reason: needs the legacy session library installed before refactoring
+
+        Last output (truncated):
+          I can't proceed because the existing module imports session-lib@2.x
+          which isn't installed. Please install session-lib@2.x or point me at
+          the new replacement.
+
+        Reply:
+          /retry <hint>   — re-run this arm with your guidance
+          /skip           — abandon this arm and cascade-fail its dependents
+          /abandon        — cancel the whole goal
+
+You:    /retry use the new oauth-session module at lib/oauth-session.ts instead
+
+Mind:   Retrying with your guidance: Rewrite auth module
+```
+
 ## Commands
 
 Type these in the mind's conversation:
 
 | Command | Description |
 |---------|-------------|
-| Any text | Submitted as a goal for planning and execution |
+| Any text | Submitted as a goal. Plans + waits for `/approve` (interactive mode). |
+| `/auto <text>` | Submit a goal in auto-dispatch mode — no approval gate, escalations fall through to permanent failure (legacy behaviour). |
+| `/approve [goalId]` | Approve the most-recent plan preview and dispatch arms. Optional explicit goal id when multiple plans are pending. |
+| `/tweak <feedback>` | Revise the awaiting-approval plan; reasoner re-runs with the original prompt + your feedback. |
+| `/retry [hint]` | Resume the most-recent escalated arm with optional user guidance. Resets the replan budget. |
+| `/skip` | Abandon the most-recent escalated arm and cascade-fail its dependents. |
+| `/abandon` | Cancel either the awaiting-approval goal or the goal owning the escalated arm. |
 | `/agents` | Show current state of all agents |
 | `/goals` | List active goals with task status |
-| `/cancel` | Cancel all active goals |
+| `/cancel` | Cancel all active goals (running, planning, or awaiting approval) |
+
+### Bypassing interactive mode
+
+For autonomous use cases (background CI, batch runs, etc.) where you don't want to approve every plan:
+
+```bash
+# Per-process default — every chat goal auto-dispatches without preview.
+POLPO_MIND_AUTO_DISPATCH=1 polpo server
+
+# Per-goal override — single goal bypasses both approval AND escalation.
+/auto Refactor the auth module
+```
+
+Auto-dispatch goals do NOT escalate on `MAX_REPLANS` — they fall through to permanent task failure, same as v1.2.1 and earlier.
 
 ## Task Dependencies
 

@@ -80,9 +80,19 @@ class Coordinator extends EventEmitter {
   /**
    * Submit a new goal for planning and execution.
    * @param {string} prompt - The user's goal
+   * @param {object} [opts]
+   * @param {boolean} [opts.autoDispatch=false] - When true, the mind
+   *   dispatches the plan as soon as the reasoner produces it (legacy
+   *   fire-and-forget behaviour). When false (default for dashboard
+   *   submissions), the mind posts the plan to chat and awaits an
+   *   `/approve`, `/tweak <feedback>`, or `/abandon` reply from the user
+   *   before dispatching. Gateway-originated goals MUST set
+   *   autoDispatch:true because there is no human in the loop on that
+   *   API surface.
    * @returns {Promise<{ goalId: string }>}
    */
-  async submitGoal(prompt) {
+  async submitGoal(prompt, opts) {
+    var autoDispatch = !!(opts && opts.autoDispatch);
     var goalId = 'goal-' + uuidv4().slice(0, 8);
     var goal = {
       id: goalId,
@@ -91,6 +101,7 @@ class Coordinator extends EventEmitter {
       plan: null,
       result: null,
       createdAt: Date.now(),
+      autoDispatch: autoDispatch,
     };
     this._goals.set(goalId, goal);
     this._persistGoalState(goal);
@@ -104,38 +115,29 @@ class Coordinator extends EventEmitter {
     this._emitGoalEvent(goalId, 'planning', { prompt: prompt });
 
     try {
-      var worldSummary = this.worldModel.getSummary();
-      // Inject relevant memories from past goals into the context
-      if (this.memory) {
-        var results = this.memory.search(prompt, 5);
-        if (results.length > 0) {
-          var memoryBlock = this.memory.formatForContext(results);
-          worldSummary = worldSummary + '\n\n' + memoryBlock;
-        }
-      }
-      var plan = await this.reasoner.plan(worldSummary, prompt);
+      var plan = await this._planFor(goal);
       goal.plan = this._buildTaskPlan(goalId, plan);
-      goal.status = 'running';
-      this._persistGoalState(goal);
 
-      this._report('Plan ready (' + goal.plan.tasks.length + ' task' +
-        (goal.plan.tasks.length !== 1 ? 's' : '') + '):\n' +
-        goal.plan.tasks.map(function (t, i) {
-          return (i + 1) + '. ' + t.description;
-        }).join('\n'));
-      this._emitGoalEvent(goalId, 'plan_ready', {
-        tasks: goal.plan.tasks.map(function (t) {
-          return {
-            id: t.id,
-            description: t.description,
-            agentType: t.agentType,
-            targetCwd: t.targetCwd,
-            dependsOn: (t.dependsOn || []).slice(),
-          };
-        }),
-      });
-
-      this._dispatchReadyTasks(goalId);
+      if (autoDispatch) {
+        goal.status = 'running';
+        this._persistGoalState(goal);
+        this._reportPlanReady(goal);
+        this._emitPlanReady(goal);
+        this._dispatchReadyTasks(goalId);
+      } else {
+        // Interactive mode: hold dispatch, post plan preview to chat
+        // and remember this goal as the active pending question. The
+        // next /approve, /tweak, or /abandon from the user lands here
+        // via approvePlan/tweakPlan/abandonAwaitingPlan.
+        goal.status = 'awaiting_approval';
+        this._persistGoalState(goal);
+        this._emitPlanReady(goal);
+        this._pendingApprovalGoalId = goalId;
+        this._reportPlanPreview(goal);
+        this._emitGoalEvent(goalId, 'awaiting_approval', {
+          tasks: goal.plan.tasks.map(this._serialiseTaskForEvent),
+        });
+      }
       return { goalId: goalId };
 
     } catch (err) {
@@ -146,6 +148,180 @@ class Coordinator extends EventEmitter {
       this._emitGoalEvent(goalId, 'error', { message: 'planning_failed', detail: err.message });
       return { goalId: goalId };
     }
+  }
+
+  /**
+   * Generate (or regenerate) a plan for a goal, injecting any tweak
+   * feedback the user supplied during the awaiting_approval round-trip
+   * so the reasoner can revise the plan instead of starting from scratch.
+   *
+   * @param {object} goal
+   * @param {string} [tweakFeedback]
+   * @returns {Promise<{tasks: Array}>}  raw reasoner output, not internal task records
+   */
+  async _planFor(goal, tweakFeedback) {
+    var worldSummary = this.worldModel.getSummary();
+    if (this.memory) {
+      var memHits = this.memory.search(goal.prompt, 5);
+      if (memHits.length > 0) {
+        worldSummary = worldSummary + '\n\n' + this.memory.formatForContext(memHits);
+      }
+    }
+    var prompt = goal.prompt;
+    if (tweakFeedback) {
+      // Append the user's feedback to the prompt as guidance. We do this
+      // rather than calling a separate replan() method so reasoners that
+      // only implement plan() still work; replan() is reserved for
+      // failure recovery on a specific task.
+      prompt = goal.prompt +
+        '\n\nFEEDBACK ON THE PREVIOUS PLAN (revise accordingly):\n' +
+        tweakFeedback;
+    }
+    return this.reasoner.plan(worldSummary, prompt);
+  }
+
+  /**
+   * User-facing chat: render the plan with explicit reply instructions.
+   * Only used in interactive mode (awaiting_approval).
+   */
+  _reportPlanPreview(goal) {
+    var lines = [
+      'Plan ready (' + goal.plan.tasks.length + ' task' +
+        (goal.plan.tasks.length !== 1 ? 's' : '') + '):',
+      '',
+    ];
+    goal.plan.tasks.forEach(function (t, i) {
+      lines.push('  ' + (i + 1) + '. ' + t.description);
+    });
+    lines.push('');
+    lines.push('Reply:');
+    lines.push('  /approve            — dispatch the plan as-is');
+    lines.push('  /tweak <feedback>   — revise the plan with your feedback');
+    lines.push('  /abandon            — cancel this goal');
+    this._report(lines.join('\n'));
+  }
+
+  /**
+   * Render the plan-ready message used in auto-dispatch mode (no
+   * approval gate). Backwards-compatible with v1.2.1 behaviour.
+   */
+  _reportPlanReady(goal) {
+    this._report('Plan ready (' + goal.plan.tasks.length + ' task' +
+      (goal.plan.tasks.length !== 1 ? 's' : '') + '):\n' +
+      goal.plan.tasks.map(function (t, i) {
+        return (i + 1) + '. ' + t.description;
+      }).join('\n'));
+  }
+
+  _emitPlanReady(goal) {
+    this._emitGoalEvent(goal.id, 'plan_ready', {
+      tasks: goal.plan.tasks.map(this._serialiseTaskForEvent),
+    });
+  }
+
+  _serialiseTaskForEvent(t) {
+    return {
+      id: t.id,
+      description: t.description,
+      agentType: t.agentType,
+      targetCwd: t.targetCwd,
+      dependsOn: (t.dependsOn || []).slice(),
+    };
+  }
+
+  // ---- Interactive-mode action handlers ----
+  //
+  // The chat layer (src/mind/index.js) parses slash commands and calls
+  // these. They are no-ops on goals whose status doesn't match the
+  // expected state, so a stray /approve after a goal already dispatched
+  // is silently ignored.
+
+  /**
+   * Accept the proposed plan and start dispatching arms.
+   * @returns {boolean} true if a plan was approved
+   */
+  approvePlan(goalId) {
+    var resolvedId = this._resolveGoalForApproval(goalId);
+    if (!resolvedId) return false;
+    var goal = this._goals.get(resolvedId);
+    if (!goal || goal.status !== 'awaiting_approval') return false;
+    goal.status = 'running';
+    this._persistGoalState(goal);
+    if (this._pendingApprovalGoalId === resolvedId) {
+      this._pendingApprovalGoalId = null;
+    }
+    this._report('Plan approved. Dispatching ' + goal.plan.tasks.length + ' arm' +
+      (goal.plan.tasks.length !== 1 ? 's' : '') + '…');
+    this._emitGoalEvent(resolvedId, 'plan_approved', {});
+    this._dispatchReadyTasks(resolvedId);
+    return true;
+  }
+
+  /**
+   * Re-run the planner with the user's feedback layered on top of the
+   * original goal prompt. Stays in awaiting_approval state.
+   */
+  async tweakPlan(goalId, feedback) {
+    var resolvedId = this._resolveGoalForApproval(goalId);
+    if (!resolvedId) return false;
+    var goal = this._goals.get(resolvedId);
+    if (!goal || goal.status !== 'awaiting_approval') return false;
+    if (typeof feedback !== 'string' || !feedback.trim()) {
+      this._report('Provide feedback after /tweak, e.g. `/tweak focus only on auth tests`.');
+      return false;
+    }
+    this._report('Revising plan with your feedback…');
+    this._emitGoalEvent(resolvedId, 'plan_tweak', { feedback: feedback });
+    try {
+      var revised = await this._planFor(goal, feedback);
+      goal.plan = this._buildTaskPlan(resolvedId, revised);
+      this._persistGoalState(goal);
+      this._emitPlanReady(goal);
+      this._reportPlanPreview(goal);
+      return true;
+    } catch (err) {
+      this._report('Re-planning failed: ' + err.message + ' (the previous plan still stands; reply /approve or /abandon)');
+      return false;
+    }
+  }
+
+  /**
+   * Cancel a goal that's still awaiting approval (never dispatched).
+   * For an already-running goal use cancelGoal().
+   */
+  abandonAwaitingPlan(goalId) {
+    var resolvedId = this._resolveGoalForApproval(goalId);
+    if (!resolvedId) return false;
+    var goal = this._goals.get(resolvedId);
+    if (!goal || goal.status !== 'awaiting_approval') return false;
+    goal.status = 'failed';
+    goal.result = 'Abandoned before dispatch';
+    this._persistGoalState(goal);
+    if (this._pendingApprovalGoalId === resolvedId) {
+      this._pendingApprovalGoalId = null;
+    }
+    this._report('Goal abandoned: ' + goal.prompt);
+    this._emitGoalEvent(resolvedId, 'cancelled', { reason: 'abandoned_at_approval' });
+    return true;
+  }
+
+  /**
+   * If the user types /approve without an explicit goalId, resolve to
+   * the most recently-staged awaiting_approval goal. Returns null if
+   * nothing is waiting.
+   */
+  _resolveGoalForApproval(goalId) {
+    // Strict-on-explicit-id: if the user typed `/approve goal-abc1234`
+    // and that id doesn't exist, return null instead of silently
+    // falling back to the pending one. The fallback is only for the
+    // bare `/approve` case where the user didn't specify an id.
+    if (goalId) {
+      return this._goals.has(goalId) ? goalId : null;
+    }
+    if (this._pendingApprovalGoalId && this._goals.has(this._pendingApprovalGoalId)) {
+      return this._pendingApprovalGoalId;
+    }
+    return null;
   }
 
   /**
@@ -462,14 +638,57 @@ class Coordinator extends EventEmitter {
     this._checkGoalCompletion(task.goalId);
     this._dispatchReadyTasks(task.goalId);
 
-    // Evaluate asynchronously (non-blocking, updates result after the fact)
+    // Evaluate asynchronously. Until v1.2.2 the evaluation result was
+    // recorded on the task but never acted on, which meant an arm that
+    // went idle with a refusal ("I can't do this because X") was
+    // treated as a successful completion and its dependents proceeded
+    // with the refusal text inlined as their predecessor context.
+    //
+    // Now: if the evaluation comes back failed AND no dependent has
+    // started yet, route through the normal failure path so the
+    // reasoner gets a chance to replan or — in interactive mode — the
+    // user gets a chance to retry/skip/abandon.
+    //
+    // The "no dependent has started yet" guard is intentional. If a
+    // dependent is already running (it consumed the refusal text and
+    // chose to push forward), retroactively failing this task would
+    // require cancelling the dependent and unwinding state, which is
+    // bigger surgery than v1.2.2 is willing to do. v1.3 may move
+    // evaluate to the synchronous critical path and gate dependents
+    // on it.
     var self = this;
     var conversation = this.worldModel.getAgentConversation(task.agentId, 10);
     if (conversation.length > 0) {
       this.reasoner.evaluate(task.description, conversation).then(function (evaluation) {
         task.result = evaluation;
+        if (evaluation && evaluation.success === false && self._noDependentsStarted(task)) {
+          self._report('Evaluation failed for ' + task.description + ': ' + (evaluation.summary || 'no summary'));
+          // Re-fail through the normal path. _failTask sees status not
+          // === 'running' (it's 'completed' now) so we explicitly
+          // re-set it to running so the failure handler accepts.
+          task.status = 'running';
+          self._failTask(task.id, 'evaluation: ' + (evaluation.summary || 'task did not produce a usable result'));
+        }
       }).catch(function () {});
     }
+  }
+
+  /**
+   * Returns true when no task that depends on `task` has yet started
+   * running. Used by the evaluate-failure path to decide whether
+   * re-failing the task is safe.
+   */
+  _noDependentsStarted(task) {
+    var goal = this._goals.get(task.goalId);
+    if (!goal || !goal.plan) return true;
+    var tasks = goal.plan.tasks;
+    for (var i = 0; i < tasks.length; i++) {
+      var t = tasks[i];
+      if (t.dependsOn && t.dependsOn.indexOf(task.index) !== -1) {
+        if (t.status !== 'pending') return false;
+      }
+    }
+    return true;
   }
 
   /**
@@ -494,14 +713,195 @@ class Coordinator extends EventEmitter {
       return;
     }
 
-    // Out of retries: mark task as failed
+    // Out of retries. In auto-dispatch mode (gateway, autonomous CI
+    // workers) we still terminate the task here so the goal can
+    // finish without a human in the loop. In interactive mode
+    // (dashboard chat), we escalate to the user instead — they can
+    // /retry <hint>, /skip, or /abandon the task.
+    var goal = this._goals.get(task.goalId);
+    if (goal && goal.autoDispatch) {
+      task.status = 'failed';
+      task.completedAt = Date.now();
+      task.result = { success: false, summary: reason };
+      this._report('Failed (no more retries): ' + task.description + '\n  ' + reason);
+      this._emitGoalEvent(task.goalId, 'task_failed', { taskId: task.id, reason: reason, terminal: true });
+      this._checkGoalCompletion(task.goalId);
+      return;
+    }
+
+    this._escalateToUser(task, reason, partialOutput);
+  }
+
+  /**
+   * Pause a task that the mind couldn't recover from and ask the user
+   * what to do. Posts a chat message with /retry, /skip, /abandon
+   * instructions and records this task as the active pending question
+   * so a bare `/retry hint` (no taskId) lands on it.
+   *
+   * The task stays in 'awaiting_user_input' status and the goal does
+   * NOT terminate. _checkGoalCompletion treats awaiting_user_input as
+   * non-terminal so the goal sits in 'running' until the user resolves.
+   */
+  _escalateToUser(task, reason, partialOutput) {
+    task.status = 'awaiting_user_input';
+    task.completedAt = null;
+    task.result = { success: false, summary: reason };
+    task.escalationReason = reason;
+    task.escalationPartialOutput = (partialOutput || '').slice(-2000);
+    this._pendingEscalatedTaskId = task.id;
+
+    var lines = [
+      '🛑 Arm stuck on: ' + task.description,
+      '',
+      'Reason: ' + reason,
+    ];
+    if (task.escalationPartialOutput) {
+      lines.push('');
+      lines.push('Last output (truncated):');
+      lines.push('  ' + task.escalationPartialOutput.split('\n').slice(-6).join('\n  '));
+    }
+    lines.push('');
+    lines.push('Reply:');
+    lines.push('  /retry <hint>   — re-run this arm with your guidance');
+    lines.push('  /skip           — abandon this arm and cascade-fail its dependents');
+    lines.push('  /abandon        — cancel the whole goal');
+    this._report(lines.join('\n'));
+
+    this._emitGoalEvent(task.goalId, 'task_escalated', {
+      taskId: task.id,
+      reason: reason,
+      replanCount: task.replanCount,
+    });
+  }
+
+  // ---- Interactive task-escalation handlers ----
+
+  /**
+   * User said /retry with optional hint. Resets the task and re-runs
+   * it through the replan flow, feeding the hint to the reasoner as
+   * additional context. Resets replanCount so the user's guidance
+   * doesn't get penalised by the old failure budget.
+   */
+  async userRetryEscalatedTask(taskId, hint) {
+    var resolvedId = this._resolveEscalatedTaskId(taskId);
+    if (!resolvedId) return false;
+    var task = this._findTask(resolvedId);
+    if (!task || task.status !== 'awaiting_user_input') return false;
+    var reason = task.escalationReason || 'previous attempt did not produce a usable result';
+    var partialOutput = task.escalationPartialOutput || '';
+
+    // Reset budget for the user-guided round so we don't immediately
+    // fall back into escalation if the reasoner produces another
+    // imperfect plan.
+    task.replanCount = 0;
+    task.status = 'running';        // _attemptReplan asserts non-terminal
+    task.escalationReason = null;
+    task.escalationPartialOutput = null;
+    if (this._pendingEscalatedTaskId === resolvedId) {
+      this._pendingEscalatedTaskId = null;
+    }
+    this._report('Retrying with your guidance: ' + task.description);
+    this._emitGoalEvent(task.goalId, 'task_retry_requested', {
+      taskId: task.id,
+      hint: hint || null,
+    });
+    // Bake the hint into the failure-reason payload so the reasoner
+    // sees it during replan.
+    var augmentedReason = hint
+      ? reason + '\n\nUSER GUIDANCE: ' + hint
+      : reason;
+    this._attemptReplan(task, augmentedReason, partialOutput);
+    return true;
+  }
+
+  /**
+   * User said /skip. Mark the task failed and cascade-fail its
+   * transitive dependents so the goal can converge.
+   */
+  userSkipEscalatedTask(taskId) {
+    var resolvedId = this._resolveEscalatedTaskId(taskId);
+    if (!resolvedId) return false;
+    var task = this._findTask(resolvedId);
+    if (!task || task.status !== 'awaiting_user_input') return false;
+    if (this._pendingEscalatedTaskId === resolvedId) {
+      this._pendingEscalatedTaskId = null;
+    }
     task.status = 'failed';
     task.completedAt = Date.now();
-    task.result = { success: false, summary: reason };
-
-    this._report('Failed (no more retries): ' + task.description + '\n  ' + reason);
-    this._emitGoalEvent(task.goalId, 'task_failed', { taskId: task.id, reason: reason, terminal: true });
+    task.result = { success: false, summary: 'Skipped by user' };
+    this._report('Skipped: ' + task.description);
+    this._emitGoalEvent(task.goalId, 'task_failed', {
+      taskId: task.id, reason: 'skipped_by_user', terminal: true, skipped: true,
+    });
+    this._cascadeFailDependents(task);
     this._checkGoalCompletion(task.goalId);
+    return true;
+  }
+
+  /**
+   * User said /abandon. Cancel the entire goal — same path as the
+   * existing cancelGoal() (which handles running arms via runner.cancel)
+   * but with a different audit message.
+   */
+  userAbandonEscalatedGoal(taskId) {
+    var resolvedId = this._resolveEscalatedTaskId(taskId);
+    if (!resolvedId) return false;
+    var task = this._findTask(resolvedId);
+    if (!task) return false;
+    if (this._pendingEscalatedTaskId === resolvedId) {
+      this._pendingEscalatedTaskId = null;
+    }
+    this.cancelGoal(task.goalId);
+    return true;
+  }
+
+  /**
+   * Walk the dependency graph and mark every task that transitively
+   * depends on the skipped task as failed. Without this, dependents
+   * would sit in 'pending' forever (waiting for a task that will
+   * never complete) and _checkGoalCompletion would never converge.
+   */
+  _cascadeFailDependents(skippedTask) {
+    var goal = this._goals.get(skippedTask.goalId);
+    if (!goal || !goal.plan) return;
+    var tasks = goal.plan.tasks;
+    var blockedIndices = new Set();
+    blockedIndices.add(skippedTask.index);
+
+    // Iterate to fixed point — a dependent of a dependent is also
+    // blocked. Plans are small enough (<50 tasks typically) for this
+    // to be cheap.
+    var changed = true;
+    while (changed) {
+      changed = false;
+      for (var i = 0; i < tasks.length; i++) {
+        var t = tasks[i];
+        if (blockedIndices.has(t.index)) continue;
+        for (var d = 0; d < t.dependsOn.length; d++) {
+          if (blockedIndices.has(t.dependsOn[d])) {
+            blockedIndices.add(t.index);
+            if (t.status === 'pending' || t.status === 'running') {
+              t.status = 'failed';
+              t.completedAt = Date.now();
+              t.result = { success: false, summary: 'Cascade-failed: depends on a skipped task' };
+              this._emitGoalEvent(t.goalId, 'task_failed', {
+                taskId: t.id, reason: 'cascade_skipped', terminal: true,
+              });
+            }
+            changed = true;
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  _resolveEscalatedTaskId(taskId) {
+    if (taskId && this._findTask(taskId)) return taskId;
+    if (this._pendingEscalatedTaskId && this._findTask(this._pendingEscalatedTaskId)) {
+      return this._pendingEscalatedTaskId;
+    }
+    return null;
   }
 
   /**
@@ -655,7 +1055,7 @@ class Coordinator extends EventEmitter {
     var anyFailed = false;
 
     for (var i = 0; i < tasks.length; i++) {
-      if (tasks[i].status === 'pending' || tasks[i].status === 'running' || tasks[i].status === 'assigned' || tasks[i].status === 'acquiring' || tasks[i].status === 'replanning') {
+      if (tasks[i].status === 'pending' || tasks[i].status === 'running' || tasks[i].status === 'assigned' || tasks[i].status === 'acquiring' || tasks[i].status === 'replanning' || tasks[i].status === 'awaiting_user_input') {
         allDone = false;
       }
       if (tasks[i].status === 'failed') {
