@@ -2511,6 +2511,59 @@ h5.plan-h { font-size: 13px; }
   outline: 2px solid rgba(255, 200, 0, 0.9);
 }
 
+/* ---- Mobile setup QR cards ----
+   Shown only on localhost dashboards when the host runs with
+   --trust-localhost. Renders the TOTP setup QR (paranoid mode) and
+   the tunnel URL QR (when a tunnel is active) so the user can scan
+   both from their phone without having to scroll back through screen
+   to find the QR printed at startup. */
+.qr-codes-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 16px 12px;
+}
+.qr-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.qr-card-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  align-self: flex-start;
+}
+.qr-card-svg {
+  background: #fff;
+  padding: 8px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  max-width: 240px;
+}
+.qr-card-svg svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-width: 220px;
+}
+.qr-card-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+  line-height: 1.35;
+}
+
 /* ---- Builder Profile (Paxel-style) ---- */
 .profile-card {
   padding: 0 16px 12px;

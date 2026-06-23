@@ -15,6 +15,8 @@ const {
 const convSearch = require('./conversation-search');
 const { analyzeProfile } = require('./profile-analyzer');
 const { makeLogger } = require('../util/logger');
+const { isLocalhost, buildTotpUri } = require('./auth');
+const qrcode = require('qrcode');
 
 const log = makeLogger('api');
 const skillsLog = makeLogger('api:skills');
@@ -104,7 +106,7 @@ function parseSkillsSearchOutput(stdout) {
 // is unchanged — see src/server/normalize-timestamp.js.
 const { normalizeTimestamp } = require('./normalize-timestamp');
 
-function createApiRouter(instanceManager, getAuthState, pushManager, outboxManager) {
+function createApiRouter(instanceManager, getAuthState, pushManager, outboxManager, getTunnelInfo) {
   const router = express.Router();
 
   // Track spawned wrapped agents so we can clean them up
@@ -165,6 +167,80 @@ function createApiRouter(instanceManager, getAuthState, pushManager, outboxManag
     }
     res.set('X-Content-Type-Options', 'nosniff');
     res.sendFile(filePath);
+  });
+
+  // ---- Mobile setup QR codes (localhost-only, trust-localhost-gated) ----
+  //
+  // When an operator runs polpo with `--trust-localhost`, they're saying
+  // "the local machine is trusted; let me open the dashboard at
+  // http://localhost:7890 without auth." Combined with `--auth paranoid`
+  // (TOTP) and/or a tunnel, the dashboard ends up being the only place
+  // where the two QR codes the user needs to scan from their phone
+  // (authenticator app + phone-browser tunnel URL) can be re-rendered
+  // on demand. Otherwise the user only sees them once at startup and
+  // loses them when terminal scrollback (e.g. `screen`) eats the output.
+  //
+  // The endpoint returns 200 with `{available, qrs: []}` always; the
+  // dashboard renders the panel only when qrs is non-empty.
+  //
+  // Why gated by trust-localhost AND localhost-only request:
+  //   - The QR for the tunnel contains the dashboard token in the URL.
+  //     Anyone who reads this response holds the same secret as anyone
+  //     watching the terminal — i.e. the operator themselves.
+  //   - Restricting to trust-localhost ensures the operator has
+  //     explicitly opted into "this machine is trusted" before we
+  //     surface the QR.
+  //   - Restricting to localhost-only requests prevents a remote
+  //     caller with the token from also receiving the QR (a small
+  //     defence-in-depth measure).
+  router.get('/qr-codes', async (req, res) => {
+    const authState = typeof getAuthState === 'function' ? getAuthState() : null;
+    const localhostOk = isLocalhost(req);
+    const trustOk = !!(authState && authState.trustLocalhost);
+    if (!localhostOk || !trustOk) {
+      return res.json({ available: false, qrs: [] });
+    }
+
+    const qrs = [];
+
+    // TOTP / authenticator QR (paranoid mode only)
+    if (authState.totpSecret && authState.mfaEnabled) {
+      const uri = buildTotpUri(authState.totpSecret, 'Polpo');
+      try {
+        const svg = await qrcode.toString(uri, { type: 'svg', margin: 1, width: 240 });
+        qrs.push({
+          kind: 'totp',
+          label: 'Authenticator',
+          hint: 'Scan with Google Authenticator, Authy, or similar.',
+          svg: svg,
+        });
+      } catch (err) {
+        log.error('TOTP QR render failed:', err && err.message);
+      }
+    }
+
+    // Tunnel QR (any tunnel provider, when active). The URL carries the
+    // dashboard token in a query string so the phone browser auto-auths.
+    const tunnelInfo = typeof getTunnelInfo === 'function' ? getTunnelInfo() : null;
+    if (tunnelInfo && tunnelInfo.url) {
+      const token = authState.token || null;
+      const url = token ? `${tunnelInfo.url}?token=${encodeURIComponent(token)}` : tunnelInfo.url;
+      try {
+        const svg = await qrcode.toString(url, { type: 'svg', margin: 1, width: 240 });
+        qrs.push({
+          kind: 'tunnel',
+          label: 'Tunnel',
+          hint: 'Open this on your phone to use polpo remotely.',
+          provider: tunnelInfo.provider || null,
+          svg: svg,
+          url: url, // localhost-only response — safe to include for "tap to copy"
+        });
+      } catch (err) {
+        log.error('Tunnel QR render failed:', err && err.message);
+      }
+    }
+
+    res.json({ available: qrs.length > 0, qrs: qrs });
   });
 
   // List discovered Claude Code sessions

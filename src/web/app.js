@@ -4405,6 +4405,58 @@
     planning: 'Planning',
   };
 
+  /**
+   * Mobile setup QR codes — only populated when the host runs polpo
+   * with `--trust-localhost` AND the dashboard is being accessed from
+   * the same machine. The endpoint quietly returns
+   * `{available: false, qrs: []}` in any other case, so this fetch is
+   * always safe to call (no auth banner flashes, no 401, etc).
+   */
+  function loadQrCodes() {
+    authFetch('/api/qr-codes')
+      .then(function (r) {
+        if (!r.ok) throw new Error('qr_codes_failed');
+        return r.json();
+      })
+      .then(function (data) {
+        if (!data || !data.available || !data.qrs || data.qrs.length === 0) return;
+        renderQrCodes(data.qrs);
+      })
+      .catch(function () {
+        // Endpoint may not exist on older hosts; stay silent.
+      });
+  }
+
+  function renderQrCodes(qrs) {
+    var section = document.getElementById('qr-codes-section');
+    var list = document.getElementById('qr-codes-list');
+    if (!section || !list) return;
+    list.replaceChildren();
+    qrs.forEach(function (qr) {
+      var card = document.createElement('div');
+      card.className = 'qr-card qr-card-' + qr.kind;
+      var head = document.createElement('div');
+      head.className = 'qr-card-label';
+      head.textContent = qr.label;
+      card.appendChild(head);
+      // The server's SVG is trusted because it comes from our own
+      // qrcode renderer, fed a server-controlled URI. We still insert
+      // it via a sandboxed container — the SVG carries no scripts.
+      var svgBox = document.createElement('div');
+      svgBox.className = 'qr-card-svg';
+      svgBox.innerHTML = qr.svg;
+      card.appendChild(svgBox);
+      if (qr.hint) {
+        var hint = document.createElement('div');
+        hint.className = 'qr-card-hint';
+        hint.textContent = qr.hint;
+        card.appendChild(hint);
+      }
+      list.appendChild(card);
+    });
+    section.classList.remove('hidden');
+  }
+
   function loadProfile() {
     authFetch('/api/profile?days=90&agent=all')
       .then(function (r) {
@@ -4882,6 +4934,7 @@
   loadSessions();
   loadCosts();
   loadProfile();
+  loadQrCodes();
 
   // Fetch version from health endpoint
   fetch('/health').then(function (r) { return r.json(); }).then(function (data) {

@@ -100,6 +100,20 @@
       <div id="cost-chart" class="cost-chart"></div>
     </div>
 
+    <!--
+      Mobile-setup QR codes. Populated by GET /api/qr-codes which only
+      returns content when the host runs polpo with --trust-localhost
+      AND the dashboard is being accessed from the same machine. So in
+      every other situation (LAN browser, tunneled phone, no trust mode)
+      this section stays hidden.
+    -->
+    <div id="qr-codes-section" class="sessions-section hidden">
+      <div class="section-header">
+        <h3>Mobile setup</h3>
+      </div>
+      <div id="qr-codes-list" class="qr-codes-list"></div>
+    </div>
+
     <!-- Builder Profile (Paxel-style, computed locally) -->
     <div id="profile-section" class="sessions-section hidden">
       <div class="section-header">

@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node bin/polpo.js server",
     "dev": "node bin/polpo.js server --verbose",
-    "test": "node --test --test-concurrency=1 test/logger.test.js test/session-outbox.test.js test/auth.test.js test/instances.test.js test/tunnel.test.js test/sessions.test.js test/jsonl-watcher.test.js test/session-scanner.test.js test/agent-factory.test.js test/one-shot-runner.test.js test/codex-agent.test.js test/codex-scanner.test.js test/opencode-agent.test.js test/pi-agent.test.js test/pi-scanner.test.js test/skills-api.test.js test/goose-agent.test.js test/mind-world-model.test.js test/mind-coordinator.test.js test/mind-watcher.test.js test/mind-memory.test.js test/mind-goal-store.test.js test/gateway-auth.test.js test/gateway-tasks.test.js test/gateway-routes.test.js test/gateway-uploads.test.js test/gateway-artifacts.test.js test/gateway-files.test.js test/conversation-search.test.js test/gateway-sessions.test.js test/gateway-goals.test.js test/profile-analyzer.test.js test/gateway-profile.test.js"
+    "test": "node --test --test-concurrency=1 test/logger.test.js test/session-outbox.test.js test/auth.test.js test/instances.test.js test/tunnel.test.js test/sessions.test.js test/jsonl-watcher.test.js test/session-scanner.test.js test/agent-factory.test.js test/one-shot-runner.test.js test/codex-agent.test.js test/codex-scanner.test.js test/opencode-agent.test.js test/pi-agent.test.js test/pi-scanner.test.js test/skills-api.test.js test/api-qr-codes.test.js test/goose-agent.test.js test/mind-world-model.test.js test/mind-coordinator.test.js test/mind-watcher.test.js test/mind-memory.test.js test/mind-goal-store.test.js test/gateway-auth.test.js test/gateway-tasks.test.js test/gateway-routes.test.js test/gateway-uploads.test.js test/gateway-artifacts.test.js test/gateway-files.test.js test/conversation-search.test.js test/gateway-sessions.test.js test/gateway-goals.test.js test/profile-analyzer.test.js test/gateway-profile.test.js"
   },
   "keywords": [
     "claude-code",
@@ -25,6 +25,7 @@
   "dependencies": {
     "express": "^4.18.2",
     "localtunnel": "^2.0.2",
+    "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0",
     "uuid": "^9.0.0",
     "web-push": "^3.6.7",

@@ -286,6 +286,18 @@ async function runServer() {
         }
       }
       displayQR(tunnelUrl);
+
+      // Tell the server about the tunnel so /api/qr-codes can re-render
+      // the QR on demand from the dashboard (useful when running under
+      // screen/tmux and the startup QR has scrolled off the terminal).
+      // We store the BARE url (no token) here — the api route stitches
+      // the token in at request time from the current authState.
+      if (typeof server.setTunnelInfo === 'function') {
+        server.setTunnelInfo({
+          url: tunnel.url,
+          provider: flags.tunnel || 'auto',
+        });
+      }
     } catch (err) {
       console.error(`  ⚠️  Tunnel failed: ${err.message}`);
       console.log('  Server is still running on LAN.\n');

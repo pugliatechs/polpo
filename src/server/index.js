@@ -241,13 +241,21 @@ function createServer(options = {}) {
   });
 
   // API routes
-  app.use('/api', createApiRouter(instanceManager, getAuthState, pushManager, outboxManager));
+  // getTunnelInfo is a closure-friendly bridge — the api router can be
+  // built before bin/polpo.js has wired the tunnel up; the closure
+  // resolves the latest value at request time.
+  app.use('/api', createApiRouter(instanceManager, getAuthState, pushManager, outboxManager, () => tunnelInfo));
 
   // Alien Mind handle — declared up here so the gateway router (mounted
   // below) can wire /v1/goals to its coordinator. The mind itself is
   // created inside either the gateway block or the legacy POLPO_MIND
   // block further down, whichever runs first.
   let mind = null;
+  // Active tunnel info, set via setTunnelInfo() once bin/polpo.js has
+  // brought up cloudflared/localtunnel/ngrok. Never persisted; cleared
+  // on stop(). Read by the /api/tunnel route below for QR re-render
+  // from the dashboard UI.
+  let tunnelInfo = null;
 
   // Optional: programmatic gateway (/v1/*) for external callers
   let gatewayState = null;
@@ -380,6 +388,24 @@ function createServer(options = {}) {
       if (mode !== undefined) authState.mode = mode;
       if (totpSecret !== undefined) authState.totpSecret = totpSecret;
       if (trustLocalhost !== undefined) authState.trustLocalhost = trustLocalhost;
+    },
+    /**
+     * Register the active tunnel URL (called by bin/polpo.js once the
+     * cloudflared/localtunnel/ngrok handshake completes). Held only in
+     * process memory — never written to disk. `GET /api/tunnel` returns
+     * this so the dashboard UI can re-render the QR on demand.
+     *
+     * Pass `null` to clear (e.g. tunnel torn down).
+     */
+    setTunnelInfo(info) {
+      tunnelInfo = info ? {
+        url: String(info.url),
+        provider: info.provider ? String(info.provider) : null,
+        startedAt: info.startedAt || Date.now(),
+      } : null;
+    },
+    getTunnelInfo() {
+      return tunnelInfo ? Object.assign({}, tunnelInfo) : null;
     },
     get authState() {
       return authState;
