@@ -8,7 +8,18 @@
  *   - Approval requests waiting too long
  *
  * Reports findings to the mind's conversation for the user to see.
+ *
+ * Scope: this only alerts on MIND-OWNED arms (instances whose source
+ * tag starts with `mind:`). User-started sessions and gateway-spawned
+ * tasks have their own UX paths (per-instance approval modals in the
+ * dashboard for users, fail-closed semantics in the gateway) and
+ * shouldn't pollute the mind's chat with notifications the user
+ * doesn't expect.
  */
+
+function isMindOwned(agent) {
+  return !!(agent && typeof agent.source === 'string' && agent.source.indexOf('mind:') === 0);
+}
 
 const { makeLogger } = require('../util/logger');
 
@@ -92,6 +103,9 @@ class Watcher {
     for (var i = 0; i < snapshot.agents.length; i++) {
       var agent = snapshot.agents[i];
       if (agent.status !== 'busy') continue;
+      // Only nag the user about arms the mind itself spawned.
+      // User-started sessions are the user's own concern.
+      if (!isMindOwned(agent)) continue;
 
       var inst = this.instanceManager.get(agent.id);
       if (!inst || !inst.lastActivity) continue;
@@ -135,6 +149,13 @@ class Watcher {
     for (var i = 0; i < snapshot.agents.length; i++) {
       var agent = snapshot.agents[i];
       if (agent.status !== 'waiting' || !agent.pendingApproval) continue;
+      // Only alert on mind-owned arms. The dashboard already shows
+      // the user a per-instance approval modal for their own sessions
+      // and the gateway fails closed for its own tasks, so the mind's
+      // chat alerting on them is noise (and confusing — the user
+      // sees notifications about agents they never asked the mind to
+      // touch).
+      if (!isMindOwned(agent)) continue;
       if (this._alerted.has('approval:' + agent.id)) continue;
 
       this._suggest(

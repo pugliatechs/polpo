@@ -17,10 +17,20 @@ function createMockIM() {
       agentType: info.agentType || 'claude', canReceivePrompts: true,
       lastActivity: Date.now(), pendingApproval: null,
       conversation: [], conversationLength: 0,
+      // Origin tag — null by default so unset registrations behave
+      // like a user-started session; tests that want mind-owned arms
+      // pass `source: 'mind:test'` explicitly.
+      source: info.source != null ? info.source : null,
     };
     instances.set(id, inst);
     em.emit('instance:registered', inst);
     return inst;
+  };
+  // Helper for tests that want the watcher to actually fire — it only
+  // alerts on mind-owned arms now (the source tag scoping). Use this
+  // in place of `em.register({...})` to stamp source: 'mind:test'.
+  em.registerMindArm = function (info) {
+    return em.register(Object.assign({}, info, { source: 'mind:test' }));
   };
   em.get = function (id) { return instances.get(id) || null; };
   em.getAll = function () {
@@ -68,7 +78,7 @@ describe('Watcher', () => {
     watcher = new Watcher({ worldModel: wm, instanceManager: im, mindInstanceId: MIND_ID, policy: policy });
 
     // Register an agent and make it busy with old lastActivity
-    im.register({ id: 'a1', name: 'Slow Worker' });
+    im.registerMindArm({ id: 'a1', name: 'Slow Worker' });
     im.updateStatus('a1', 'busy');
     // Hack lastActivity to be old
     im.get('a1').lastActivity = Date.now() - 200;
@@ -86,7 +96,7 @@ describe('Watcher', () => {
     var policy = { stuckThresholdMs: 60000, watcherIntervalMs: 30000 };
     watcher = new Watcher({ worldModel: wm, instanceManager: im, mindInstanceId: MIND_ID, policy: policy });
 
-    im.register({ id: 'a1', name: 'Active Worker' });
+    im.registerMindArm({ id: 'a1', name: 'Active Worker' });
     im.updateStatus('a1', 'busy');
     // lastActivity is fresh (just set by updateStatus)
 
@@ -101,7 +111,7 @@ describe('Watcher', () => {
     var policy = { stuckThresholdMs: 100, watcherIntervalMs: 30000 };
     watcher = new Watcher({ worldModel: wm, instanceManager: im, mindInstanceId: MIND_ID, policy: policy });
 
-    im.register({ id: 'a1', name: 'Stuck' });
+    im.registerMindArm({ id: 'a1', name: 'Stuck' });
     im.updateStatus('a1', 'busy');
     im.get('a1').lastActivity = Date.now() - 200;
 
@@ -117,7 +127,7 @@ describe('Watcher', () => {
     var policy = { stuckThresholdMs: 100, watcherIntervalMs: 30000 };
     watcher = new Watcher({ worldModel: wm, instanceManager: im, mindInstanceId: MIND_ID, policy: policy });
 
-    im.register({ id: 'a1', name: 'Recovering' });
+    im.registerMindArm({ id: 'a1', name: 'Recovering' });
     im.updateStatus('a1', 'busy');
     im.get('a1').lastActivity = Date.now() - 200;
 
@@ -139,7 +149,7 @@ describe('Watcher', () => {
     var policy = { stuckThresholdMs: 60000, watcherIntervalMs: 30000 };
     watcher = new Watcher({ worldModel: wm, instanceManager: im, mindInstanceId: MIND_ID, policy: policy });
 
-    im.register({ id: 'a1', name: 'Waiting Agent' });
+    im.registerMindArm({ id: 'a1', name: 'Waiting Agent' });
     var inst = im.get('a1');
     inst.status = 'waiting';
     inst.pendingApproval = { tool: 'Bash', description: 'run tests' };
@@ -151,6 +161,60 @@ describe('Watcher', () => {
     assert.equal(alerts.length, 1);
     assert.ok(alerts[0].content.includes('Waiting Agent'));
     assert.ok(alerts[0].content.includes('approval'));
+  });
+
+  // v1.2.2: the watcher's "infiltration" fix — the watcher should
+  // only alert about arms the mind itself spawned (source: 'mind:...'),
+  // not user-started sessions (source: null) or gateway-spawned tasks
+  // (source: 'gateway:...'). Previously a user with a Claude/Codex
+  // session pending an approval modal would see noisy "X is waiting
+  // for approval" messages flooding the mind's chat even though the
+  // mind had never been asked to touch that session.
+  it('does NOT alert on stuck USER-started sessions (source: null)', () => {
+    var policy = { stuckThresholdMs: 100, watcherIntervalMs: 30000 };
+    watcher = new Watcher({ worldModel: wm, instanceManager: im, mindInstanceId: MIND_ID, policy: policy });
+
+    // Plain im.register — no source tag → user-started session
+    im.register({ id: 'a1', name: 'User session' });
+    im.updateStatus('a1', 'busy');
+    im.get('a1').lastActivity = Date.now() - 200;
+
+    watcher._check();
+
+    var conv = im.getConversation(MIND_ID, 10);
+    var alerts = conv.filter(function (m) { return m.source === 'mind-watcher'; });
+    assert.equal(alerts.length, 0);
+  });
+
+  it('does NOT alert on stuck GATEWAY-spawned tasks (source: gateway:...)', () => {
+    var policy = { stuckThresholdMs: 100, watcherIntervalMs: 30000 };
+    watcher = new Watcher({ worldModel: wm, instanceManager: im, mindInstanceId: MIND_ID, policy: policy });
+
+    im.register({ id: 'a1', name: 'Gateway task', source: 'gateway:openclaw' });
+    im.updateStatus('a1', 'busy');
+    im.get('a1').lastActivity = Date.now() - 200;
+
+    watcher._check();
+
+    var conv = im.getConversation(MIND_ID, 10);
+    var alerts = conv.filter(function (m) { return m.source === 'mind-watcher'; });
+    assert.equal(alerts.length, 0);
+  });
+
+  it('does NOT alert on user-started sessions waiting for approval', () => {
+    var policy = { stuckThresholdMs: 60000, watcherIntervalMs: 30000 };
+    watcher = new Watcher({ worldModel: wm, instanceManager: im, mindInstanceId: MIND_ID, policy: policy });
+
+    im.register({ id: 'a1', name: 'User session waiting' });
+    var inst = im.get('a1');
+    inst.status = 'waiting';
+    inst.pendingApproval = { tool: 'Bash', description: 'rm -rf /tmp/x' };
+
+    watcher._check();
+
+    var conv = im.getConversation(MIND_ID, 10);
+    var alerts = conv.filter(function (m) { return m.source === 'mind-watcher'; });
+    assert.equal(alerts.length, 0, 'mind chat must NOT light up for user sessions awaiting approval');
   });
 
   it('ignores mind instance in checks', () => {
@@ -266,7 +330,7 @@ describe('Watcher autonomous action on stuck agents', () => {
     var coordinator = createMockCoordinator();
     watcher = new Watcher({ worldModel: wm, instanceManager: im, mindInstanceId: MIND_ID, policy: policy, coordinator: coordinator });
 
-    im.register({ id: 'a1', name: 'Stuck' });
+    im.registerMindArm({ id: 'a1', name: 'Stuck' });
     coordinator.registerTask('a1');
     im.updateStatus('a1', 'busy');
     im.get('a1').lastActivity = Date.now() - 10000; // very stuck
@@ -281,7 +345,7 @@ describe('Watcher autonomous action on stuck agents', () => {
     var coordinator = createMockCoordinator();
     watcher = new Watcher({ worldModel: wm, instanceManager: im, mindInstanceId: MIND_ID, policy: policy, coordinator: coordinator });
 
-    im.register({ id: 'a1', name: 'Briefly stuck' });
+    im.registerMindArm({ id: 'a1', name: 'Briefly stuck' });
     coordinator.registerTask('a1');
     im.updateStatus('a1', 'busy');
     // Past the alert threshold (100ms) but well before action threshold (500ms)
@@ -299,7 +363,7 @@ describe('Watcher autonomous action on stuck agents', () => {
     var coordinator = createMockCoordinator();
     watcher = new Watcher({ worldModel: wm, instanceManager: im, mindInstanceId: MIND_ID, policy: policy, coordinator: coordinator });
 
-    im.register({ id: 'a1', name: 'Very stuck' });
+    im.registerMindArm({ id: 'a1', name: 'Very stuck' });
     coordinator.registerTask('a1');
     im.updateStatus('a1', 'busy');
     im.get('a1').lastActivity = Date.now() - 500; // > 100 * 2
@@ -321,7 +385,7 @@ describe('Watcher autonomous action on stuck agents', () => {
     var coordinator = createMockCoordinator();
     watcher = new Watcher({ worldModel: wm, instanceManager: im, mindInstanceId: MIND_ID, policy: policy, coordinator: coordinator });
 
-    im.register({ id: 'a1', name: 'Stubborn' });
+    im.registerMindArm({ id: 'a1', name: 'Stubborn' });
     coordinator.registerTask('a1');
     im.updateStatus('a1', 'busy');
     im.get('a1').lastActivity = Date.now() - 500;
@@ -333,24 +397,26 @@ describe('Watcher autonomous action on stuck agents', () => {
     assert.equal(coordinator._calls.length, 1, 'should only call coordinator once');
   });
 
-  it('skips agents without an active coordinator task', () => {
+  it('does NOT touch user-started sessions even when stuck past the action threshold', () => {
+    // v1.2.2: the watcher's source-tag scoping means it now skips
+    // user sessions entirely — neither alerting nor auto-acting.
+    // The coordinator should never even be called.
     var policy = { stuckThresholdMs: 100, watcherIntervalMs: 30000, autoActOnStuck: true, stuckActionMultiplier: 2 };
     var coordinator = createMockCoordinator();
     watcher = new Watcher({ worldModel: wm, instanceManager: im, mindInstanceId: MIND_ID, policy: policy, coordinator: coordinator });
 
-    // User session, not a mind task
+    // Plain im.register (no source tag) → user-started session
     im.register({ id: 'user-sess', name: 'User Session' });
     im.updateStatus('user-sess', 'busy');
     im.get('user-sess').lastActivity = Date.now() - 500;
 
     watcher._check();
 
-    // Coordinator was called but returned false (no task) — no action message emitted
-    assert.equal(coordinator._calls.length, 1);
+    assert.equal(coordinator._calls.length, 0, 'coordinator must not be asked to cancel a session the mind never spawned');
     var actionMsgs = im.getConversation(MIND_ID, 10).filter(function (m) {
       return m.source === 'mind-watcher' && m.content.indexOf('Auto-cancelled') !== -1;
     });
-    assert.equal(actionMsgs.length, 0, 'no action message for a task we did not own');
+    assert.equal(actionMsgs.length, 0, 'no action message for a session we did not own');
   });
 
   it('does not act without a coordinator reference', () => {
@@ -358,7 +424,7 @@ describe('Watcher autonomous action on stuck agents', () => {
     // No coordinator passed
     watcher = new Watcher({ worldModel: wm, instanceManager: im, mindInstanceId: MIND_ID, policy: policy });
 
-    im.register({ id: 'a1', name: 'Stuck no coord' });
+    im.registerMindArm({ id: 'a1', name: 'Stuck no coord' });
     im.updateStatus('a1', 'busy');
     im.get('a1').lastActivity = Date.now() - 500;
 
@@ -375,7 +441,7 @@ describe('Watcher autonomous action on stuck agents', () => {
     var coordinator = createMockCoordinator();
     watcher = new Watcher({ worldModel: wm, instanceManager: im, mindInstanceId: MIND_ID, policy: policy, coordinator: coordinator });
 
-    im.register({ id: 'a1', name: 'Round 1' });
+    im.registerMindArm({ id: 'a1', name: 'Round 1' });
     coordinator.registerTask('a1');
     im.updateStatus('a1', 'busy');
     im.get('a1').lastActivity = Date.now() - 500;

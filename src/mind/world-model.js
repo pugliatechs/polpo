@@ -129,6 +129,14 @@ class WorldModel extends EventEmitter {
           sessionId: inst.sessionId || null,
           pendingApproval: inst.pendingApproval ? true : false,
           conversationLength: inst.conversationLength || 0,
+          // Origin tag exposed here so the watcher (and any other
+          // mind-internal consumer of the world model) can tell mind-
+          // owned arms ('mind:<goalId-tail>') apart from user-started
+          // sessions (null) and gateway-spawned tasks
+          // ('gateway:<client>'). Without this the watcher posts
+          // stuck/approval alerts about every session the user is
+          // running, even ones the mind never touched.
+          source: inst.source || null,
         };
       });
 
