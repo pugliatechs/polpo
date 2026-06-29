@@ -244,17 +244,57 @@ function createApiRouter(instanceManager, getAuthState, pushManager, outboxManag
   });
 
   // List discovered Claude Code sessions
+  // Sessions catalogue with pagination + a short-lived in-memory cache.
+  //
+  // scanSessions walks every transcript file under the agent root dirs
+  // (~/.claude, ~/.codex, ...) — cost is roughly linear in total
+  // session count, regardless of the `limit` param. To make
+  // infinite-scroll in the dashboard cheap, the full scan is cached
+  // for SESSIONS_CACHE_TTL_MS (30s by default) per
+  // (days, source) tuple, and the route serves slices from the cached
+  // ordered list using offset+limit.
+  //
+  // The response shape grows backwards-compatibly: the body is still
+  // an array (legacy clients work unchanged); pagination metadata is
+  // returned via response headers so it's invisible to anyone who
+  // doesn't ask.
+  const SESSIONS_CACHE_TTL_MS = 30 * 1000;
+  const sessionsCache = new Map();    // key -> { at, list }
+
   router.get('/sessions', async (req, res) => {
     try {
       const maxDays = Math.min(parseInt(req.query.days) || 7, 365);
+      const offset = Math.max(parseInt(req.query.offset) || 0, 0);
       const limit = Math.min(parseInt(req.query.limit) || 50, 500);
       const source = req.query.source || 'all'; // 'claude' | 'codex' | 'gemini' | 'opencode' | 'pi' | 'all'
-      const sessions = await scanSessions({
-        maxAge: maxDays * 24 * 60 * 60 * 1000,
-        limit,
-        source,
-      });
-      res.json(sessions);
+
+      const cacheKey = maxDays + ':' + source;
+      let entry = sessionsCache.get(cacheKey);
+      if (!entry || (Date.now() - entry.at) > SESSIONS_CACHE_TTL_MS) {
+        // Pull a generous page so the cache covers several scroll-down
+        // requests before re-scanning. The scanner internally caps at
+        // its own bound, so this isn't unbounded.
+        const list = await scanSessions({
+          maxAge: maxDays * 24 * 60 * 60 * 1000,
+          limit: 1000,
+          source,
+        });
+        entry = { at: Date.now(), list };
+        sessionsCache.set(cacheKey, entry);
+        // Bound the cache so a fuzzing client can't pin unbounded memory
+        if (sessionsCache.size > 50) {
+          const oldest = [...sessionsCache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+          if (oldest) sessionsCache.delete(oldest[0]);
+        }
+      }
+
+      const total = entry.list.length;
+      const page = entry.list.slice(offset, offset + limit);
+      res.setHeader('X-Total-Count', String(total));
+      res.setHeader('X-Offset', String(offset));
+      res.setHeader('X-Limit', String(limit));
+      res.setHeader('X-Has-More', (offset + page.length < total) ? '1' : '0');
+      res.json(page);
     } catch (err) {
       log.error('error:', err);
       res.status(500).json({ error: 'Internal server error' });

@@ -3301,63 +3301,248 @@
   }
 
   // ---- Past Sessions ----
-  // -------- Recent-sessions infinite scroll --------
+  // -------- Recent-sessions: bounded sidebar + "View all" modal --------
   //
-  // The dashboard previously fetched a single page of 30 sessions and
-  // stopped. Active operators often have hundreds; the rest were
-  // invisible. This is a paginated loader: the first call replaces
-  // pastSessions; subsequent calls (triggered by scrolling near the
-  // bottom of the list) append. The server caches the full ordered
-  // catalogue for 30s and slices it via offset+limit, so the page
-  // walk is fast even when the user scrolls aggressively.
+  // Sidebar shows up to SESSIONS_SIDEBAR_LIMIT cards. Anything beyond
+  // that is hidden behind a "View all (N)" link that opens a dedicated
+  // modal with its own search, filter, and internal infinite scroll.
+  //
+  // Why this and not page-level infinite scroll: the sidebar has
+  // other stacked sections below the sessions list (Mobile setup,
+  // Builder Profile, Costs). Letting the sessions list grow without
+  // bound pushes those out of reach. The modal pattern keeps the
+  // sidebar a compact recency dashboard while giving the user a
+  // proper "browse all my work" view when they need it.
+  //
+  // The server-side cache + pagination on /api/sessions still apply;
+  // the modal consumes them.
+  var SESSIONS_SIDEBAR_LIMIT = 12;
   var SESSIONS_PAGE_SIZE = 30;
-  var pastSessionsHasMore = true;
-  var pastSessionsLoading = false;
-  var pastSessionsTotal = 0;
-  var _sessionsScrollObserver = null;
+  var pastSessionsTotal = 0;        // total catalogue size (from X-Total-Count)
+  var pastSessionsFirstPageHasMore = false;
 
-  function loadSessions() {
-    showLoading($sessionsList, 'Loading sessions...');
-    pastSessions = [];
-    pastSessionsHasMore = true;
-    pastSessionsTotal = 0;
-    fetchSessionsPage(0).then(function () {
-      // Hide empty state if we have sessions to show
-      if (pastSessions.length > 0 && instances.size === 0) {
-        $emptyState.classList.add('hidden');
+  // -------- All-sessions modal (full browse view) --------
+  //
+  // Lazily-loaded paginated list of every session on the host. Owns
+  // its own state independent of the sidebar's first-page snapshot.
+  // Internal infinite scroll: IntersectionObserver root is the modal's
+  // list container so we don't push the page around.
+  var $allSessionsModal = document.getElementById('all-sessions-modal');
+  var $allSessionsList = document.getElementById('all-sessions-list');
+  var $allSessionsSearch = document.getElementById('all-sessions-search');
+  var $allSessionsFilters = document.getElementById('all-sessions-filters');
+  var $allSessionsTitle = document.getElementById('all-sessions-title');
+  var $btnCloseAllSessions = document.getElementById('btn-close-all-sessions');
+  var allSessionsAll = [];          // accumulated catalogue (all pages loaded so far)
+  var allSessionsHasMore = false;
+  var allSessionsLoading = false;
+  var allSessionsTotal = 0;
+  var allSessionsAgentFilter = 'all';
+  var allSessionsSearchTerm = '';
+  var _allSessionsObserver = null;
+  var _allSessionsSentinel = null;
+
+  function openAllSessionsModal() {
+    if (!$allSessionsModal) return;
+    // Fresh state each open: most users land here looking for
+    // something specific, not picking up from a prior browse.
+    allSessionsAll = [];
+    allSessionsHasMore = true;
+    allSessionsTotal = 0;
+    allSessionsAgentFilter = 'all';
+    allSessionsSearchTerm = '';
+    if ($allSessionsSearch) $allSessionsSearch.value = '';
+    if ($allSessionsFilters) {
+      var chips = $allSessionsFilters.querySelectorAll('.all-sessions-filter-chip');
+      for (var i = 0; i < chips.length; i++) {
+        chips[i].classList.toggle('is-active', chips[i].getAttribute('data-agent') === 'all');
       }
+    }
+    $allSessionsList.replaceChildren();
+    $allSessionsModal.classList.remove('hidden');
+    requestAnimationFrame(function () { $allSessionsModal.classList.add('visible'); });
+    fetchAllSessionsPage(0).then(function () {
+      if ($allSessionsSearch) $allSessionsSearch.focus();
     });
   }
 
-  function fetchSessionsPage(offset) {
-    if (pastSessionsLoading || !pastSessionsHasMore && offset > 0) return Promise.resolve();
-    pastSessionsLoading = true;
-    var url = '/api/sessions?days=7&offset=' + offset + '&limit=' + SESSIONS_PAGE_SIZE;
+  function closeAllSessionsModal() {
+    if (!$allSessionsModal) return;
+    $allSessionsModal.classList.remove('visible');
+    setTimeout(function () { $allSessionsModal.classList.add('hidden'); }, 300);
+    if (_allSessionsObserver) _allSessionsObserver.disconnect();
+  }
+
+  function fetchAllSessionsPage(offset) {
+    if (allSessionsLoading) return Promise.resolve();
+    if (offset > 0 && !allSessionsHasMore) return Promise.resolve();
+    allSessionsLoading = true;
+    var url = '/api/sessions?days=30&offset=' + offset + '&limit=' + SESSIONS_PAGE_SIZE;
+    if (allSessionsAgentFilter !== 'all') url += '&source=' + encodeURIComponent(allSessionsAgentFilter);
     return authFetch(url)
       .then(function (r) {
-        pastSessionsTotal = parseInt(r.headers.get('X-Total-Count'), 10) || 0;
-        pastSessionsHasMore = r.headers.get('X-Has-More') === '1';
+        allSessionsTotal = parseInt(r.headers.get('X-Total-Count'), 10) || 0;
+        allSessionsHasMore = r.headers.get('X-Has-More') === '1';
         return r.json();
       })
       .then(function (page) {
-        if (Array.isArray(page) && page.length > 0) {
-          if (offset === 0) {
-            pastSessions = page;
-          } else {
-            pastSessions = pastSessions.concat(page);
-          }
-        }
-        renderSessions();
+        if (offset === 0) allSessionsAll = [];
+        if (Array.isArray(page) && page.length > 0) allSessionsAll = allSessionsAll.concat(page);
+        renderAllSessionsModal();
       })
       .catch(function () {})
       .finally(function () {
-        pastSessionsLoading = false;
+        allSessionsLoading = false;
       });
   }
 
-  function maybeLoadMoreSessions() {
-    if (!pastSessionsHasMore || pastSessionsLoading) return;
-    fetchSessionsPage(pastSessions.length);
+  function renderAllSessionsModal() {
+    if (!$allSessionsList) return;
+    var term = (allSessionsSearchTerm || '').trim().toLowerCase();
+    var filtered = allSessionsAll.filter(function (s) {
+      if (!term) return true;
+      var hay = (
+        (s.firstPrompt || '') + ' ' +
+        (s.project || '') + ' ' +
+        (s.cwd || '') + ' ' +
+        (s.sessionId || '')
+      ).toLowerCase();
+      return hay.indexOf(term) !== -1;
+    });
+
+    if ($allSessionsTitle) {
+      var totalLabel = allSessionsTotal > 0 ? ' (' + allSessionsTotal + ')' : '';
+      var filterLabel = term ? ' — ' + filtered.length + ' match' + (filtered.length !== 1 ? 'es' : '') : '';
+      $allSessionsTitle.textContent = 'All sessions' + totalLabel + filterLabel;
+    }
+
+    $allSessionsList.replaceChildren();
+
+    if (filtered.length === 0 && !allSessionsLoading) {
+      var empty = document.createElement('div');
+      empty.className = 'all-sessions-empty';
+      empty.textContent = term
+        ? 'No sessions match "' + term + '". Try a different term or clear the filter.'
+        : 'No sessions found.';
+      $allSessionsList.appendChild(empty);
+      return;
+    }
+
+    var frag = document.createDocumentFragment();
+    filtered.forEach(function (s) {
+      var ago = timeAgo(s.lastActivity);
+      var title = s.firstPrompt
+        ? (s.firstPrompt.length > 100 ? s.firstPrompt.slice(0, 100) + '…' : s.firstPrompt)
+        : s.slug || s.project || s.sessionId;
+      var sessionAgentType = VALID_AGENT_TYPES.indexOf(s.agentType) !== -1 ? s.agentType : 'claude';
+
+      var card = document.createElement('div');
+      card.className = 'instance-card session-card all-sessions-card';
+      card.setAttribute('data-session-id', s.sessionId);
+      card.setAttribute('data-cwd', s.cwd || '');
+      card.setAttribute('data-project', s.project || '');
+      card.setAttribute('data-agent-type', sessionAgentType);
+      card.innerHTML =
+        '<div class="card-top">' +
+          '<span class="card-name">' + escapeHtml(title) + '</span>' +
+          '<span class="badge badge-session">' + escapeHtml(ago) + '</span>' +
+        '</div>' +
+        '<div class="card-meta">' +
+          '<span>' + escapeHtml(s.project || '') + '</span>' +
+          '<span class="agent-badge agent-' + sessionAgentType + '">' + escapeHtml(agentLabel(sessionAgentType)) + '</span>' +
+        '</div>' +
+        (s.cwd ? '<div class="all-sessions-cwd">' + escapeHtml(s.cwd) + '</div>' : '');
+      card.addEventListener('click', function () {
+        closeAllSessionsModal();
+        resumeSession(s.sessionId, s.cwd, s.project, sessionAgentType);
+      });
+      frag.appendChild(card);
+    });
+    $allSessionsList.appendChild(frag);
+
+    // Sentinel for internal infinite scroll. Re-create on every render
+    // because the DOM was replaced.
+    if (allSessionsHasMore) {
+      _allSessionsSentinel = document.createElement('div');
+      _allSessionsSentinel.className = 'sessions-load-more-sentinel';
+      _allSessionsSentinel.innerHTML =
+        '<div class="sessions-load-more-spinner"></div>' +
+        '<span class="sessions-load-more-label">Loading more…</span>';
+      $allSessionsList.appendChild(_allSessionsSentinel);
+      if (!_allSessionsObserver) {
+        _allSessionsObserver = new IntersectionObserver(function (entries) {
+          for (var k = 0; k < entries.length; k++) {
+            if (entries[k].isIntersecting && allSessionsHasMore && !allSessionsLoading) {
+              fetchAllSessionsPage(allSessionsAll.length);
+            }
+          }
+        }, {
+          root: $allSessionsList,   // scroll container is the modal list itself
+          rootMargin: '120px',
+          threshold: 0.01,
+        });
+      }
+      _allSessionsObserver.disconnect();
+      _allSessionsObserver.observe(_allSessionsSentinel);
+    }
+  }
+
+  if ($btnCloseAllSessions) {
+    $btnCloseAllSessions.addEventListener('click', closeAllSessionsModal);
+  }
+  if ($allSessionsModal) {
+    $allSessionsModal.addEventListener('click', function (e) {
+      if (e.target === $allSessionsModal) closeAllSessionsModal();
+    });
+  }
+  if ($allSessionsSearch) {
+    // Debounce so each keystroke doesn't re-render the world.
+    var _allSessionsSearchTimer = null;
+    $allSessionsSearch.addEventListener('input', function (e) {
+      if (_allSessionsSearchTimer) clearTimeout(_allSessionsSearchTimer);
+      _allSessionsSearchTimer = setTimeout(function () {
+        allSessionsSearchTerm = e.target.value || '';
+        renderAllSessionsModal();
+      }, 120);
+    });
+  }
+  if ($allSessionsFilters) {
+    $allSessionsFilters.addEventListener('click', function (e) {
+      var chip = e.target && e.target.closest && e.target.closest('.all-sessions-filter-chip');
+      if (!chip) return;
+      var agent = chip.getAttribute('data-agent') || 'all';
+      if (agent === allSessionsAgentFilter) return;
+      allSessionsAgentFilter = agent;
+      var chips = $allSessionsFilters.querySelectorAll('.all-sessions-filter-chip');
+      for (var i = 0; i < chips.length; i++) {
+        chips[i].classList.toggle('is-active', chips[i] === chip);
+      }
+      // Filter is a server-side fetch param (agent-type filter), so
+      // reset the accumulated catalogue and start over.
+      allSessionsAll = [];
+      allSessionsHasMore = true;
+      fetchAllSessionsPage(0);
+    });
+  }
+
+  function loadSessions() {
+    showLoading($sessionsList, 'Loading sessions...');
+    // Fetch only the first page for the sidebar. The modal does its
+    // own paginated fetch when opened.
+    authFetch('/api/sessions?days=7&offset=0&limit=' + SESSIONS_PAGE_SIZE)
+      .then(function (r) {
+        pastSessionsTotal = parseInt(r.headers.get('X-Total-Count'), 10) || 0;
+        pastSessionsFirstPageHasMore = r.headers.get('X-Has-More') === '1';
+        return r.json();
+      })
+      .then(function (page) {
+        pastSessions = Array.isArray(page) ? page : [];
+        renderSessions();
+        if (pastSessions.length > 0 && instances.size === 0) {
+          $emptyState.classList.add('hidden');
+        }
+      })
+      .catch(function () {});
   }
 
   function renderSessions() {
@@ -3385,7 +3570,17 @@
 
     $sessionsSection.classList.remove('hidden');
 
-    $sessionsList.innerHTML = filtered.map(function (s) {
+    // Bound the sidebar to the most-recent SESSIONS_SIDEBAR_LIMIT
+    // cards. Everything beyond that lives in the "All sessions"
+    // modal so the sections below (Profile, costs, etc.) stay
+    // reachable without scrolling through hundreds of cards.
+    var visible = filtered.slice(0, SESSIONS_SIDEBAR_LIMIT);
+    // Remaining count = total catalogue minus the slice currently
+    // shown (NOT filtered.length-visible.length, because filtered is
+    // only the first page minus dedup against live instances).
+    var remaining = Math.max(0, pastSessionsTotal - visible.length);
+
+    var listHtml = visible.map(function (s) {
       var ago = timeAgo(s.lastActivity);
       var title = s.firstPrompt
         ? (s.firstPrompt.length > 60 ? s.firstPrompt.slice(0, 60) + '...' : s.firstPrompt)
@@ -3405,39 +3600,24 @@
       );
     }).join('');
 
+    // "View all (N)" link if there's more than the bounded slice
+    var viewAllHtml = '';
+    if (remaining > 0 || pastSessionsFirstPageHasMore || filtered.length > visible.length) {
+      var totalLabel = pastSessionsTotal > 0
+        ? ' (' + pastSessionsTotal + ')'
+        : '';
+      viewAllHtml = '<button type="button" class="sessions-view-all-btn">' +
+        'View all sessions' + escapeHtml(totalLabel) + ' &rarr;</button>';
+    }
+
+    $sessionsList.innerHTML = listHtml + viewAllHtml;
+
     var cards = $sessionsList.querySelectorAll('.session-card');
     for (var i = 0; i < cards.length; i++) {
       cards[i].addEventListener('click', onSessionCardClick);
     }
-
-    // Infinite scroll: append a sentinel after the last card, observe
-    // it, and fetch the next page when it enters the viewport. We
-    // re-observe after each render because the DOM was replaced.
-    if (pastSessionsHasMore) {
-      var sentinel = document.createElement('div');
-      sentinel.className = 'sessions-load-more-sentinel';
-      sentinel.innerHTML =
-        '<div class="sessions-load-more-spinner"></div>' +
-        '<span class="sessions-load-more-label">Loading more…</span>';
-      $sessionsList.appendChild(sentinel);
-      if (!_sessionsScrollObserver) {
-        _sessionsScrollObserver = new IntersectionObserver(function (entries) {
-          for (var k = 0; k < entries.length; k++) {
-            if (entries[k].isIntersecting) {
-              maybeLoadMoreSessions();
-            }
-          }
-        }, {
-          root: null,
-          rootMargin: '120px',  // start loading a bit before the sentinel hits the viewport
-          threshold: 0.01,
-        });
-      }
-      _sessionsScrollObserver.disconnect();
-      _sessionsScrollObserver.observe(sentinel);
-    } else if (_sessionsScrollObserver) {
-      _sessionsScrollObserver.disconnect();
-    }
+    var viewAllBtn = $sessionsList.querySelector('.sessions-view-all-btn');
+    if (viewAllBtn) viewAllBtn.addEventListener('click', openAllSessionsModal);
   }
 
   function onSessionCardClick(e) {

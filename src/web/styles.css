@@ -930,10 +930,123 @@ main {
   opacity: 0.5;
 }
 
-/* Infinite-scroll sentinel at the bottom of the recent-sessions list.
-   Renders as a small loading row that the IntersectionObserver watches
-   to know when to fetch the next page. The spinner is purely visual —
-   the actual fetch is keyed off the observer entry, not animation. */
+/* Sidebar "View all sessions (N)" link.
+   Replaces the old page-level infinite scroll: the sidebar shows up
+   to 12 recent cards and points the user at the full-browse modal
+   for everything else. Keeps Profile/Costs sections reachable
+   underneath the recent list. */
+.sessions-view-all-btn {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  margin-top: 4px;
+  background: rgba(124, 58, 237, 0.10);
+  border: 1px dashed rgba(124, 58, 237, 0.35);
+  border-radius: 8px;
+  color: var(--accent-light, var(--accent));
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: center;
+  transition: background 0.15s, border-color 0.15s;
+}
+.sessions-view-all-btn:hover {
+  background: rgba(124, 58, 237, 0.20);
+  border-color: var(--accent);
+}
+
+/* All-sessions modal — full browse view with search, agent filter, and
+   internal infinite scroll. The list scrolls inside the modal so the
+   page layout below the sidebar stays fixed. */
+.all-sessions-content {
+  /* Override the default sheet height so the modal can show many
+     rows comfortably; the inner list takes the remaining space. */
+  max-height: 90vh;
+  height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+.all-sessions-controls {
+  padding: 10px 16px 12px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.all-sessions-search-input {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  border-radius: 8px;
+  font-size: 14px;
+  font-family: inherit;
+}
+.all-sessions-search-input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 0;
+}
+.all-sessions-filters {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.all-sessions-filter-chip {
+  background: rgba(148, 163, 184, 0.10);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  color: var(--text-muted);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.all-sessions-filter-chip:hover {
+  color: var(--text);
+  border-color: rgba(148, 163, 184, 0.50);
+}
+.all-sessions-filter-chip.is-active {
+  background: rgba(124, 58, 237, 0.15);
+  border-color: var(--accent);
+  color: var(--accent-light, var(--accent));
+}
+.all-sessions-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 8px 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.all-sessions-card {
+  /* Slightly more breathing room than the sidebar cards because the
+     modal has more horizontal space and full-text prompts work
+     better with a touch more padding. */
+  padding: 10px 12px;
+}
+.all-sessions-cwd {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: monospace, monospace;
+  word-break: break-all;
+  opacity: 0.75;
+}
+.all-sessions-empty {
+  padding: 32px 16px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* Infinite-scroll sentinel — used inside the all-sessions modal's
+   list container (page-level use removed in this revision since the
+   sidebar's pagination moved into the modal). */
 .sessions-load-more-sentinel {
   display: flex;
   align-items: center;

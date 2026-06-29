@@ -482,6 +482,45 @@
   </div>
 
   <!-- Builder Profile: about modal -->
+  <!--
+    All-sessions modal. Opened from the "View all sessions (N)"
+    button in the sidebar. The sidebar shows only the most-recent
+    SESSIONS_SIDEBAR_LIMIT cards; this modal is the proper "browse
+    all my work" view with search, agent filter, and its own
+    internal infinite scroll (page-level scroll would shove the
+    sidebar's Profile/Costs sections off the bottom of the layout).
+  -->
+  <div id="all-sessions-modal" class="modal-overlay hidden">
+    <div class="modal-content all-sessions-content">
+      <div class="modal-handle"><div class="modal-handle-bar"></div></div>
+      <div class="modal-header">
+        <h3 id="all-sessions-title">All sessions</h3>
+        <button id="btn-close-all-sessions" class="btn-icon" aria-label="Close">&times;</button>
+      </div>
+      <div class="all-sessions-controls">
+        <input
+          id="all-sessions-search"
+          type="search"
+          class="all-sessions-search-input"
+          placeholder="Filter by prompt, project, cwd…"
+          autocomplete="off"
+          spellcheck="false">
+        <div id="all-sessions-filters" class="all-sessions-filters">
+          <button type="button" class="all-sessions-filter-chip is-active" data-agent="all">All</button>
+          <button type="button" class="all-sessions-filter-chip" data-agent="claude">Claude</button>
+          <button type="button" class="all-sessions-filter-chip" data-agent="codex">Codex</button>
+          <button type="button" class="all-sessions-filter-chip" data-agent="gemini">Gemini</button>
+          <button type="button" class="all-sessions-filter-chip" data-agent="opencode">OpenCode</button>
+          <button type="button" class="all-sessions-filter-chip" data-agent="pi">Pi</button>
+          <button type="button" class="all-sessions-filter-chip" data-agent="goose">Goose</button>
+        </div>
+      </div>
+      <!-- The list scrolls INSIDE this container; the page does not.
+           IntersectionObserver uses this element as its root. -->
+      <div id="all-sessions-list" class="all-sessions-list"></div>
+    </div>
+  </div>
+
   <div id="profile-about-modal" class="modal-overlay hidden">
     <div class="modal-content">
       <div class="modal-handle"><div class="modal-handle-bar"></div></div>
