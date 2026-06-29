@@ -6,7 +6,6 @@ const os = require('os');
 const { execFile } = require('child_process');
 const { scanSessions, loadHistory } = require('./sessions');
 const { createAgent } = require('../agent/agent-factory');
-const { CostTracker } = require('./cost-tracker');
 const {
   UPLOAD_DIR,
   DASHBOARD_MAX_UPLOAD_SIZE,
@@ -1105,17 +1104,11 @@ function createApiRouter(instanceManager, getAuthState, pushManager, outboxManag
     });
   });
 
-  // ---- Cost Dashboard ----
-  const costTracker = new CostTracker();
-
-  router.get('/costs', async (req, res) => {
-    try {
-      const data = await costTracker.aggregate();
-      res.json(data);
-    } catch (err) {
-      res.status(500).json({ error: 'Failed to read costs' });
-    }
-  });
+  // (Cost-aggregation /api/costs removed in v1.2.2 — see
+  // src/server/cost-tracker.js comment for rationale. Only Claude API
+  // ever populated it and the value was misleading for every other
+  // agent. Users' existing ~/.config/polpo/costs.jsonl on disk is
+  // left intact for archeology; nothing reads it anymore.)
 
   // ---- Builder Profile ----
   // Paxel-style "how you work with AI agents" report, computed locally
@@ -1246,19 +1239,10 @@ function createApiRouter(instanceManager, getAuthState, pushManager, outboxManag
     const usedMem = totalMem - freeMem;
     const proc = process.memoryUsage();
 
-    // Per-instance details with cost
+    // Per-instance details. v1.2.2 removed the cost column; the
+    // stats modal continues to show project, status, agent, uptime,
+    // and message count without a misleading $ figure attached.
     const allInstances = instanceManager.getAll();
-    let costByInstance = {};
-    try {
-      const records = await costTracker.readAll();
-      for (const r of records) {
-        if (r.instance) {
-          if (!costByInstance[r.instance]) costByInstance[r.instance] = 0;
-          costByInstance[r.instance] += r.cost || 0;
-        }
-      }
-    } catch {}
-
     const sessions = allInstances.map(function (inst) {
       return {
         id: inst.id,
@@ -1267,7 +1251,6 @@ function createApiRouter(instanceManager, getAuthState, pushManager, outboxManag
         status: inst.status,
         agentType: inst.agentType,
         uptime: Math.round((now - inst.registeredAt) / 1000),
-        cost: Math.round((costByInstance[inst.id] || 0) * 10000) / 10000,
         messages: inst.conversationLength,
       };
     });

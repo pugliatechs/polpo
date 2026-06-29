@@ -73,33 +73,6 @@
       <div id="sessions-list" class="instance-list"></div>
     </div>
 
-    <!-- Cost Dashboard -->
-    <div id="cost-section" class="sessions-section hidden">
-      <div class="section-header">
-        <h3>Costs</h3>
-        <button id="btn-refresh-costs" class="btn-icon" title="Refresh">&#8635;</button>
-      </div>
-      <div class="cost-cards">
-        <div class="cost-card">
-          <div class="cost-card-value" id="cost-today">$0</div>
-          <div class="cost-card-label">Today</div>
-        </div>
-        <div class="cost-card">
-          <div class="cost-card-value" id="cost-week">$0</div>
-          <div class="cost-card-label">This Week</div>
-        </div>
-        <div class="cost-card">
-          <div class="cost-card-value" id="cost-month">$0</div>
-          <div class="cost-card-label">This Month</div>
-        </div>
-        <div class="cost-card">
-          <div class="cost-card-value" id="cost-total">$0</div>
-          <div class="cost-card-label">Total</div>
-        </div>
-      </div>
-      <div id="cost-chart" class="cost-chart"></div>
-    </div>
-
     <!--
       Mobile-setup QR codes. Populated by GET /api/qr-codes which only
       returns content when the host runs polpo with --trust-localhost

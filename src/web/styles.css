@@ -2628,7 +2628,6 @@ h5.plan-h { font-size: 13px; }
 #view-list.searching #mind-section,
 #view-list.searching #instance-list,
 #view-list.searching .sessions-section,
-#view-list.searching #cost-section,
 #view-list.searching .stats-bar {
   display: none !important;
 }
@@ -2933,64 +2932,6 @@ h5.plan-h { font-size: 13px; }
   margin-top: 14px;
   padding-top: 10px;
   border-top: 1px solid rgba(255,255,255,0.06);
-}
-
-/* ---- Cost Dashboard ---- */
-.cost-cards {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-  padding: 0 16px 12px;
-}
-.cost-card {
-  background: var(--bg-card);
-  border-radius: var(--radius-sm);
-  padding: 12px;
-  text-align: center;
-  border: 1px solid rgba(255,255,255,0.06);
-}
-.cost-card-value {
-  font-size: 20px;
-  font-weight: 700;
-  color: var(--accent-light);
-  letter-spacing: -0.3px;
-}
-.cost-card-label {
-  font-size: 11px;
-  color: var(--text-muted);
-  margin-top: 2px;
-}
-.cost-chart {
-  display: flex;
-  align-items: flex-end;
-  gap: 2px;
-  height: 80px;
-  padding: 0 16px 12px;
-}
-.cost-bar {
-  flex: 1;
-  min-width: 4px;
-  border-radius: 2px 2px 0 0;
-  background: var(--accent);
-  transition: height 0.3s ease;
-  position: relative;
-}
-.cost-bar:hover {
-  background: var(--accent-light);
-}
-.cost-bar[title]:hover::after {
-  content: attr(title);
-  position: absolute;
-  bottom: 100%;
-  left: 50%;
-  transform: translateX(-50%);
-  background: var(--bg-card);
-  color: var(--text);
-  font-size: 10px;
-  padding: 2px 6px;
-  border-radius: 4px;
-  white-space: nowrap;
-  pointer-events: none;
 }
 
 /* ---- Diff Viewer ---- */
@@ -3325,11 +3266,6 @@ h5.plan-h { font-size: 13px; }
   flex-shrink: 0;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
-}
-
-.stats-session-cost {
-  color: var(--accent-light);
-  font-weight: 600;
 }
 
 .stats-session-status {

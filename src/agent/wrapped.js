@@ -391,7 +391,6 @@ class WrappedAgent {
               content: JSON.stringify({
                 type: 'turn_complete',
                 result: msg.result,
-                cost_usd: msg.total_cost_usd,
                 num_turns: msg.num_turns,
                 session_id: msg.session_id,
               }),

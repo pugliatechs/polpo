@@ -265,13 +265,8 @@
   const $btnWakeLock = document.getElementById('btn-wakelock');
   const $btnNotifications = document.getElementById('btn-notifications');
   const $notificationBadge = document.getElementById('notification-badge');
-  const $costSection = document.getElementById('cost-section');
-  const $costToday = document.getElementById('cost-today');
-  const $costWeek = document.getElementById('cost-week');
-  const $costMonth = document.getElementById('cost-month');
-  const $costTotal = document.getElementById('cost-total');
-  const $costChart = document.getElementById('cost-chart');
-  const $btnRefreshCosts = document.getElementById('btn-refresh-costs');
+  // (Cost-dashboard refs removed in v1.2.2 — see src/server/api.js
+  // comment near the deleted /api/costs route for rationale.)
   const $searchInput = document.getElementById('search-input');
   const $searchResults = document.getElementById('search-results');
 
@@ -372,12 +367,6 @@
     return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
   }
 
-  function formatCost(cost) {
-    if (cost === 0) return '$0';
-    if (cost < 0.01) return '<$0.01';
-    return '$' + cost.toFixed(2);
-  }
-
   function setBarLevel(barEl, pct) {
     barEl.style.width = pct + '%';
     barEl.classList.remove('warning', 'critical');
@@ -446,7 +435,6 @@
           '<span class="stats-session-name" title="' + escapeHtml(sess.name) + '">' + escapeHtml(sess.name) + '</span>' +
           '<span class="stats-session-meta">' +
             '<span>' + formatUptime(sess.uptime) + '</span>' +
-            '<span class="stats-session-cost">' + formatCost(sess.cost) + '</span>' +
             '<span>' + sess.messages + ' msgs</span>' +
           '</span>' +
           '<span class="stats-session-status ' + escapeHtml(sess.status) + '">' + escapeHtml(sess.status) + '</span>' +
@@ -837,11 +825,6 @@
           instances.get(msg.id).transcriptPath = msg.transcriptPath;
         }
         renderList();
-        break;
-
-      case 'instance:cost':
-        // Refresh cost dashboard on new cost data
-        loadCosts();
         break;
 
       case 'outbox_update':
@@ -1534,10 +1517,13 @@
     if (contentType === 'turn_complete') {
       try {
         var info = JSON.parse(m.content);
-        var costStr = info.cost_usd ? '$' + info.cost_usd.toFixed(4) : '';
+        // v1.2.2 removed the $X · prefix on this row — Claude's
+        // cost_usd was an API-list-price estimate that misrepresented
+        // both subscription users (who don't pay that rate) and
+        // anyone running a non-Claude agent. Turn count alone is
+        // what's universally true.
         return (
           '<div class="msg msg-system msg-turn-complete">' +
-            (costStr ? costStr + ' · ' : '') +
             (info.num_turns || '') + ' turns' +
             timeHtml +
           '</div>'
@@ -4753,13 +4739,6 @@
     }
   });
 
-  // ---- Cost Dashboard ----
-  function formatCost(n) {
-    if (n >= 1) return '$' + n.toFixed(2);
-    if (n >= 0.01) return '$' + n.toFixed(3);
-    return '$' + n.toFixed(4);
-  }
-
   // ---- Builder Profile (Paxel-style sidebar card) ----
   //
   // Calls GET /api/profile and renders a small radar chart of the five
@@ -5022,38 +5001,8 @@
     });
   }
 
-  function loadCosts() {
-    authFetch('/api/costs')
-      .then(function (r) { return r.json(); })
-      .then(function (data) {
-        $costSection.classList.remove('hidden');
-        $costToday.textContent = formatCost(data.today || 0);
-        $costWeek.textContent = formatCost(data.thisWeek || 0);
-        $costMonth.textContent = formatCost(data.thisMonth || 0);
-        $costTotal.textContent = formatCost(data.total || 0);
-        renderCostChart(data.byDay || []);
-      })
-      .catch(function () {
-        // hide section if no data or error
-      });
-  }
-
-  function renderCostChart(byDay) {
-    if (!byDay.length) {
-      $costChart.innerHTML = '';
-      return;
-    }
-    var maxCost = 0;
-    byDay.forEach(function (d) { if (d.cost > maxCost) maxCost = d.cost; });
-    if (maxCost === 0) maxCost = 1;
-
-    $costChart.innerHTML = byDay.map(function (d) {
-      var pct = Math.max(2, (d.cost / maxCost) * 100);
-      return '<div class="cost-bar" style="height:' + pct + '%" title="' + escapeHtml(d.date) + ': ' + escapeHtml(formatCost(d.cost)) + '"></div>';
-    }).join('');
-  }
-
-  $btnRefreshCosts.addEventListener('click', loadCosts);
+  // (loadCosts / renderCostChart removed in v1.2.2 — see server-side
+  // cost-tracker comment for rationale.)
 
   // ---- Notifications ----
   function updateNotificationBell() {
@@ -5313,7 +5262,6 @@
   showLoading($instanceList, 'Connecting...');
   connect();
   loadSessions();
-  loadCosts();
   loadProfile();
   loadQrCodes();
 

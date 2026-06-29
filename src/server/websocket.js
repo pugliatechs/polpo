@@ -11,7 +11,6 @@ const { OpencodeScanner } = require('./opencode-scanner');
 const { PiScanner } = require('./pi-scanner');
 const { PiJsonlAdapter } = require('./pi-jsonl-adapter');
 const { GooseScanner } = require('./goose-scanner');
-const { CostTracker } = require('./cost-tracker');
 
 function setupWebSocket(server, instanceManager, getAuthState, pushManager, outboxManager) {
   const wss = new WebSocket.Server({ server });
@@ -24,9 +23,6 @@ function setupWebSocket(server, instanceManager, getAuthState, pushManager, outb
 
   // Track session-to-instance mapping for auto-discovered sessions
   const sessionToInstance = new Map(); // sessionId -> instanceId
-
-  // Cost tracking
-  const costTracker = new CostTracker();
 
   // ---- Heartbeat: ping dashboard clients every 30s ----
   const HEARTBEAT_INTERVAL = 30000;
@@ -118,30 +114,12 @@ function setupWebSocket(server, instanceManager, getAuthState, pushManager, outb
 
   instanceManager.on('instance:message', (data) => {
     broadcastToDashboards({ type: 'instance:message', ...data });
-
-    // Persist cost data from turn_complete messages
-    if (data.message && data.message.contentType === 'turn_complete') {
-      try {
-        const info = typeof data.message.content === 'string'
-          ? JSON.parse(data.message.content) : data.message.content;
-        if (info.cost_usd && info.cost_usd > 0) {
-          const inst = instanceManager.get(data.id);
-          costTracker.record({
-            cost: info.cost_usd,
-            model: info.model || null,
-            instance: data.id,
-            project: inst ? inst.project : null,
-          });
-          broadcastToDashboards({
-            type: 'instance:cost',
-            id: data.id,
-            cost: info.cost_usd,
-          });
-        }
-      } catch {
-        // ignore parse errors
-      }
-    }
+    // (v1.2.2 removed the cost-aggregation widget — only Claude API
+    // ran through this pipeline and the value was misleading for
+    // every other agent, plus for Claude subscription users. The
+    // `turn_complete` system message itself still flows through to
+    // the dashboard so the conversation shows turn counts; we just
+    // don't persist or aggregate cost_usd here anymore.)
   });
 
   instanceManager.on('instance:approval', (data) => {
@@ -541,7 +519,6 @@ function setupWebSocket(server, instanceManager, getAuthState, pushManager, outb
   wss.opencodeScanner = opencodeScanner;
   wss.piScanner = piScanner;
   wss.gooseScanner = gooseScanner;
-  wss.costTracker = costTracker;
 
   return wss;
 }
