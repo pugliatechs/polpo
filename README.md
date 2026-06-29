@@ -4,9 +4,9 @@
   <img src="assets/logo.png" alt="Polpo" width="240" height="240">
 </p>
 
-<p align="center"><strong>Work on Claude Code, Codex, Gemini, OpenCode, Pi, and Goose from your phone.</strong></p>
+<p align="center"><strong>Multi-agent orchestrator for AI coding CLIs — Claude Code, Codex, Gemini, OpenCode, Pi, Goose — with mobile-first remote control.</strong></p>
 
-Polpo lets developers send prompts, see responses, and control Claude Code, OpenAI Codex CLI, Google Gemini CLI, OpenCode, Pi, and Goose coding agent sessions from any mobile device over VPN, Wi-Fi, LAN, or a public tunnel.
+Polpo runs, watches, and coordinates terminal AI coding agents. Drive them from your phone over VPN, Wi-Fi, LAN, or a public tunnel; let the in-process **Alien Mind** decompose goals into parallel arms; or let external software drive polpo through the **/v1 gateway** as a remote agent execution platform. One host, many agents, three access surfaces.
 
 > **Help us test!** Claude Code support is stable and battle-tested. Support for **Codex**, **Gemini**, **OpenCode**, **Pi**, and **Goose** is functional but still being stabilized — edge cases in multi-turn, auto-discovery, and session resume may exist. If you use any of these agents, we'd love your feedback: open an issue with reproduction steps and we'll fix it fast.
 
@@ -14,16 +14,24 @@ Polpo lets developers send prompts, see responses, and control Claude Code, Open
 
 AI coding sessions can run for minutes while reading files, writing code, and running tests. During that time, developers are tethered to their terminal waiting to approve tool calls, review output, or send the next prompt.
 
-Polpo frees you from the keyboard. Grab a coffee, kick off a refactor while waiting for a train, or review tool calls from an airport lounge - your phone becomes a full remote control for Claude Code, Codex, Gemini, OpenCode, Pi, and Goose. You see every tool call as it happens, approve or reject actions with a tap, send follow-up prompts, and abort tasks when something goes wrong. All in real time, from any network.
+Polpo frees you from the keyboard. Grab a coffee, kick off a refactor while waiting for a train, or review tool calls from an airport lounge — your phone becomes a full remote control for Claude Code, Codex, Gemini, OpenCode, Pi, and Goose. You see every tool call as it happens, approve or reject actions with a tap, send follow-up prompts, and abort tasks when something goes wrong. All in real time, from any network.
+
+Polpo also goes beyond a single-agent dashboard: the optional **Alien Mind** plans a goal into a DAG of one-shot agent tasks, fans them out across arms, brokers context between them, and asks you for approval at the right moments. The **/v1 gateway** exposes the same one-shot lifecycle as a programmatic API so external orchestrators, CI runners, and chatbots can delegate work to your machine.
 
 ## Architecture
 
-Four integration modes, supporting **Claude Code**, **OpenAI Codex CLI**, **Google Gemini CLI**, **OpenCode**, **Pi**, and **Goose**:
+Polpo has three layers, all running on the same host:
 
-- **Session** - spawns `claude`, `codex exec --json`, `gemini --output-format stream-json`, `opencode run --format json`, `pi --mode rpc`, or `goose acp` with full bidirectional control from phone, including MCP-based tool approval
-- **Auto-Discovery** - watches `~/.claude/projects/`, `~/.codex/sessions/`, `~/.gemini/tmp/`, `~/.local/share/opencode/opencode.db`, `~/.pi/agent/sessions/`, and `~/.config/goose/sessions.db` for active sessions, auto-registers them on the dashboard — no setup needed
-- **Hooks** - taps into existing terminal sessions via Claude Code hooks for terminal prompt forwarding and phone-based tool approval
-- **Session Browser** - discovers and displays past sessions from Claude Code, Codex, Gemini, OpenCode, Pi, and Goose, with the ability to resume them
+- **Mobile-first dashboard** — your phone (or any browser) connects to a single web UI to drive every agent installed on the host. Real-time tool-call streaming, approvals, prompt sending, file attachments, agent-produced file outbox, mid-session model switching.
+- **Alien Mind** (opt-in, `POLPO_MIND=1`) — a meta-agent that decomposes user goals into a DAG of one-shot tasks, dispatches each as an isolated agent run via the shared `OneShotAgentRunner`, brokers predecessor output into successor prompts, and gates dispatch on user approval (with `/approve` / `/tweak` / `/abandon` inline buttons). Escalates on stuck arms (`/retry <hint>` / `/skip` / `/abandon`).
+- **/v1 gateway** (opt-in, `--gateway`) — programmatic surface that lets external software run one-shot agent tasks, push input files, capture output artifacts, browse the session catalogue, submit mind goals, and request the Builder Profile. Bearer-auth, per-token rate limiting, sealed-artifact pattern.
+
+Supported agent CLIs: **Claude Code**, **OpenAI Codex**, **Google Gemini**, **OpenCode**, **Pi**, **Goose**. Integration modes per agent:
+
+- **Session** — spawns `claude`, `codex exec --json`, `gemini --output-format stream-json`, `opencode run --format json`, `pi --mode rpc`, or `goose acp` with full bidirectional control from phone, including MCP-based tool approval
+- **Auto-Discovery** — watches `~/.claude/projects/`, `~/.codex/sessions/`, `~/.gemini/tmp/`, `~/.local/share/opencode/opencode.db`, `~/.pi/agent/sessions/`, and `~/.config/goose/sessions.db` for active sessions, auto-registers them on the dashboard — no setup needed
+- **Hooks** — taps into existing terminal sessions via Claude Code hooks for terminal prompt forwarding and phone-based tool approval
+- **Session Browser** — discovers and displays past sessions from Claude Code, Codex, Gemini, OpenCode, Pi, and Goose, with the ability to resume them
 
 ## Requirements
 

@@ -1,7 +1,7 @@
 {
   "name": "polpo",
   "version": "1.2.1",
-  "description": "Control multiple Claude Code instances from your mobile device. Like an octopus managing its tentacles.",
+  "description": "Multi-agent orchestrator for AI coding CLIs (Claude Code, Codex, Gemini, OpenCode, Pi, Goose) with mobile-first remote control. Like an octopus managing its tentacles.",
   "main": "src/server/index.js",
   "bin": {
     "polpo": "./bin/polpo.js"
