@@ -1611,11 +1611,33 @@
       '</div>';
     }
 
+    // Action buttons — mind/coordinator stamps `actions: [...]` on
+    // plan-preview and arm-escalation messages so the dashboard can
+    // render single-tap buttons instead of asking the user to type a
+    // slash command. Older hosts that don't ship the field render
+    // exactly as before (the body of the message still spells out the
+    // slash commands as a fallback).
+    var actionsHtml = '';
+    if (m.role === 'assistant' && Array.isArray(m.actions) && m.actions.length > 0) {
+      actionsHtml = '<div class="msg-actions" data-msg-actions="' +
+        escapeHtml(JSON.stringify(m.actions)) + '">' +
+        m.actions.map(function (a, i) {
+          var style = a.style && /^[a-z]+$/i.test(a.style) ? a.style : 'secondary';
+          return '<button type="button" ' +
+            'class="msg-action-btn msg-action-' + escapeHtml(style) + '" ' +
+            'data-action-idx="' + i + '">' +
+            escapeHtml(a.label || a.command || '???') +
+            '</button>';
+        }).join('') +
+      '</div>';
+    }
+
     return (
       '<div class="' + cls + '"' + cmsgAttr + '>' +
         attachHtml +
         rendered +
         outboxHtml +
+        actionsHtml +
         timeHtml +
       '</div>'
     );
@@ -2221,6 +2243,112 @@
     var url = '/api/instances/' + encodeURIComponent(iid) + '/outbox/' + encodeURIComponent(name);
     window.location.href = url;
   });
+
+  /**
+   * Delegated handler for action buttons inside assistant messages
+   * (mind plan-preview + arm-escalation bubbles). Each .msg-actions
+   * container carries the JSON-encoded action list as a data-* attr,
+   * and each .msg-action-btn carries its index into that list. We
+   * dispatch the action based on `kind`:
+   *   - 'send': fire a send_prompt with the command string verbatim.
+   *   - 'input': swap the button row for an inline text field; on
+   *     submit, dispatch `<command> <user text>`.
+   *
+   * After dispatching, the button row disables itself so the user
+   * can't fire the same action twice while the mind is processing.
+   */
+  document.addEventListener('click', function (e) {
+    var btn = e.target && e.target.closest && e.target.closest('.msg-action-btn');
+    if (!btn) return;
+    var container = btn.closest('.msg-actions');
+    if (!container) return;
+    if (container.classList.contains('msg-actions-fired')) return;
+    var idx = parseInt(btn.getAttribute('data-action-idx'), 10);
+    var actions;
+    try { actions = JSON.parse(container.getAttribute('data-msg-actions')); } catch (err) {}
+    if (!Array.isArray(actions) || !actions[idx]) return;
+    var action = actions[idx];
+    if (action.kind === 'input') {
+      openActionInput(container, action);
+    } else {
+      // 'send' (default): dispatch immediately
+      dispatchActionCommand(container, action.command);
+    }
+  });
+
+  function openActionInput(container, action) {
+    // Replace the button row contents with a labeled text input + Send / Cancel
+    container.classList.add('msg-actions-input-mode');
+    var promptHint = action.inputPrompt || 'Type your reply…';
+    container.innerHTML =
+      '<input type="text" class="msg-action-input" placeholder="' + escapeHtml(promptHint) + '" autocomplete="off">' +
+      '<button type="button" class="msg-action-input-send msg-action-btn msg-action-primary">Send</button>' +
+      '<button type="button" class="msg-action-input-cancel msg-action-btn msg-action-secondary">Cancel</button>';
+    var input = container.querySelector('.msg-action-input');
+    var sendBtn = container.querySelector('.msg-action-input-send');
+    var cancelBtn = container.querySelector('.msg-action-input-cancel');
+    if (input) {
+      input.focus();
+      input.addEventListener('keydown', function (kev) {
+        if (kev.key === 'Enter') {
+          kev.preventDefault();
+          sendBtn.click();
+        } else if (kev.key === 'Escape') {
+          kev.preventDefault();
+          cancelBtn.click();
+        }
+      });
+    }
+    sendBtn.addEventListener('click', function () {
+      var text = (input.value || '').trim();
+      if (!text) { input.focus(); return; }
+      // Final command = "/tweak this and that"
+      dispatchActionCommand(container, action.command + ' ' + text);
+    });
+    cancelBtn.addEventListener('click', function () {
+      // Restore the original buttons by re-rendering the active
+      // detail. Simpler than tracking original HTML — and renderDetail
+      // is already idempotent.
+      container.classList.remove('msg-actions-input-mode');
+      if (typeof renderDetail === 'function') renderDetail();
+    });
+  }
+
+  function dispatchActionCommand(container, commandText) {
+    if (!activeInstanceId) return;
+    container.classList.add('msg-actions-fired');
+    var buttons = container.querySelectorAll('button, input');
+    for (var i = 0; i < buttons.length; i++) buttons[i].disabled = true;
+
+    // Reuse the same optimistic-send path the prompt input uses so the
+    // user's command shows up as a bubble immediately and the mind
+    // sees it as a normal user message.
+    var clientMsgId = newClientMsgId();
+    var inst = instances.get(activeInstanceId);
+    if (inst) {
+      if (!inst.conversation) inst.conversation = [];
+      var optimisticMsg = {
+        role: 'user',
+        content: commandText,
+        source: 'mobile',
+        attachments: [],
+        clientMsgId: clientMsgId,
+        _pending: true,
+        timestamp: Date.now(),
+      };
+      inst.conversation.push(optimisticMsg);
+      appendMessage(optimisticMsg);
+    }
+    send({
+      type: 'send_prompt',
+      instanceId: activeInstanceId,
+      text: commandText,
+      attachments: [],
+      clientMsgId: clientMsgId,
+    });
+    scheduleOptimisticTimeout(activeInstanceId, clientMsgId);
+    scrollToBottom(true);
+  }
   var $modelPickerModal = document.getElementById('model-picker-modal');
   var $modelPickerList = document.getElementById('model-picker-list');
   var $modelPickerCustom = document.getElementById('model-picker-custom');
@@ -3173,19 +3301,63 @@
   }
 
   // ---- Past Sessions ----
+  // -------- Recent-sessions infinite scroll --------
+  //
+  // The dashboard previously fetched a single page of 30 sessions and
+  // stopped. Active operators often have hundreds; the rest were
+  // invisible. This is a paginated loader: the first call replaces
+  // pastSessions; subsequent calls (triggered by scrolling near the
+  // bottom of the list) append. The server caches the full ordered
+  // catalogue for 30s and slices it via offset+limit, so the page
+  // walk is fast even when the user scrolls aggressively.
+  var SESSIONS_PAGE_SIZE = 30;
+  var pastSessionsHasMore = true;
+  var pastSessionsLoading = false;
+  var pastSessionsTotal = 0;
+  var _sessionsScrollObserver = null;
+
   function loadSessions() {
     showLoading($sessionsList, 'Loading sessions...');
-    authFetch('/api/sessions?days=7&limit=30')
-      .then(function (r) { return r.json(); })
-      .then(function (sessions) {
-        pastSessions = sessions;
-        renderSessions();
-        // Hide empty state if we have sessions to show
-        if (pastSessions.length > 0 && instances.size === 0) {
-          $emptyState.classList.add('hidden');
-        }
+    pastSessions = [];
+    pastSessionsHasMore = true;
+    pastSessionsTotal = 0;
+    fetchSessionsPage(0).then(function () {
+      // Hide empty state if we have sessions to show
+      if (pastSessions.length > 0 && instances.size === 0) {
+        $emptyState.classList.add('hidden');
+      }
+    });
+  }
+
+  function fetchSessionsPage(offset) {
+    if (pastSessionsLoading || !pastSessionsHasMore && offset > 0) return Promise.resolve();
+    pastSessionsLoading = true;
+    var url = '/api/sessions?days=7&offset=' + offset + '&limit=' + SESSIONS_PAGE_SIZE;
+    return authFetch(url)
+      .then(function (r) {
+        pastSessionsTotal = parseInt(r.headers.get('X-Total-Count'), 10) || 0;
+        pastSessionsHasMore = r.headers.get('X-Has-More') === '1';
+        return r.json();
       })
-      .catch(function () {});
+      .then(function (page) {
+        if (Array.isArray(page) && page.length > 0) {
+          if (offset === 0) {
+            pastSessions = page;
+          } else {
+            pastSessions = pastSessions.concat(page);
+          }
+        }
+        renderSessions();
+      })
+      .catch(function () {})
+      .finally(function () {
+        pastSessionsLoading = false;
+      });
+  }
+
+  function maybeLoadMoreSessions() {
+    if (!pastSessionsHasMore || pastSessionsLoading) return;
+    fetchSessionsPage(pastSessions.length);
   }
 
   function renderSessions() {
@@ -3236,6 +3408,35 @@
     var cards = $sessionsList.querySelectorAll('.session-card');
     for (var i = 0; i < cards.length; i++) {
       cards[i].addEventListener('click', onSessionCardClick);
+    }
+
+    // Infinite scroll: append a sentinel after the last card, observe
+    // it, and fetch the next page when it enters the viewport. We
+    // re-observe after each render because the DOM was replaced.
+    if (pastSessionsHasMore) {
+      var sentinel = document.createElement('div');
+      sentinel.className = 'sessions-load-more-sentinel';
+      sentinel.innerHTML =
+        '<div class="sessions-load-more-spinner"></div>' +
+        '<span class="sessions-load-more-label">Loading more…</span>';
+      $sessionsList.appendChild(sentinel);
+      if (!_sessionsScrollObserver) {
+        _sessionsScrollObserver = new IntersectionObserver(function (entries) {
+          for (var k = 0; k < entries.length; k++) {
+            if (entries[k].isIntersecting) {
+              maybeLoadMoreSessions();
+            }
+          }
+        }, {
+          root: null,
+          rootMargin: '120px',  // start loading a bit before the sentinel hits the viewport
+          threshold: 0.01,
+        });
+      }
+      _sessionsScrollObserver.disconnect();
+      _sessionsScrollObserver.observe(sentinel);
+    } else if (_sessionsScrollObserver) {
+      _sessionsScrollObserver.disconnect();
     }
   }
 

@@ -858,6 +858,104 @@ main {
 /* Chips appended below an assistant message when the agent produced
    files in that turn. Visually mirror .msg-attachments (which renders
    user-sent attachments). */
+/* Action buttons inside assistant messages — used by the mind for
+   plan-preview and arm-escalation bubbles. Approve / Tweak… / Abandon
+   etc render as clickable buttons instead of asking the user to type
+   a slash command. */
+.msg-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+  align-items: center;
+}
+.msg-action-btn {
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+}
+.msg-action-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.msg-action-primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+.msg-action-primary:hover:not(:disabled) {
+  background: rgba(124, 58, 237, 0.85);
+}
+.msg-action-secondary {
+  background: rgba(148, 163, 184, 0.12);
+  color: var(--text);
+  border-color: rgba(148, 163, 184, 0.35);
+}
+.msg-action-secondary:hover:not(:disabled) {
+  background: rgba(148, 163, 184, 0.22);
+}
+.msg-action-danger {
+  background: rgba(239, 68, 68, 0.12);
+  color: rgb(252, 165, 165);
+  border-color: rgba(239, 68, 68, 0.40);
+}
+.msg-action-danger:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.22);
+  border-color: rgb(239, 68, 68);
+}
+.msg-action-input {
+  flex: 1 1 200px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 13px;
+  font-family: inherit;
+}
+.msg-action-input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 0;
+}
+.msg-actions-input-mode {
+  flex-wrap: nowrap;
+}
+.msg-actions-fired .msg-action-btn {
+  opacity: 0.5;
+}
+
+/* Infinite-scroll sentinel at the bottom of the recent-sessions list.
+   Renders as a small loading row that the IntersectionObserver watches
+   to know when to fetch the next page. The spinner is purely visual —
+   the actual fetch is keyed off the observer entry, not animation. */
+.sessions-load-more-sentinel {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 16px 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+  opacity: 0.7;
+}
+.sessions-load-more-spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid rgba(148, 163, 184, 0.25);
+  border-top-color: var(--accent);
+  animation: polpo-sessions-spin 0.9s linear infinite;
+}
+@keyframes polpo-sessions-spin {
+  to { transform: rotate(360deg); }
+}
+
 .msg-outbox {
   display: flex;
   flex-wrap: wrap;

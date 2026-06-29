@@ -794,6 +794,24 @@ describe('Coordinator: interactive plan approval', () => {
     assert.equal(coordinator.approvePlan('goal-doesnotexist'), false);
   });
 
+  it('plan-preview message carries actions metadata for inline buttons (Approve/Tweak/Abandon)', async () => {
+    coordinator = newCoord(im, wm, createMockReasoner(), runner, { mindInstanceId: MIND_ID });
+    await coordinator.submitGoal('Plan something', { autoDispatch: false });
+    const conv = im.getConversation(MIND_ID, 30);
+    const preview = conv.find((m) => Array.isArray(m.actions));
+    assert.ok(preview, 'plan-preview message has actions');
+    const commands = preview.actions.map((a) => a.command);
+    assert.deepEqual(commands, ['/approve', '/tweak', '/abandon']);
+    const tweak = preview.actions.find((a) => a.command === '/tweak');
+    assert.equal(tweak.kind, 'input', 'Tweak opens an inline input');
+    assert.ok(typeof tweak.inputPrompt === 'string' && tweak.inputPrompt.length > 0);
+    const approve = preview.actions.find((a) => a.command === '/approve');
+    assert.equal(approve.kind, 'send');
+    assert.equal(approve.style, 'primary');
+    const abandon = preview.actions.find((a) => a.command === '/abandon');
+    assert.equal(abandon.style, 'danger');
+  });
+
   it('/tweak re-invokes the reasoner with the original prompt + feedback appended', async () => {
     let lastPlanPrompt = null;
     const reasoner = {
@@ -971,6 +989,35 @@ describe('Coordinator: interactive task escalation', () => {
     assert.equal(tasks[0].status, 'failed');
     assert.equal(tasks[1].status, 'failed', 'B (depends on A) cascade-failed');
     assert.equal(tasks[2].status, 'failed', 'C (depends on B) cascade-failed');
+  });
+
+  it('escalation message carries actions metadata for inline buttons (Retry/Skip/Abandon)', async () => {
+    const reasoner = {
+      plan: async () => ({ tasks: [{ description: 'x', agentType: 'claude', targetCwd: '/tmp', prompt: 'p', dependsOn: [] }] }),
+      replan: async () => ({ action: 'retry', prompt: 'r' }),
+      evaluate: async () => ({ success: true, summary: 'ok' }),
+      destroy: () => {},
+    };
+    coordinator = newCoord(im, wm, reasoner, runner, { mindInstanceId: MIND_ID });
+    await coordinator.submitGoal('p', { autoDispatch: false });
+    coordinator.approvePlan(null);
+    const taskId = coordinator.getActiveGoals()[0].plan.tasks[0].id;
+    // Burn through the replan budget so the task escalates
+    for (let i = 0; i <= coordinator.MAX_REPLANS; i++) {
+      coordinator._failTask(taskId, 'stuck');
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    const conv = im.getConversation(MIND_ID, 50);
+    const escalation = conv.reverse().find((m) =>
+      Array.isArray(m.actions) &&
+      m.actions.some((a) => a.command === '/retry')
+    );
+    assert.ok(escalation, 'escalation message has actions');
+    const commands = escalation.actions.map((a) => a.command);
+    assert.deepEqual(commands, ['/retry', '/skip', '/abandon']);
+    const retry = escalation.actions.find((a) => a.command === '/retry');
+    assert.equal(retry.kind, 'input');
+    assert.equal(retry.style, 'primary');
   });
 
   it('/abandon while awaiting_user_input cancels the goal', async () => {

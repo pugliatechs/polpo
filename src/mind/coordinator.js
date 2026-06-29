@@ -198,7 +198,12 @@ class Coordinator extends EventEmitter {
     lines.push('  /approve            — dispatch the plan as-is');
     lines.push('  /tweak <feedback>   — revise the plan with your feedback');
     lines.push('  /abandon            — cancel this goal');
-    this._report(lines.join('\n'));
+    this._report(lines.join('\n'), [
+      { label: 'Approve',  command: '/approve', kind: 'send',  style: 'primary' },
+      { label: 'Tweak…',   command: '/tweak',   kind: 'input',
+        inputPrompt: 'Tell the mind what to change about the plan…', style: 'secondary' },
+      { label: 'Abandon',  command: '/abandon', kind: 'send',  style: 'danger' },
+    ]);
   }
 
   /**
@@ -765,7 +770,12 @@ class Coordinator extends EventEmitter {
     lines.push('  /retry <hint>   — re-run this arm with your guidance');
     lines.push('  /skip           — abandon this arm and cascade-fail its dependents');
     lines.push('  /abandon        — cancel the whole goal');
-    this._report(lines.join('\n'));
+    this._report(lines.join('\n'), [
+      { label: 'Retry…',  command: '/retry',   kind: 'input',
+        inputPrompt: 'Give the arm guidance for this retry…', style: 'primary' },
+      { label: 'Skip',    command: '/skip',    kind: 'send',  style: 'secondary' },
+      { label: 'Abandon', command: '/abandon', kind: 'send',  style: 'danger' },
+    ]);
 
     this._emitGoalEvent(task.goalId, 'task_escalated', {
       taskId: task.id,
@@ -1302,12 +1312,36 @@ class Coordinator extends EventEmitter {
   /**
    * Send a message to the mind's conversation for the user to see.
    */
-  _report(text) {
-    this.instanceManager.addMessage(this.mindInstanceId, {
+  /**
+   * Post an assistant message to the mind's conversation.
+   *
+   * `actions`, when present, is an array of structured button
+   * descriptors the dashboard renders inline below the message body
+   * instead of asking the user to type a slash command. Each entry is
+   *   { label, command, kind?, inputPrompt? }
+   * where `kind` is one of:
+   *   - 'send'  (default): clicking dispatches `command` as a
+   *     send_prompt. Use for /approve, /abandon, /skip — single-tap
+   *     commands with no extra input.
+   *   - 'input': clicking opens an inline text field. On submit, the
+   *     dashboard concatenates `command` + a space + the user's text
+   *     and dispatches that as a send_prompt. Use for /tweak,
+   *     /retry — commands that need free-form follow-up.
+   *
+   * Older dashboards that don't know about `actions` ignore the field
+   * silently and the user falls back to typing the command (the body
+   * of the message still spells out the syntax).
+   */
+  _report(text, actions) {
+    var msg = {
       role: 'assistant',
       content: text,
       source: 'mind',
-    });
+    };
+    if (Array.isArray(actions) && actions.length > 0) {
+      msg.actions = actions;
+    }
+    this.instanceManager.addMessage(this.mindInstanceId, msg);
   }
 
   /**
