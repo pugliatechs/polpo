@@ -33,6 +33,22 @@ Supported agent CLIs: **Claude Code**, **OpenAI Codex**, **Google Gemini**, **Op
 - **Hooks** — taps into existing terminal sessions via Claude Code hooks for terminal prompt forwarding and phone-based tool approval
 - **Session Browser** — discovers and displays past sessions from Claude Code, Codex, Gemini, OpenCode, Pi, and Goose, with the ability to resume them
 
+### Single-user, by design
+
+Polpo is a **single-user application**. One operator per polpo instance, period. The on-disk state (`~/.config/polpo/`), the spawned-agent processes, the gateway key, the Alien Mind, and the dashboard auth all assume one human is in charge of this host.
+
+**Do NOT run two polpo servers on the same machine.** Even on different ports, they silently share state and will step on each other's:
+
+- `~/.config/polpo/mind-active-goals.json` — atomic rewrites mean in-flight goals from one instance will overwrite the other's on next snapshot
+- `~/.config/polpo/mind-memory.jsonl` — both append; the file becomes an indistinguishable mix of both instances' goal history
+- `<tmpdir>/polpo-gateway-uploads/` and `polpo-gateway-artifacts/` — shared TTL timers mean one instance can GC files the other is mid-stream serving to a caller
+- `~/.config/polpo/gateway.json` — both instances accept the same Bearer key; gateway calls authenticate against either, confusing audit
+- Session resume on the same `claude --resume <id>` — the second instance loses the race because Claude holds a file lock
+
+If you need polpo on different ports for different agent sets, run them in **separate user accounts** (one polpo per UID). Each operator gets their own `~/.config/polpo/`, their own agent home dirs, their own process tree, their own tunnel. That's the supported multi-instance pattern. Multi-tenant single-host is out of scope for v1.x.
+
+The Alien Mind and the gateway both consume this single-user assumption. Don't share a polpo host between humans even casually — give each developer their own polpo on their own machine, connected via a tunnel if they need remote access.
+
 ## Requirements
 
 - **Node.js** 22+
