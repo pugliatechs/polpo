@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.2.2](https://github.com/pugliatechs/polpo/compare/v1.2.1...v1.2.2) (2026-06-30)
+
+
+### Features
+
+* **gateway:** optional model override on POST /v1/tasks ([f424c34](https://github.com/pugliatechs/polpo/commit/f424c34aeb3c2ce78889d65e932a3e15debd9fd8))
+* **mind,web:** inline action buttons for plan approval + arm escalation ([a085792](https://github.com/pugliatechs/polpo/commit/a0857920f8fd7e2cc7d5ee4fa35de47243832c08))
+* **mind:** interactive plan approval + escalation on blocker ([ea4de1e](https://github.com/pugliatechs/polpo/commit/ea4de1ebf4de7919e9caffa0a7a8b5446d53b24c))
+* **server,web:** mobile setup QR codes for trust-localhost dashboards ([b367fa9](https://github.com/pugliatechs/polpo/commit/b367fa929d8d61c34f8164e7ca0289039acb54a0))
+* **server,web:** paginate + cache /api/sessions; "View all" modal replaces infinite scroll ([12d2e1d](https://github.com/pugliatechs/polpo/commit/12d2e1d973a9d2fa9ed46233e9852c01846f59e0))
+
+
+### Bug Fixes
+
+* **mind:** watcher only alerts on mind-owned arms, not user sessions ([bc5b9e3](https://github.com/pugliatechs/polpo/commit/bc5b9e34975873879227802f3e0c135a21b174aa))
+
+
+### Miscellaneous Chores
+
+* drop hand-written release notes file; CI generates them ([fa103b2](https://github.com/pugliatechs/polpo/commit/fa103b2855f0e23310b15574cdfd8fa16fcada6f))
+
 ## [1.2.1](https://github.com/pugliatechs/polpo/compare/v1.2.0...v1.2.1) (2026-06-20)
 
 

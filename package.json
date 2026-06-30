@@ -1,6 +1,6 @@
 {
   "name": "polpo",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "Multi-agent orchestrator for AI coding CLIs (Claude Code, Codex, Gemini, OpenCode, Pi, Goose) with mobile-first remote control. Like an octopus managing its tentacles.",
   "main": "src/server/index.js",
   "bin": {
