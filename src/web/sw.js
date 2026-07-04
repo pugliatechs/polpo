@@ -1,4 +1,17 @@
-// Polpo Service Worker — cache-first for static shell, network-first for API
+// Polpo Service Worker — cache-first for the explicit static shell
+// whitelist, network-passthrough for everything else.
+//
+// v1.2.3 note: earlier versions of this file used a blacklist ("cache
+// everything except /api and WebSocket upgrades"). That silently
+// intercepted /health — the endpoint the dashboard uses to read the
+// polpo version at page load — and returned stale cached responses
+// for hours after a polpo restart, so the version bar and About
+// modal showed the wrong number (or nothing at all if the cached
+// response was gone but the fresh fetch was blocked by an in-flight
+// SW upgrade). The fix is to invert the rule: only cache what's on
+// the SHELL_ASSETS list, and let everything else pass through to
+// the network. Any future dynamic endpoint we add is safe by
+// default — no more accidental cache poisoning of dynamic responses.
 const CACHE_NAME = 'polpo-v__POLPO_VERSION__';
 const SHELL_ASSETS = [
   '/',
@@ -10,6 +23,7 @@ const SHELL_ASSETS = [
   '/icon-512.png',
   '/manifest.json',
 ];
+const SHELL_SET = new Set(SHELL_ASSETS);
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -30,18 +44,21 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
 
-  // Never cache API calls or WebSocket upgrades
-  if (url.pathname.startsWith('/api') || event.request.headers.get('upgrade') === 'websocket') {
-    return;
-  }
+  // Only intercept our own origin. External resources go directly to
+  // the network — no chance of caching a CDN response by accident.
+  if (url.origin !== self.location.origin) return;
 
-  // Cache-first for static shell assets
+  // Whitelist-only: cache-first ONLY for the explicit shell assets.
+  // Everything else (including /health, /api/*, /sw.js, and any
+  // future dynamic endpoints) falls through to the browser and hits
+  // the network directly.
+  if (!SHELL_SET.has(url.pathname)) return;
+
   event.respondWith(
     caches.match(event.request).then((cached) => {
       if (cached) return cached;
       return fetch(event.request).then((response) => {
-        // Only cache same-origin successful responses
-        if (response.ok && url.origin === self.location.origin) {
+        if (response.ok) {
           const clone = response.clone();
           caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
         }
@@ -49,6 +66,7 @@ self.addEventListener('fetch', (event) => {
       });
     }).catch(() => {
       // Offline fallback: serve index.html for navigation requests
+      // that couldn't be answered from cache or network.
       if (event.request.mode === 'navigate') {
         return caches.match('/');
       }

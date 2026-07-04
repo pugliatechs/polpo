@@ -5265,12 +5265,38 @@
   loadProfile();
   loadQrCodes();
 
-  // Fetch version from health endpoint
-  fetch('/health').then(function (r) { return r.json(); }).then(function (data) {
-    if (data.version) {
-      var versionText = 'v' + data.version;
-      document.getElementById('app-version').textContent = versionText;
-      document.getElementById('about-version').textContent = versionText;
-    }
-  }).catch(function () {});
+  // Fetch version from the /health endpoint and paint it in the header
+  // bar + About modal. Refreshed on SW controller change so an in-place
+  // polpo restart (mobile PWA left open across a release) updates the
+  // display without requiring a hard reload from the user.
+  //
+  // `cache: 'no-store'` is belt-and-braces against future SW misbehaviour;
+  // v1.2.3's SW already lets /health pass through, but a stale SW on the
+  // client from an earlier polpo version might still be intercepting.
+  function refreshVersion() {
+    fetch('/health', { cache: 'no-store' })
+      .then(function (r) {
+        if (!r.ok) throw new Error('health_http_' + r.status);
+        return r.json();
+      })
+      .then(function (data) {
+        if (data && data.version) {
+          var versionText = 'v' + data.version;
+          var barEl = document.getElementById('app-version');
+          var aboutEl = document.getElementById('about-version');
+          if (barEl) barEl.textContent = versionText;
+          if (aboutEl) aboutEl.textContent = versionText;
+        }
+      })
+      .catch(function (err) {
+        // Swallow but log — a failure here doesn't break the dashboard,
+        // just leaves the version bar empty. Console tells the operator
+        // what happened when they're diagnosing.
+        console.warn('[polpo] /health failed:', err && err.message);
+      });
+  }
+  refreshVersion();
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.addEventListener('controllerchange', refreshVersion);
+  }
 })();
