@@ -407,6 +407,25 @@ function createServer(options = {}) {
     getTunnelInfo() {
       return tunnelInfo ? Object.assign({}, tunnelInfo) : null;
     },
+    /**
+     * Push a message to every connected dashboard client. Used by the
+     * tunnel supervisor to announce a rotated URL so the Mobile Setup
+     * QR card re-renders without a reload.
+     */
+    broadcastToDashboards(message) {
+      if (wss && typeof wss.broadcastToDashboards === 'function') {
+        wss.broadcastToDashboards(message);
+      }
+    },
+    /**
+     * Web-push handle. Exposed so the tunnel supervisor can notify
+     * phones whose connection just died with the tunnel: push delivery
+     * goes through the platform's push service, NOT through the tunnel,
+     * so it reaches a device that can no longer load the dashboard.
+     */
+    get pushManager() {
+      return pushManager;
+    },
     get authState() {
       return authState;
     },

@@ -68,6 +68,13 @@ function start(port) {
         resolve({
           url: url,
           close: () => killChild(child),
+          // Post-startup liveness signal consumed by TunnelSupervisor.
+          // Quick Tunnels have no fixed lifetime but they die with the
+          // cloudflared process (crash, OOM, network collapse beyond
+          // cloudflared's own retries). Without this the tunnel goes
+          // silently dead and the dashboard keeps advertising a URL
+          // that 404s.
+          onExit: (cb) => child.once('exit', cb),
         });
       }
     }

@@ -519,6 +519,10 @@ function setupWebSocket(server, instanceManager, getAuthState, pushManager, outb
   wss.opencodeScanner = opencodeScanner;
   wss.piScanner = piScanner;
   wss.gooseScanner = gooseScanner;
+  // Exposed so callers outside the websocket module (e.g. the tunnel
+  // supervisor announcing a rotated URL) can push an event to every
+  // connected dashboard without reaching into module internals.
+  wss.broadcastToDashboards = broadcastToDashboards;
 
   return wss;
 }

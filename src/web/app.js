@@ -827,6 +827,22 @@
         renderList();
         break;
 
+      case 'tunnel:changed':
+        // The tunnel supervisor rotated the public URL (quick tunnels
+        // get a fresh subdomain on every restart). Re-fetch the QR
+        // panel so a dashboard open on the host shows the new code
+        // without a reload. The endpoint is localhost+trust-localhost
+        // gated, so on any other client this is a cheap no-op.
+        loadQrCodes();
+        break;
+
+      case 'tunnel:down':
+        // Supervisor gave up. Hide the stale QR rather than leaving a
+        // code that resolves to a dead URL.
+        var qrSection = document.getElementById('qr-codes-section');
+        if (qrSection) qrSection.classList.add('hidden');
+        break;
+
       case 'outbox_update':
         // The hub fired when the agent (in this instance) went idle
         // and produced files in its outbox dir during the just-finished

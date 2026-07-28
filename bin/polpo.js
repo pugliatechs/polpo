@@ -260,17 +260,83 @@ async function runServer() {
   const port = parseInt(flags.port) || 7890;
   let tunnel = null;
 
-  // Start tunnel if requested
+  // Start tunnel if requested.
+  //
+  // The tunnel runs under a supervisor: quick-tunnel providers die with
+  // their child process (crash, OOM, network partition) and Cloudflare
+  // mints a NEW URL on every restart. Without supervision the tunnel
+  // went silently dead and polpo kept advertising a URL that 404s. The
+  // supervisor restarts with backoff and announces each new URL to the
+  // dashboard (QR re-render) and to phones (web push, which reaches a
+  // device that can no longer load the dashboard because push is
+  // delivered by the platform, not through our tunnel).
   if (useTunnel) {
     try {
       const { startTunnel } = require('../src/tunnel/index');
+      const { TunnelSupervisor } = require('../src/tunnel/supervisor');
       const { displayQR } = require('../src/tunnel/qr');
-      tunnel = await startTunnel({
-        provider: flags.tunnel,
-        port,
-        tunnelHost: flags['tunnel-host'],
-        tunnelPort: flags['tunnel-port'] ? parseInt(flags['tunnel-port']) : undefined,
+
+      const supervisor = new TunnelSupervisor({
+        startTunnel,
+        tunnelOpts: {
+          provider: flags.tunnel,
+          port,
+          tunnelHost: flags['tunnel-host'],
+          tunnelPort: flags['tunnel-port'] ? parseInt(flags['tunnel-port']) : undefined,
+        },
       });
+
+      // Coalesce pushes: a flapping provider could otherwise fire one
+      // notification per rotation and bury the user in alerts about
+      // URLs that are already stale by the time they tap.
+      const PUSH_COALESCE_MS = 5 * 60 * 1000;
+      let lastPushAt = 0;
+      let isFirstUrl = true;
+
+      supervisor.on('url', ({ url }) => {
+        // Store the BARE url — the /api/qr-codes route stitches the
+        // token in at request time from the current authState.
+        if (typeof server.setTunnelInfo === 'function') {
+          server.setTunnelInfo({ url, provider: flags.tunnel || 'auto' });
+        }
+
+        if (isFirstUrl) {
+          isFirstUrl = false;
+          return;   // startup banner is printed below, outside the handler
+        }
+
+        // --- rotation (not the initial start) ---
+        console.log(`\n  🌐 Tunnel URL changed: ${url}`);
+        displayQR(token ? `${url}?token=${token}` : url);
+
+        // Tell any connected dashboard to re-render its Mobile Setup QR.
+        if (typeof server.broadcastToDashboards === 'function') {
+          server.broadcastToDashboards({ type: 'tunnel:changed', url });
+        }
+
+        // Tell phones that just lost their connection. Push is delivered
+        // out-of-band by the platform push service, so it lands even
+        // though the old tunnel URL is dead.
+        const now = Date.now();
+        if (server.pushManager && (now - lastPushAt) > PUSH_COALESCE_MS) {
+          lastPushAt = now;
+          server.pushManager
+            .sendToAll('Polpo tunnel changed', 'Tap to reconnect on the new URL.', 'tunnel-changed')
+            .catch(() => {});
+        }
+      });
+
+      supervisor.on('gave-up', () => {
+        console.error('  ⚠️  Tunnel supervisor gave up after repeated failures.');
+        console.error('     Restart polpo, or use a named Cloudflare tunnel for a stable URL.');
+        if (typeof server.setTunnelInfo === 'function') server.setTunnelInfo(null);
+        if (typeof server.broadcastToDashboards === 'function') {
+          server.broadcastToDashboards({ type: 'tunnel:down' });
+        }
+      });
+
+      await supervisor.start();
+      tunnel = { url: supervisor.url, close: () => supervisor.stop() };
 
       // Build URL with token baked in for QR code
       let tunnelUrl = tunnel.url;
@@ -286,18 +352,6 @@ async function runServer() {
         }
       }
       displayQR(tunnelUrl);
-
-      // Tell the server about the tunnel so /api/qr-codes can re-render
-      // the QR on demand from the dashboard (useful when running under
-      // screen/tmux and the startup QR has scrolled off the terminal).
-      // We store the BARE url (no token) here — the api route stitches
-      // the token in at request time from the current authState.
-      if (typeof server.setTunnelInfo === 'function') {
-        server.setTunnelInfo({
-          url: tunnel.url,
-          provider: flags.tunnel || 'auto',
-        });
-      }
     } catch (err) {
       console.error(`  ⚠️  Tunnel failed: ${err.message}`);
       console.log('  Server is still running on LAN.\n');

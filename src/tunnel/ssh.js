@@ -50,6 +50,7 @@ function start(port, opts = {}) {
         resolve({
           url: `${scheme}://${host}${portSuffix}`,
           close: () => killChild(child),
+          onExit: (cb) => child.once('exit', cb),
         });
       }
     }, 3000);

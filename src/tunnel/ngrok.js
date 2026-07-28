@@ -28,7 +28,7 @@ function start(port) {
           .then((url) => {
             if (!resolved) {
               resolved = true;
-              resolve({ url, close: () => killChild(child) });
+              resolve({ url, close: () => killChild(child), onExit: (cb) => child.once('exit', cb) });
             }
           })
           .catch(() => {
@@ -51,7 +51,7 @@ function start(port) {
         if (url && url.startsWith('https://')) {
           resolved = true;
           clearTimeout(timeout);
-          resolve({ url, close: () => killChild(child) });
+          resolve({ url, close: () => killChild(child), onExit: (cb) => child.once('exit', cb) });
         }
       } catch {
         // not JSON, skip
