@@ -1,6 +1,11 @@
 const { describe, it, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const { CodexAgent } = require('../src/agent/codex-agent');
+
+const UPLOAD_DIR = path.join(os.tmpdir(), 'polpo-uploads');
 
 describe('CodexAgent', () => {
   describe('constructor', () => {
@@ -203,6 +208,131 @@ describe('CodexAgent', () => {
       agent.abort = () => { called = true; };
       agent._handleHubMessage({ type: 'abort' });
       assert.ok(called);
+    });
+  });
+
+  describe('buildArgs', () => {
+    // Flags accepted by `codex exec resume`. That subcommand takes a narrower
+    // set than `codex exec` (no --cd, no -s/--sandbox, no -p/--profile), and a
+    // flag it rejects aborts the process before the prompt is ever sent.
+    const RESUME_SAFE_FLAGS = new Set([
+      '--json',
+      '-m',
+      '--model',
+      '-i',
+      '--image',
+      '--full-auto',
+      '--dangerously-bypass-approvals-and-sandbox',
+      '--skip-git-repo-check',
+      '--ephemeral',
+      '-c',
+      '--config',
+    ]);
+
+    it('puts exec first, --json on, and the prompt last', () => {
+      const agent = new CodexAgent({ cwd: '/tmp/project' });
+      const args = agent.buildArgs('do the thing');
+      assert.equal(args[0], 'exec');
+      assert.ok(args.includes('--json'));
+      assert.equal(args[args.length - 1], 'do the thing');
+    });
+
+    it('never emits -a, which `codex exec` removed', () => {
+      for (const mode of ['default', 'bypass', 'plan', undefined]) {
+        const agent = new CodexAgent({ cwd: '/tmp/project', permissionMode: mode });
+        const args = agent.buildArgs('hi');
+        assert.ok(!args.includes('-a'), `-a leaked in mode ${mode}`);
+        assert.ok(!args.includes('--ask-for-approval'), `--ask-for-approval leaked in mode ${mode}`);
+      }
+    });
+
+    it('uses the sandboxed --full-auto by default', () => {
+      const agent = new CodexAgent({ cwd: '/tmp/project' });
+      const args = agent.buildArgs('hi');
+      assert.ok(args.includes('--full-auto'));
+      assert.ok(!args.includes('--dangerously-bypass-approvals-and-sandbox'));
+    });
+
+    it('drops the sandbox only in bypass mode', () => {
+      const agent = new CodexAgent({ cwd: '/tmp/project', permissionMode: 'bypass' });
+      const args = agent.buildArgs('hi');
+      assert.ok(args.includes('--dangerously-bypass-approvals-and-sandbox'));
+      assert.ok(!args.includes('--full-auto'));
+    });
+
+    it('passes --cd on a fresh run', () => {
+      const agent = new CodexAgent({ cwd: '/tmp/project' });
+      const args = agent.buildArgs('hi');
+      assert.equal(args[args.indexOf('--cd') + 1], '/tmp/project');
+    });
+
+    it('omits --cd when resuming, since `exec resume` rejects it', () => {
+      const agent = new CodexAgent({ cwd: '/tmp/project', resumeSessionId: 'sess-1' });
+      const args = agent.buildArgs('hi');
+      assert.ok(!args.includes('--cd'));
+      assert.deepEqual(args.slice(0, 3), ['exec', 'resume', 'sess-1']);
+    });
+
+    it('prefers a live threadId over the initial resumeSessionId', () => {
+      const agent = new CodexAgent({ cwd: '/tmp/project', resumeSessionId: 'sess-1' });
+      agent.threadId = 'thread-9';
+      const args = agent.buildArgs('hi');
+      assert.deepEqual(args.slice(0, 3), ['exec', 'resume', 'thread-9']);
+    });
+
+    it('emits only resume-safe flags when resuming', () => {
+      for (const mode of ['default', 'bypass']) {
+        const agent = new CodexAgent({
+          cwd: '/tmp/project',
+          model: 'gpt-5-codex',
+          permissionMode: mode,
+          resumeSessionId: 'sess-1',
+        });
+        const args = agent.buildArgs('hi');
+        for (const arg of args) {
+          if (!arg.startsWith('-')) continue;
+          assert.ok(
+            RESUME_SAFE_FLAGS.has(arg),
+            `${arg} is not accepted by \`codex exec resume\` (mode ${mode})`
+          );
+        }
+      }
+    });
+
+    it('passes the model through', () => {
+      const agent = new CodexAgent({ cwd: '/tmp/project', model: 'gpt-5-codex' });
+      const args = agent.buildArgs('hi');
+      assert.equal(args[args.indexOf('-m') + 1], 'gpt-5-codex');
+    });
+
+    it('attaches uploaded images and references other uploads in the prompt', () => {
+      const agent = new CodexAgent({ cwd: '/tmp/project' });
+      const img = path.join(UPLOAD_DIR, 'shot.png');
+      const doc = path.join(UPLOAD_DIR, 'notes.txt');
+      const args = agent.buildArgs('look', [
+        { path: img, mediaType: 'image/png' },
+        { path: doc, mediaType: 'text/plain' },
+      ]);
+      assert.equal(args[args.indexOf('--image') + 1], img);
+      assert.match(args[args.length - 1], /look\n\[Attached file: .*notes\.txt\]/);
+    });
+
+    it('ignores attachment paths outside the upload dir', () => {
+      const agent = new CodexAgent({ cwd: '/tmp/project' });
+      const args = agent.buildArgs('look', [
+        { path: '/etc/passwd', mediaType: 'image/png' },
+        { path: path.join(UPLOAD_DIR, '..', 'escape.png'), mediaType: 'image/png' },
+      ]);
+      assert.ok(!args.includes('--image'));
+      assert.equal(args[args.length - 1], 'look');
+    });
+
+    it('builds args without touching the filesystem', () => {
+      const agent = new CodexAgent({ cwd: '/tmp/project', instanceId: 'inst-buildargs-probe' });
+      const mcpPath = path.join(os.tmpdir(), 'polpo-codex-mcp-inst-buildargs-probe.json');
+      if (fs.existsSync(mcpPath)) fs.unlinkSync(mcpPath);
+      agent.buildArgs('hi');
+      assert.equal(fs.existsSync(mcpPath), false);
     });
   });
 });

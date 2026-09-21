@@ -364,7 +364,11 @@ Polpo supports OpenAI Codex CLI with full parity:
 ### Codex-Specific Notes
 
 - Codex uses one-shot process invocation (`codex exec`) rather than stdin streaming. Multi-turn requires killing and respawning with `resume`, which adds ~1-2s between prompts.
-- Permission handling uses `--full-auto` for bypass mode and `-a on-request` for default mode.
+- Permission handling: default mode uses `--full-auto` (sandboxed workspace-write execution) and bypass mode uses
+  `--dangerously-bypass-approvals-and-sandbox`. `codex exec` has no `-a/--ask-for-approval` flag, since it is
+  non-interactive and there is nobody to answer a prompt.
+- Resuming uses `codex exec resume <id>`, which accepts a narrower flag set than `codex exec`. Notably it rejects
+  `--cd`, so the working root is set on the spawned process instead.
 - Images are attached via `--image <path>` flag; other files are referenced in the prompt text.
 - The dashboard shows a green "Codex" badge on Codex instances, and a purple "Claude" badge on Claude instances.
 

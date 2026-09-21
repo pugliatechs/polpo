@@ -162,17 +162,35 @@ class CodexAgent {
 
   // --- Codex CLI process management ---
 
-  spawnCodex(prompt, attachments) {
+  /**
+   * Build the codex argv for one run.
+   *
+   * Kept free of side effects so the flag set can be asserted in tests: codex
+   * has removed flags from `exec` before (`-a/--ask-for-approval`), and a
+   * rejected flag makes every spawn abort before the prompt is ever sent.
+   *
+   * Every flag emitted here must be accepted by BOTH `codex exec` and
+   * `codex exec resume`, because the resume subcommand takes a narrower set.
+   *
+   * @param {string} prompt
+   * @param {Array<{path:string, mediaType:string}>} [attachments]
+   * @returns {string[]}
+   */
+  buildArgs(prompt, attachments) {
     const args = ['exec'];
 
     // If resuming a previous thread, use resume subcommand
-    if (this.threadId || this.resumeSessionId) {
+    const resuming = Boolean(this.threadId || this.resumeSessionId);
+    if (resuming) {
       args.push('resume', this.threadId || this.resumeSessionId);
     }
 
     args.push('--json');
 
-    if (this.cwd) {
+    // `codex exec` accepts --cd, but `codex exec resume` does not: passing it
+    // there aborts with "unexpected argument '--cd'". We spawn with cwd set
+    // anyway, so the working root is already correct on the resume path.
+    if (this.cwd && !resuming) {
       args.push('--cd', this.cwd);
     }
 
@@ -180,36 +198,16 @@ class CodexAgent {
       args.push('-m', this.model);
     }
 
-    // Permission handling
+    // Permission handling. `codex exec` has no -a/--ask-for-approval flag: it
+    // is non-interactive, so there is nobody to answer a prompt. Approval
+    // policy is expressed through the sandbox instead.
     if (this.permissionMode === 'bypass') {
-      args.push('--full-auto');
+      // Mirrors claude's --dangerously-skip-permissions: no sandbox, no prompts.
+      args.push('--dangerously-bypass-approvals-and-sandbox');
     } else {
-      // Default: use on-request approval
-      args.push('-a', 'on-request');
-
-      // Register Polpo's MCP permission server for phone-based approval
-      const permissionServerPath = path.join(__dirname, 'permission-server.js');
-      const mcpConfigObj = {
-        mcpServers: {
-          polpo: {
-            command: process.execPath,
-            args: [permissionServerPath],
-            env: {
-              POLPO_INSTANCE_ID: this.instanceId,
-              POLPO_HUB_URL: this.serverUrl
-                .replace('ws://', 'http://')
-                .replace('wss://', 'https://'),
-              ...(this.token ? { POLPO_AUTH_TOKEN: this.token } : {}),
-            },
-          },
-        },
-      };
-      const mcpConfigPath = path.join(os.tmpdir(), `polpo-codex-mcp-${this.instanceId}.json`);
-      fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfigObj, null, 2), { mode: 0o600 });
-      this._log(`MCP config written to ${mcpConfigPath}`);
-      // Codex doesn't support --permission-prompt-tool yet, but the MCP server
-      // will still be available for tool-based approval if/when Codex adds support.
-      // For now, rely on -a on-request for sandbox-level permissions.
+      // Sandboxed automatic execution (workspace-write). This is what the old
+      // `-a on-request` was reaching for, minus the flag codex removed.
+      args.push('--full-auto');
     }
 
     // Attach images via --image flag
@@ -238,6 +236,46 @@ class CodexAgent {
     }
 
     args.push(fullPrompt);
+
+    return args;
+  }
+
+  /**
+   * Write the MCP permission-server config for this run.
+   *
+   * Codex has no --permission-prompt-tool equivalent, so nothing on the
+   * command line points at this file yet. It is written so the server is
+   * ready the moment codex grows tool-based approval. Until then the
+   * --full-auto workspace-write sandbox is the actual enforcement.
+   */
+  _writeMcpConfig() {
+    const permissionServerPath = path.join(__dirname, 'permission-server.js');
+    const mcpConfigObj = {
+      mcpServers: {
+        polpo: {
+          command: process.execPath,
+          args: [permissionServerPath],
+          env: {
+            POLPO_INSTANCE_ID: this.instanceId,
+            POLPO_HUB_URL: this.serverUrl
+              .replace('ws://', 'http://')
+              .replace('wss://', 'https://'),
+            ...(this.token ? { POLPO_AUTH_TOKEN: this.token } : {}),
+          },
+        },
+      },
+    };
+    const mcpConfigPath = path.join(os.tmpdir(), `polpo-codex-mcp-${this.instanceId}.json`);
+    fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfigObj, null, 2), { mode: 0o600 });
+    this._log(`MCP config written to ${mcpConfigPath}`);
+  }
+
+  spawnCodex(prompt, attachments) {
+    const args = this.buildArgs(prompt, attachments);
+
+    if (this.permissionMode !== 'bypass') {
+      this._writeMcpConfig();
+    }
 
     this._log(`Spawning: ${this.codexBinary} ${args.join(' ')}`);
 
