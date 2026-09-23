@@ -247,14 +247,19 @@ function readLines(filePath, n, mode) {
   return new Promise((resolve) => {
     if (mode === 'tail') {
       // Read last N lines by reading the end of the file
-      const stat = fs.statSync(filePath);
-      const chunkSize = Math.min(stat.size, 8192);
-      const buf = Buffer.alloc(chunkSize);
-      const fd = fs.openSync(filePath, 'r');
-      fs.readSync(fd, buf, 0, chunkSize, stat.size - chunkSize);
-      fs.closeSync(fd);
-      const lines = buf.toString('utf8').split('\n').filter(Boolean);
-      resolve(lines.slice(-n));
+      try {
+        const stat = fs.statSync(filePath);
+        const chunkSize = Math.min(stat.size, 8192);
+        const buf = Buffer.alloc(chunkSize);
+        const fd = fs.openSync(filePath, 'r');
+        fs.readSync(fd, buf, 0, chunkSize, stat.size - chunkSize);
+        fs.closeSync(fd);
+        const lines = buf.toString('utf8').split('\n').filter(Boolean);
+        resolve(lines.slice(-n));
+      } catch {
+        // Missing or unreadable file: resolve empty, same as head mode.
+        resolve([]);
+      }
     } else {
       // Read first N lines
       const lines = [];
@@ -268,6 +273,11 @@ function readLines(filePath, n, mode) {
         }
       });
       rl.on('close', () => resolve(lines));
+      // Both listeners are required. readline re-emits input stream
+      // errors on the Interface, and an Interface with no 'error'
+      // listener throws, so a missing or unreadable transcript took the
+      // whole server down instead of resolving empty.
+      rl.on('error', () => resolve(lines));
       stream.on('error', () => resolve(lines));
     }
   });
@@ -1302,9 +1312,78 @@ function loadPiHistory(filePath) {
   });
 }
 
+/**
+ * Read the cwd a session was CREATED in, from its transcript file.
+ *
+ * Agents locate a session by hashing its cwd into a project-slug
+ * directory: `--resume <id>` only finds the transcript in the one
+ * project dir the file is physically filed under. That directory
+ * corresponds to the cwd in effect when the session was created, which
+ * is the first `cwd` recorded in the file. A session's cwd can drift
+ * mid-conversation (a workspace switch or a `cd`) but the file stays
+ * filed under its original slug, so the head cwd, not the latest one,
+ * is the correct launch directory.
+ *
+ * Exported for unit tests, which work against fixture files rather
+ * than the hardcoded store directories (same split as
+ * loadHistory / loadClaudeHistory).
+ *
+ * @param {string} filePath - absolute path to a JSONL transcript
+ * @returns {Promise<string|null>} the recorded cwd, or null
+ */
+async function readSessionCwd(filePath) {
+  let headLines;
+  try {
+    headLines = await readLines(filePath, 20, 'head');
+  } catch {
+    return null;
+  }
+  for (const line of headLines) {
+    let obj;
+    try {
+      obj = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!obj || typeof obj !== 'object') continue;
+    // Claude records cwd at the top level; codex nests it under
+    // session_meta's payload.
+    const cwd = obj.cwd || (obj.payload && obj.payload.cwd);
+    if (typeof cwd === 'string' && cwd) return cwd;
+  }
+  return null;
+}
+
+/**
+ * Resolve the directory a session must be resumed FROM.
+ *
+ * Returning the authoritative on-disk cwd lets the resume endpoint
+ * avoid trusting a possibly-empty client-supplied cwd, which fell
+ * through to process.cwd() and silently launched the agent in polpo's
+ * own directory, where it reported that no conversation was found.
+ *
+ * Returns null for the SQLite-backed stores (opencode, pi, goose),
+ * whose transcripts this does not read; the caller falls back.
+ *
+ * @param {string} sessionId
+ * @returns {Promise<string|null>} absolute cwd, or null if undiscoverable
+ */
+async function resolveSessionCwd(sessionId) {
+  let filePath;
+  try {
+    filePath = findSessionFile(sessionId);
+  } catch {
+    return null;
+  }
+  if (!filePath) return null;
+  return readSessionCwd(filePath);
+}
+
 module.exports = {
   scanSessions,
   loadHistory,
+  resolveSessionCwd,
+  readSessionCwd,
   // Exported for unit tests: takes an absolute path to a JSONL file
   // and returns the parsed history array. The public `loadHistory`
   // resolves a sessionId to the right file via CLAUDE_DIR — for tests

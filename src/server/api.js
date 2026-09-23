@@ -4,7 +4,7 @@ const path = require('path');
 const crypto = require('crypto');
 const os = require('os');
 const { execFile } = require('child_process');
-const { scanSessions, loadHistory } = require('./sessions');
+const { scanSessions, loadHistory, resolveSessionCwd } = require('./sessions');
 const { createAgent } = require('../agent/agent-factory');
 const {
   UPLOAD_DIR,
@@ -265,7 +265,7 @@ function createApiRouter(instanceManager, getAuthState, pushManager, outboxManag
       const maxDays = Math.min(parseInt(req.query.days) || 7, 365);
       const offset = Math.max(parseInt(req.query.offset) || 0, 0);
       const limit = Math.min(parseInt(req.query.limit) || 50, 500);
-      const source = req.query.source || 'all'; // 'claude' | 'codex' | 'gemini' | 'opencode' | 'pi' | 'all'
+      const source = req.query.source || 'all'; // 'claude' | 'codex' | 'gemini' | 'opencode' | 'pi' | 'goose' | 'all'
 
       const cacheKey = maxDays + ':' + source;
       let entry = sessionsCache.get(cacheKey);
@@ -355,17 +355,35 @@ function createApiRouter(instanceManager, getAuthState, pushManager, outboxManag
       if (existing.ws) try { existing.ws.close(); } catch {}
     }
 
-    // Validate cwd: must be an absolute path to an existing directory
-    let resolvedCwd = process.cwd();
-    if (cwd && typeof cwd === 'string' && path.isAbsolute(cwd)) {
+    // Resolve the directory to resume FROM.
+    //
+    // The cwd recorded in the session's own transcript wins. Agents
+    // locate a transcript by hashing the cwd into a project slug, so
+    // resuming from any other directory simply does not find it. The
+    // client-supplied cwd is a fallback for the SQLite-backed stores
+    // this cannot read, and for a project that has since moved.
+    //
+    // The old process.cwd() default was the failure this fixes: a
+    // resume with no usable cwd launched the agent inside polpo's own
+    // directory, where it reported that no conversation was found.
+    const isUsableDir = (p) => {
+      if (!p || typeof p !== 'string' || !path.isAbsolute(p)) return false;
       try {
-        if (fs.statSync(cwd).isDirectory()) {
-          resolvedCwd = cwd;
-        }
+        return fs.statSync(p).isDirectory();
       } catch {
-        // Directory doesn't exist, use default
+        return false;
       }
+    };
+
+    let resolvedCwd = null;
+    try {
+      const recordedCwd = await resolveSessionCwd(sessionId);
+      if (isUsableDir(recordedCwd)) resolvedCwd = recordedCwd;
+    } catch {
+      // Unreadable store; fall through to the client-supplied cwd.
     }
+    if (!resolvedCwd && isUsableDir(cwd)) resolvedCwd = cwd;
+    if (!resolvedCwd) resolvedCwd = process.cwd();
 
     // Pass auth token so the spawned agent can register with the hub
     const authState = typeof getAuthState === 'function' ? getAuthState() : null;
@@ -409,7 +427,7 @@ function createApiRouter(instanceManager, getAuthState, pushManager, outboxManag
     const { agentType, cwd, name, model } = req.body;
     const type = agentType || 'claude';
 
-    const validTypes = ['claude', 'codex', 'gemini', 'opencode', 'pi'];
+    const validTypes = ['claude', 'codex', 'gemini', 'opencode', 'pi', 'goose'];
     if (!validTypes.includes(type)) {
       return res.status(400).json({ error: `Invalid agentType. Must be one of: ${validTypes.join(', ')}` });
     }

@@ -333,3 +333,80 @@ describe('isSystemReminderText', () => {
     assert.equal(isSystemReminderText(42), false);
   });
 });
+
+describe('readSessionCwd', () => {
+  const { readSessionCwd, resolveSessionCwd } = require('../src/server/sessions');
+
+  afterEach(() => {
+    try { teardown(); } catch {}
+  });
+
+  function writeRaw(name, lines) {
+    setup();
+    const filePath = path.join(tmpDir, name);
+    fs.writeFileSync(filePath, lines.join('\n') + '\n');
+    return filePath;
+  }
+
+  it('reads the top-level cwd a claude transcript records', async () => {
+    const fp = writeRaw('claude.jsonl', [
+      JSON.stringify({ type: 'user', cwd: '/home/user/myproject', message: {} }),
+    ]);
+    assert.equal(await readSessionCwd(fp), '/home/user/myproject');
+  });
+
+  it('reads the cwd codex nests under session_meta payload', async () => {
+    const fp = writeRaw('codex.jsonl', [
+      JSON.stringify({ type: 'session_meta', payload: { cwd: '/srv/api' } }),
+    ]);
+    assert.equal(await readSessionCwd(fp), '/srv/api');
+  });
+
+  it('returns the creation cwd, not a later one', async () => {
+    // The transcript stays filed under the slug of the directory it was
+    // created in, so a mid-conversation cd must not win: resuming from
+    // the later directory would not find the file at all.
+    const fp = writeRaw('drift.jsonl', [
+      JSON.stringify({ type: 'user', cwd: '/home/user/original' }),
+      JSON.stringify({ type: 'user', cwd: '/home/user/moved-here-later' }),
+    ]);
+    assert.equal(await readSessionCwd(fp), '/home/user/original');
+  });
+
+  it('skips leading lines that carry no cwd', async () => {
+    const fp = writeRaw('late.jsonl', [
+      JSON.stringify({ type: 'summary' }),
+      JSON.stringify({ type: 'meta', payload: {} }),
+      JSON.stringify({ type: 'user', cwd: '/home/user/found-it' }),
+    ]);
+    assert.equal(await readSessionCwd(fp), '/home/user/found-it');
+  });
+
+  it('tolerates malformed lines', async () => {
+    const fp = writeRaw('broken.jsonl', [
+      'not json at all',
+      '{"truncated":',
+      JSON.stringify({ type: 'user', cwd: '/home/user/ok' }),
+    ]);
+    assert.equal(await readSessionCwd(fp), '/home/user/ok');
+  });
+
+  it('returns null when no cwd appears in the head of the file', async () => {
+    const fp = writeRaw('nocwd.jsonl', [JSON.stringify({ type: 'user', message: {} })]);
+    assert.equal(await readSessionCwd(fp), null);
+  });
+
+  it('ignores a non-string cwd', async () => {
+    const fp = writeRaw('weird.jsonl', [JSON.stringify({ type: 'user', cwd: 42 })]);
+    assert.equal(await readSessionCwd(fp), null);
+  });
+
+  it('returns null for a file that does not exist', async () => {
+    setup();
+    assert.equal(await readSessionCwd(path.join(tmpDir, 'missing.jsonl')), null);
+  });
+
+  it('resolveSessionCwd returns null for an unknown session', async () => {
+    assert.equal(await resolveSessionCwd('no-such-session-id-at-all'), null);
+  });
+});

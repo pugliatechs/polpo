@@ -3544,7 +3544,16 @@
           $emptyState.classList.add('hidden');
         }
       })
-      .catch(function () {});
+      .catch(function (err) {
+        // Don't leave the sidebar silently empty on failure. A swallowed
+        // error here reads identically to "you have no recent sessions",
+        // which is exactly the ambiguity that makes a mobile "sessions
+        // disappeared" report impossible to diagnose. Log a breadcrumb so
+        // the device console shows whether /api/sessions 401'd, network
+        // failed, or returned something unexpected. (Same rationale as the
+        // /health breadcrumb added in v1.2.3.)
+        console.warn('[polpo] /api/sessions failed:', err && err.message);
+      });
   }
 
   function renderSessions() {
