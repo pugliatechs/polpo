@@ -52,11 +52,6 @@ function createMind(instanceManager, options) {
   // Create world model (observes all other agents)
   var worldModel = new WorldModel(instanceManager, mindId);
 
-  // Create reasoner (LLM-backed planning)
-  var reasoner = new Reasoner({
-    model: process.env.POLPO_MIND_MODEL || null,
-  });
-
   // Load policy early for agent runner config
   var policy = loadPolicy();
 
@@ -70,6 +65,16 @@ function createMind(instanceManager, options) {
     hubPort: options.serverPort || 7890,
     hubToken: options.authToken || null,
     autoApprove: policy.autoApproveSpawned,
+  });
+
+  // Create reasoner (LLM-backed planning). It runs on the same one-shot
+  // primitive as the arms, so every plan/evaluate/replan gets a fresh
+  // context and its own deadline, and POLPO_MIND_AGENT can point it at
+  // any supported CLI rather than only claude.
+  var reasoner = new Reasoner({
+    runner: runner,
+    agentType: process.env.POLPO_MIND_AGENT || 'claude',
+    model: process.env.POLPO_MIND_MODEL || null,
   });
 
   // Long-term memory (JSONL at ~/.config/polpo/mind-memory.jsonl)

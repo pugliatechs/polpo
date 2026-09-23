@@ -35,7 +35,7 @@ User (Phone Dashboard)
     v
 Alien Mind (instance in dashboard)
     |-- WorldModel: observes all agents via InstanceManager events
-    |-- Reasoner: spawns Claude Code for goal decomposition + re-planning
+    |-- Reasoner: one-shot agent run per plan / evaluate / replan
     |-- Coordinator: goal lifecycle + dependency graph + inter-arm context
     |-- OneShotAgentRunner: shared spawn/timeout/teardown primitive
     |     (also used by the HTTP gateway — same hardening for both)
@@ -251,7 +251,7 @@ Truncation limits keep the combined prompt bounded; each predecessor's output is
 
 ## Re-Planning on Failure
 
-When a task fails, the coordinator doesn't immediately give up. It calls the reasoner with the failure reason, the partial output, and the original plan, and asks for one of three actions:
+When a task fails, the coordinator doesn't immediately give up. It calls the reasoner with the failure reason, the output the arm produced before failing, and the original plan, and asks for one of three actions:
 
 | Action | Behaviour |
 |--------|-----------|
@@ -317,7 +317,7 @@ src/mind/
   coordinator.js     # Goal/task lifecycle, dispatch via runner.run(),
                      #   dependency graph, inter-arm context, re-plan,
                      #   memory + goal-store wiring
-  reasoner.js        # LLM planning + evaluate + replan, via Claude Code process
+  reasoner.js        # LLM planning + evaluate + replan, one one-shot run per call
   watcher.js         # Passive monitoring + policy-gated auto-cancel of stuck tasks
   policies.js        # Configurable autonomy levels (conservative/balanced/autonomous)
   memory.js          # Long-term goal memory (JSONL, Jaccard search)
@@ -361,8 +361,57 @@ POLPO_MIND_POLICY=conservative POLPO_MIND=1 node bin/polpo.js server
 
 - **Opt-in**: only loads when `POLPO_MIND=1` is set
 - **No new dependencies**: pure Node.js, uses existing agent infrastructure
-- **Process isolation**: the reasoner's Claude process uses `--dangerously-skip-permissions` but only generates JSON plans, never touches user code
+- **Process isolation**: reasoning runs bypass approvals but only generate JSON, never touch user code. A reply that does not parse as a plan is rejected outright rather than dispatched as a prompt
 - **Per-task agent isolation**: each arm is spawned fresh and terminated when the task ends — no cross-task state in agent processes
 - **Per-run hardening**: each arm inherits the runner's timeout, approval fail-closed, and clean teardown — the same protections gateway callers get
 - **Source tag**: every arm registers as `source: 'mind:<goalId-tail>'` so operators can audit which goal owned which arm
 - **No secrets handling**: the mind doesn't manage tokens or credentials
+
+## Execution records
+
+Arms are one-shot: the runner stops the agent and unregisters the instance
+*before* it notifies the coordinator, so once a run ends there is nothing left
+to read out of the world model. The runner's result is the only surviving
+trace of what an arm produced.
+
+The coordinator therefore stamps an execution record on every task the moment
+a run reaches a terminal state, whatever that state was:
+
+```js
+task.execution = {
+  status,            // 'completed' | 'failed' | 'cancelled'
+  output,            // everything the arm produced
+  error,             // null on success
+  durationMs,
+  agentInstanceId,
+  at,
+}
+```
+
+Everything downstream reads from that record rather than reaching back into
+the world model: evaluation, re-planning, user escalation, and the task
+summaries written to long-term memory.
+
+This matters because reaching back was silently vacuous. Before v1.2.3 the
+evaluation step guarded on a world-model read that was always empty, so
+`reasoner.evaluate()` never ran at all: every arm that exited cleanly was
+recorded as a success no matter what it actually said, and every long-term
+memory entry carried the placeholder summary instead of a finding. The
+re-planner had the same problem and chose retry/split/abandon from an error
+string alone.
+
+## Reasoner configuration
+
+The reasoner runs on the same `OneShotAgentRunner` as the arms. Each
+plan / evaluate / replan call is its own isolated run, so calls carry no
+shared context, run concurrently, and are individually bounded by a deadline.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `POLPO_MIND_AGENT` | `claude` | Which CLI reasons. Any supported agent works, so the mind can plan with a local model through `goose` or `codex --oss`. |
+| `POLPO_MIND_MODEL` | agent default | Model override for reasoning. |
+| `POLPO_MIND_TIMEOUT_MS` | `120000` | Per-call deadline. |
+
+Reasoning runs are tagged `source: 'mind-reasoner'` and hidden from the world
+model, so the planner is never offered its own reasoning process as an arm it
+could assign work to, and the watcher never files stuck alerts about it.

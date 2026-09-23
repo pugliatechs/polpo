@@ -461,3 +461,71 @@ describe('Watcher autonomous action on stuck agents', () => {
     assert.equal(coordinator._calls.length, 2, 'should be able to act on a fresh stuck episode');
   });
 });
+
+describe('Watcher: stuck alerts carry the arm output', () => {
+  var im, wm, watcher;
+  var MIND_ID = 'mind-001';
+
+  beforeEach(function () {
+    im = createMockIM();
+    im.register({ id: MIND_ID, name: 'Alien Mind', agentType: 'mind' });
+    wm = new WorldModel(im, MIND_ID);
+  });
+
+  afterEach(function () {
+    if (watcher) watcher.stop();
+    wm.destroy();
+  });
+
+  function stall(agentName) {
+    var policy = { stuckThresholdMs: 100, watcherIntervalMs: 30000 };
+    watcher = new Watcher({ worldModel: wm, instanceManager: im, mindInstanceId: MIND_ID, policy: policy });
+    im.registerMindArm({ id: 'a1', name: agentName });
+    im.updateStatus('a1', 'busy');
+    return watcher;
+  }
+
+  function alertText() {
+    var conv = im.getConversation(MIND_ID, 10);
+    var alerts = conv.filter(function (m) { return m.source === 'mind-watcher'; });
+    return alerts.length ? alerts[0].content : '';
+  }
+
+  it('quotes what the arm last said, so the user does not need the dashboard', function () {
+    stall('Stalled Worker');
+    im.addMessage('a1', { role: 'assistant', content: 'Which database should I migrate to?' });
+    im.get('a1').lastActivity = Date.now() - 200;
+
+    watcher._check();
+
+    var text = alertText();
+    assert.ok(text.includes('Stalled Worker'));
+    assert.ok(text.includes('Last output:'));
+    assert.ok(text.includes('Which database should I migrate to?'));
+  });
+
+  it('still alerts when the arm has said nothing at all', function () {
+    stall('Silent Worker');
+    im.get('a1').lastActivity = Date.now() - 200;
+
+    watcher._check();
+
+    var text = alertText();
+    assert.ok(text.includes('Silent Worker'));
+    assert.ok(text.includes('stuck'));
+    assert.ok(!text.includes('Last output:'));
+  });
+
+  it('quotes the assistant, not the prompt the mind sent', function () {
+    stall('Busy Worker');
+    im.addMessage('a1', { role: 'user', content: 'SECRET PROMPT TEXT' });
+    im.addMessage('a1', { role: 'assistant', content: 'Working on it, blocked on credentials.' });
+    im.get('a1').lastActivity = Date.now() - 200;
+
+    watcher._check();
+
+    var text = alertText();
+    assert.ok(text.includes('blocked on credentials'));
+    assert.ok(!text.includes('SECRET PROMPT TEXT'));
+  });
+});

@@ -126,10 +126,17 @@ function createMockRunner(im) {
       if (!r) throw new Error('no run for ' + agentInstanceId);
       runner._finishRun(r, 'completed', output || '', null);
     },
-    failRun(agentInstanceId, error) {
+    /**
+     * Fail a run. `output` is what the arm produced before failing; the
+     * real runner always reports it (one-shot-runner.js builds the
+     * result with `output: record.output` on every terminal status),
+     * so tests that omit it are testing a narrower case, not the
+     * normal one.
+     */
+    failRun(agentInstanceId, error, output) {
       const r = activeRuns.get(agentInstanceId);
       if (!r) throw new Error('no run for ' + agentInstanceId);
-      runner._finishRun(r, 'failed', '', error || 'failed');
+      runner._finishRun(r, 'failed', output || '', error || 'failed');
     },
     /** Simulate the runner forwarding a chunk from the agent. */
     fireChunk(agentInstanceId, text) {
@@ -1039,5 +1046,190 @@ describe('Coordinator: interactive task escalation', () => {
     assert.equal(ok, true);
     const goal = coordinator.getActiveGoals().find((g) => g.id === goalId);
     assert.equal(goal.status, 'failed');
+  });
+});
+
+describe('Coordinator: the mind sees what its arms produced', () => {
+  let im, wm, runner, coordinator;
+  const MIND_ID = 'mind-001';
+
+  // The runner tears the agent down before notifying the coordinator
+  // (one-shot-runner.js `_finalize`), so anything that reads the arm's
+  // output back out of the world model gets nothing. Everything here
+  // guards against that regression.
+  beforeEach(() => {
+    im = createMockIM();
+    im.register({ id: MIND_ID, name: 'Alien Mind', agentType: 'mind' });
+    wm = new WorldModel(im, MIND_ID);
+    runner = createMockRunner(im);
+  });
+
+  afterEach(() => {
+    if (coordinator) coordinator.destroy();
+    runner.destroy();
+    wm.destroy();
+  });
+
+  function reasonerSpy(evaluation, replanAction) {
+    const seen = { evaluate: [], replan: [] };
+    return {
+      seen,
+      plan: async () => ({
+        tasks: [{ description: 'Do the thing', agentType: 'claude', targetCwd: '/tmp', prompt: 'p', dependsOn: [] }],
+      }),
+      replan: async (opts) => { seen.replan.push(opts); return replanAction || { action: 'abandon', reason: 'x' }; },
+      evaluate: async (desc, output) => { seen.evaluate.push({ desc, output }); return evaluation || { success: true, summary: 'ok' }; },
+      destroy: () => {},
+    };
+  }
+
+  const settle = () => new Promise((r) => setTimeout(r, 30));
+
+  it('evaluates a completed task against the output the runner captured', async () => {
+    const reasoner = reasonerSpy();
+    coordinator = newCoord(im, wm, reasoner, runner, { mindInstanceId: MIND_ID });
+    await coordinator.submitGoal('Goal');
+    runner.completeNextRun('I cannot do this, the credentials are missing.');
+    await settle();
+
+    assert.equal(reasoner.seen.evaluate.length, 1);
+    assert.equal(reasoner.seen.evaluate[0].output, 'I cannot do this, the credentials are missing.');
+  });
+
+  it('skips evaluation when the arm produced nothing to judge', async () => {
+    const reasoner = reasonerSpy();
+    coordinator = newCoord(im, wm, reasoner, runner, { mindInstanceId: MIND_ID });
+    await coordinator.submitGoal('Goal');
+    runner.completeNextRun('   ');
+    await settle();
+
+    assert.equal(reasoner.seen.evaluate.length, 0);
+  });
+
+  it('re-fails a task the reasoner judges unsuccessful', async () => {
+    const reasoner = reasonerSpy({ success: false, summary: 'the arm refused' });
+    coordinator = newCoord(im, wm, reasoner, runner, { mindInstanceId: MIND_ID });
+    await coordinator.submitGoal('Goal');
+    runner.completeNextRun('I will not do that.');
+    await settle();
+
+    assert.equal(reasoner.seen.replan.length, 1);
+    assert.match(reasoner.seen.replan[0].failureReason, /the arm refused/);
+  });
+
+  it('leaves a task completed when the evaluation has no verdict', async () => {
+    // success:null means the reasoner's reply could not be parsed. That
+    // is not evidence of failure and must not trigger a replan.
+    const reasoner = reasonerSpy({ success: null, summary: 'Could not parse evaluation' });
+    coordinator = newCoord(im, wm, reasoner, runner, { mindInstanceId: MIND_ID });
+    await coordinator.submitGoal('Goal');
+    const task = coordinator.getActiveGoals()[0].plan.tasks[0];
+    runner.completeNextRun('Shipped it.');
+    await settle();
+
+    assert.equal(reasoner.seen.replan.length, 0);
+    assert.equal(task.status, 'completed');
+    assert.equal(task.result.success, null);
+  });
+
+  it('hands the replanner what the arm said before it failed', async () => {
+    const reasoner = reasonerSpy();
+    coordinator = newCoord(im, wm, reasoner, runner, { mindInstanceId: MIND_ID });
+    await coordinator.submitGoal('Goal');
+    const armId = runner._lastActive().agentInstanceId;
+    runner.failRun(armId, 'timeout', 'Which database should I migrate to? I need you to decide.');
+    await settle();
+
+    assert.equal(reasoner.seen.replan.length, 1);
+    assert.equal(
+      reasoner.seen.replan[0].partialOutput,
+      'Which database should I migrate to? I need you to decide.'
+    );
+  });
+
+  it('records the execution on a completed run', async () => {
+    coordinator = newCoord(im, wm, reasonerSpy(), runner, { mindInstanceId: MIND_ID });
+    const { goalId } = await coordinator.submitGoal('Goal');
+    const task = coordinator.getActiveGoals()[0].plan.tasks[0];
+    runner.completeNextRun('done and dusted');
+
+    assert.equal(task.execution.status, 'completed');
+    assert.equal(task.execution.output, 'done and dusted');
+    assert.equal(task.execution.error, null);
+    assert.ok(task.execution.agentInstanceId);
+  });
+
+  it('records the execution on a failed run too', async () => {
+    const reasoner = reasonerSpy();
+    coordinator = newCoord(im, wm, reasoner, runner, { mindInstanceId: MIND_ID });
+    await coordinator.submitGoal('Goal');
+    const task = coordinator.getActiveGoals()[0].plan.tasks[0];
+    const armId = runner._lastActive().agentInstanceId;
+    runner.failRun(armId, 'boom', 'got halfway');
+
+    assert.equal(task.execution.status, 'failed');
+    assert.equal(task.execution.output, 'got halfway');
+    assert.equal(task.execution.error, 'boom');
+  });
+
+  it('shows the user what went wrong when it escalates', async () => {
+    const reasoner = reasonerSpy(null, { action: 'retry', prompt: 'try again' });
+    const reports = [];
+    coordinator = newCoord(im, wm, reasoner, runner, { mindInstanceId: MIND_ID });
+    coordinator.on('mind:report', (m) => reports.push(m.text || m.message || ''));
+
+    await coordinator.submitGoal('Goal', { autoDispatch: false });
+    coordinator.approvePlan(null);
+    const task = coordinator.getActiveGoals()[0].plan.tasks[0];
+
+    // Burn the replan budget so the next failure escalates.
+    for (let i = 0; i <= coordinator.MAX_REPLANS; i++) {
+      const active = runner._lastActive();
+      if (!active) break;
+      runner.failRun(active.agentInstanceId, 'stalled', 'I need the production DB password to continue.');
+      await settle();
+    }
+
+    assert.equal(task.status, 'awaiting_user_input');
+    assert.match(task.escalationPartialOutput, /production DB password/);
+  });
+});
+
+describe('Coordinator: long-term memory records findings', () => {
+  const MIND_ID = 'mind-001';
+
+  it('writes what the arm produced, not a constant', async () => {
+    const im = createMockIM();
+    im.register({ id: MIND_ID, name: 'Alien Mind', agentType: 'mind' });
+    const wm = new WorldModel(im, MIND_ID);
+    const runner = createMockRunner(im);
+    const memPath = tempMemoryPath();
+    const memory = new Memory({ path: memPath });
+    memory.load();
+
+    // No evaluation verdict, so the detail must fall back to the
+    // arm's own output. Before v1.2.3 every entry ended in 'Completed'.
+    const reasoner = {
+      plan: async () => ({ tasks: [{ description: 'Audit deps', agentType: 'claude', targetCwd: '/tmp', prompt: 'p', dependsOn: [] }] }),
+      replan: async () => ({ action: 'abandon', reason: 'x' }),
+      evaluate: async () => ({ success: null, summary: 'Could not parse evaluation' }),
+      destroy: () => {},
+    };
+    const coordinator = newCoord(im, wm, reasoner, runner, { memory, mindInstanceId: MIND_ID });
+
+    await coordinator.submitGoal('Audit the dependencies');
+    runner.completeNextRun('Found 3 outdated packages: express, ws, uuid.');
+    await new Promise((r) => setTimeout(r, 40));
+
+    assert.equal(memory.size(), 1);
+    const entry = memory.getRecent(1)[0];
+    const line = entry.taskSummaries.join('\n');
+    assert.match(line, /Found 3 outdated packages/);
+    assert.ok(!/Completed$/.test(line), 'memory should not record the placeholder summary');
+
+    coordinator.destroy();
+    runner.destroy();
+    wm.destroy();
+    try { require('fs').unlinkSync(memPath); } catch {}
   });
 });

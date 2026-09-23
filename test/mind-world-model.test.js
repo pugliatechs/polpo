@@ -17,6 +17,11 @@ function createMockIM() {
       canReceivePrompts: info.canReceivePrompts !== false,
       agentType: info.agentType || 'claude', sessionId: null,
       conversationLength: 0,
+      // The real InstanceManager carries both of these through
+      // register() and getAll(); the WorldModel uses them to tell
+      // reasoner runs and mind-owned arms apart from user sessions.
+      source: info.source != null ? info.source : null,
+      firstPrompt: info.firstPrompt || null,
     };
     instances.set(id, inst);
     em.emit('instance:registered', inst);
@@ -270,5 +275,56 @@ describe('createMind', () => {
     assert.ok(mind.worldModel);
     assert.ok(typeof mind.worldModel.getSnapshot === 'function');
     mind.destroy();
+  });
+});
+
+describe('WorldModel: the reasoner is not an arm', () => {
+  var im, wm;
+  var MIND_ID = 'mind-001';
+
+  beforeEach(function () {
+    im = createMockIM();
+    im.register({ id: MIND_ID, name: 'Alien Mind', agentType: 'mind' });
+    wm = new WorldModel(im, MIND_ID);
+  });
+
+  afterEach(function () { wm.destroy(); });
+
+  it('hides runs the reasoner tagged as its own', function () {
+    // Since v1.2.3 the reasoner runs on the shared one-shot runner, so
+    // it registers a real instance. Without this filter the planner
+    // would be shown its own reasoning process as an idle arm and
+    // could assign user work to it.
+    im.register({ id: 'r1', name: 'Mind reasoner', source: 'mind-reasoner' });
+    im.register({ id: 'a1', name: 'Real Arm', source: 'mind:goal-1' });
+
+    var ids = wm.getSnapshot().agents.map(function (a) { return a.id; });
+    assert.deepEqual(ids, ['a1']);
+  });
+
+  it('never offers the reasoner as an idle agent', function () {
+    im.register({ id: 'r1', name: 'Mind reasoner', source: 'mind-reasoner' });
+    im.updateStatus('r1', 'idle');
+    assert.equal(wm.getIdleAgents().length, 0);
+  });
+
+  it('does not count a busy reasoner as an arm still working', function () {
+    im.register({ id: 'r1', name: 'Mind reasoner', source: 'mind-reasoner' });
+    im.updateStatus('r1', 'busy');
+    assert.equal(wm._allIdle(), true);
+  });
+
+  it('keeps hiding disk-discovered reasoner sessions by their prompt', function () {
+    im.register({
+      id: 'r2',
+      name: 'Some session',
+      firstPrompt: 'You are the coordination brain of Polpo, an octopus-inspired system.',
+    });
+    assert.equal(wm.getSnapshot().agents.length, 0);
+  });
+
+  it('leaves ordinary user sessions visible', function () {
+    im.register({ id: 'u1', name: 'My Session' });
+    assert.equal(wm.getSnapshot().agents.length, 1);
   });
 });

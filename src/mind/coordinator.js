@@ -417,6 +417,33 @@ class Coordinator extends EventEmitter {
    * This captures what the arm actually produced, used as context for
    * dependent tasks.
    */
+  /**
+   * Record what an arm actually produced, from the runner's result.
+   *
+   * This is the mind's only durable trace of an execution. The runner
+   * stops the agent and unregisters the instance BEFORE it notifies us
+   * (see one-shot-runner.js `_finalize`, "so the caller sees a fully
+   * torn-down world"), so by the time any coordinator code runs, the
+   * world model has nothing left to read. Reaching back into it was
+   * the bug that left `reasoner.evaluate()` unreachable and every
+   * replan blind to what the arm said.
+   *
+   * @param {object} task
+   * @param {{status:string, output:string, error:?string, durationMs:number,
+   *          agentInstanceId:string}} result
+   */
+  _recordExecution(task, result) {
+    if (!task || !result) return;
+    task.execution = {
+      status: result.status || 'unknown',
+      output: typeof result.output === 'string' ? result.output : '',
+      error: result.error || null,
+      durationMs: result.durationMs || 0,
+      agentInstanceId: result.agentInstanceId || task.agentId || null,
+      at: Date.now(),
+    };
+  }
+
   _extractAgentOutput(agentId) {
     var conversation = this.worldModel.getAgentConversation(agentId, 20);
     if (!conversation || conversation.length === 0) return '';
@@ -566,6 +593,12 @@ class Coordinator extends EventEmitter {
 
       onTerminal: function (result) {
         if (task.agentId) self._taskToAgent.delete(task.agentId);
+        // Stamp the execution record FIRST, on every terminal status.
+        // The runner tore down the agent before calling us, so this
+        // result is the only surviving trace of what the arm produced.
+        // Anything that later needs the arm's output reads it from
+        // here rather than from the world model.
+        self._recordExecution(task, result);
         // Idempotent: if some other path already finalised this task
         // (cancelGoal, watcher failAgentTask invoked _failTask before
         // cancelling), don't clobber that decision. We just released
@@ -578,7 +611,7 @@ class Coordinator extends EventEmitter {
           // the caller (cancelGoal / failAgentTask) already decided.
           self._markTaskCancelled(task, result.error || 'cancelled');
         } else {
-          self._failTask(task.id, result.error || 'agent_run_failed');
+          self._failTask(task.id, result.error || 'agent_run_failed', result.output || '');
         }
       },
     }).catch(function (err) {
@@ -662,10 +695,18 @@ class Coordinator extends EventEmitter {
     // evaluate to the synchronous critical path and gate dependents
     // on it.
     var self = this;
-    var conversation = this.worldModel.getAgentConversation(task.agentId, 10);
-    if (conversation.length > 0) {
-      this.reasoner.evaluate(task.description, conversation).then(function (evaluation) {
+    // Evaluate against the runner-captured output. This used to read
+    // the arm's conversation back out of the world model, which the
+    // runner had already torn down, so `conversation.length > 0` was
+    // never true and this whole block never ran. Every arm that exited
+    // cleanly was recorded as a success no matter what it said.
+    var producedText = (task.output || '').trim();
+    if (producedText) {
+      this.reasoner.evaluate(task.description, producedText).then(function (evaluation) {
         task.result = evaluation;
+        // Act only on an explicit false. A null verdict means the
+        // reasoner's reply could not be parsed, which is not evidence
+        // of failure.
         if (evaluation && evaluation.success === false && self._noDependentsStarted(task)) {
           self._report('Evaluation failed for ' + task.description + ': ' + (evaluation.summary || 'no summary'));
           // Re-fail through the normal path. _failTask sees status not
@@ -699,12 +740,29 @@ class Coordinator extends EventEmitter {
   /**
    * Mark a task as failed.
    */
-  _failTask(taskId, reason) {
+  /**
+   * Mark a task as failed.
+   *
+   * @param {string} taskId
+   * @param {string} reason
+   * @param {string} [output] - what the arm produced before failing, as
+   *   captured by the runner. Callers that hold the runner result MUST
+   *   pass it: by the time they are called the agent is unregistered,
+   *   so it cannot be recovered from the world model. The fallback
+   *   below only works for `failAgentTask`, which fails the task while
+   *   the agent is still alive.
+   */
+  _failTask(taskId, reason, output) {
     var task = this._findTask(taskId);
     if (!task || task.status !== 'running') return;
 
-    // Capture any partial output before clearing state (used for re-planning)
-    var partialOutput = task.agentId ? this._extractAgentOutput(task.agentId) : '';
+    // Prefer what the caller was handed, then anything already recorded
+    // for this execution, and only then try the world model (live-agent
+    // callers such as the watcher's failAgentTask).
+    var partialOutput = (typeof output === 'string' && output)
+      || (task.execution && task.execution.output)
+      || (task.agentId ? this._extractAgentOutput(task.agentId) : '')
+      || '';
 
     // Clean up task state — the runner already stopped the agent before
     // calling onTerminal, so we just drop our id mapping here.
@@ -1115,6 +1173,26 @@ class Coordinator extends EventEmitter {
   }
 
   /**
+   * One line describing what a task actually produced, for long-term
+   * memory.
+   *
+   * Prefers the reasoner's distilled evaluation summary. Before v1.2.3
+   * that was all this used, and since `evaluate()` was unreachable the
+   * summary was the placeholder 'Completed' set at completion time, so
+   * every memory entry ever written ended in that one word and carried
+   * no finding at all. Falling back to an excerpt of the arm's
+   * own output keeps memory useful even when evaluation is skipped or
+   * returns no verdict.
+   */
+  _taskMemoryDetail(task) {
+    var summary = task.result && task.result.summary;
+    if (summary && summary !== 'Completed') return String(summary).slice(0, 300);
+    var out = (task.output || (task.execution && task.execution.output) || '').trim();
+    if (!out) return '';
+    return out.replace(/\s+/g, ' ').slice(0, 300);
+  }
+
+  /**
    * Write a completed goal to long-term memory.
    */
   _persistGoalToMemory(goal) {
@@ -1125,10 +1203,9 @@ class Coordinator extends EventEmitter {
         for (var i = 0; i < goal.plan.tasks.length; i++) {
           var t = goal.plan.tasks[i];
           var status = t.status === 'completed' ? '✓' : t.status === 'failed' ? '✗' : '·';
-          // Prefer the evaluation summary over the raw output (shorter, distilled)
-          var detail = (t.result && t.result.summary) || '';
+          var detail = this._taskMemoryDetail(t);
           var line = status + ' ' + t.description;
-          if (detail) line += ' — ' + detail;
+          if (detail) line += ': ' + detail;
           summaries.push(line);
         }
       }

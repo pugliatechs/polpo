@@ -20,12 +20,21 @@ const EventEmitter = require('events');
 // reasoner sessions that should be hidden from the WorldModel.
 var REASONER_PROMPT_PREFIX = 'You are the coordination brain of Polpo';
 
+// Origin tag the Reasoner stamps on its own runs. Since v1.2.3 the
+// reasoner runs through the shared one-shot runner, so it registers a
+// real instance like any arm. Without this it would show up in the
+// dashboard as an agent and, worse, be offered to the planner as an
+// available arm to assign work to.
+var REASONER_SOURCE = 'mind-reasoner';
+
 /**
- * Check if an instance is a reasoner session (auto-discovered from the
- * Claude Code process the Reasoner spawned internally).
+ * Check if an instance is a reasoner session. Matches both the tagged
+ * runs the Reasoner starts and sessions auto-discovered from disk,
+ * which carry no source but do carry the system prompt.
  */
 function isReasonerInstance(inst) {
   if (!inst) return false;
+  if (inst.source === REASONER_SOURCE) return true;
   var fp = inst.firstPrompt || inst._firstPrompt || '';
   if (fp.indexOf(REASONER_PROMPT_PREFIX) === 0) return true;
   if (inst.name && inst.name.indexOf(REASONER_PROMPT_PREFIX) === 0) return true;
@@ -222,4 +231,4 @@ class WorldModel extends EventEmitter {
   }
 }
 
-module.exports = { WorldModel };
+module.exports = { WorldModel, isReasonerInstance, REASONER_SOURCE };

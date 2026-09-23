@@ -115,11 +115,24 @@ class Watcher {
       // Stage 1: alert
       if (busyDuration > threshold && !this._alerted.has('stuck:' + agent.id)) {
         var minutes = Math.round(busyDuration / 60000);
-        this._suggest(
+        var lines = [
           '⚠️ **' + agent.name + '** has been busy for ' + minutes +
-          ' minutes without status change. It may be stuck.\n' +
-          'Consider aborting it or checking its output in the dashboard.'
-        );
+          ' minutes without status change. It may be stuck.',
+        ];
+        // Show what it last said. A stuck arm is very often an arm that
+        // asked a question and is waiting, and the answer is usually
+        // visible in that last line. Telling the user only the elapsed
+        // minutes makes them open the dashboard to find out why, which
+        // defeats the point on a phone.
+        var lastSaid = this._lastAssistantText(agent.id);
+        if (lastSaid) {
+          lines.push('');
+          lines.push('Last output:');
+          lines.push('> ' + lastSaid.split('\n').join('\n> '));
+        }
+        lines.push('');
+        lines.push('Consider aborting it or checking its output in the dashboard.');
+        this._suggest(lines.join('\n'));
         this._alerted.add('stuck:' + agent.id);
       }
 
@@ -138,6 +151,37 @@ class Watcher {
         }
       }
     }
+  }
+
+  /**
+   * Last few lines of assistant text from a still-registered agent.
+   * Only usable while the agent is alive; once the runner unregisters
+   * it the conversation is gone, which is why the coordinator records
+   * the runner's output instead of reading it back from here.
+   *
+   * @param {string} agentId
+   * @param {number} [maxLines=4]
+   * @returns {string} '' when nothing is available
+   */
+  _lastAssistantText(agentId, maxLines) {
+    var limit = maxLines || 4;
+    var conv;
+    try {
+      conv = this.instanceManager.getConversation(agentId, 20) || [];
+    } catch {
+      return '';
+    }
+    for (var i = conv.length - 1; i >= 0; i--) {
+      var m = conv[i];
+      if (m && m.role === 'assistant' && m.content &&
+          (!m.contentType || m.contentType === 'text')) {
+        var text = String(m.content).trim();
+        if (!text) continue;
+        var split = text.split('\n').filter(function (l) { return l.trim(); });
+        return split.slice(-limit).join('\n').slice(0, 600);
+      }
+    }
+    return '';
   }
 
   /**

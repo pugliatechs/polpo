@@ -1,15 +1,37 @@
 /**
- * Reasoner — LLM-backed planning engine for the Alien Mind.
+ * Reasoner - LLM-backed planning engine for the Alien Mind.
  *
- * Spawns a Claude Code process directly (not registered with the hub)
- * and uses it to decompose goals into task plans. The process stays
- * alive for reuse across multiple planning requests.
+ * Every reasoning call (plan / evaluate / replan) is one isolated
+ * OneShotAgentRunner run: spawn, prompt, capture, terminate. This is
+ * the same primitive the HTTP gateway and the coordinator's arms use.
+ *
+ * Until v1.2.3 this class hand-rolled its own long-lived subprocess.
+ * That had four defects the runner does not have:
+ *
+ *   - a single-slot mutex that rejected concurrent calls with
+ *     "Reasoner is busy", which the coordinator turned into an
+ *     outright task abandon
+ *   - no timeout, so one stalled process bricked the mind for the
+ *     lifetime of the server
+ *   - one unbounded conversation shared by every goal, so context
+ *     grew without limit and earlier goals contaminated later ones
+ *   - a hardcoded binary, so the mind could only ever reason with one
+ *     of the six agent CLIs Polpo supports
+ *
+ * Each call now gets a fresh context, its own deadline, and runs
+ * concurrently with any other call.
  */
 
-const { spawn } = require('child_process');
-const path = require('path');
-const readline = require('readline');
-const { v4: uuidv4 } = require('uuid');
+const { makeLogger } = require('../util/logger');
+
+const log = makeLogger('mind-reasoner');
+
+// Origin tag for reasoner runs. Deliberately NOT prefixed 'mind:',
+// which is what the watcher treats as a coordinator-owned arm; the
+// reasoner is mind infrastructure, not an arm doing user work.
+const REASONER_SOURCE = 'mind-reasoner';
+const REASONER_NAME = 'Mind reasoner';
+const DEFAULT_TIMEOUT_MS = 120000;
 
 var SYSTEM_PROMPT = [
   'You are the coordination brain of Polpo, an octopus-inspired multi-agent system.',
@@ -76,16 +98,26 @@ var REPLAN_PROMPT = [
 class Reasoner {
   /**
    * @param {object} options
-   * @param {string} [options.model] - Model override for reasoning
-   * @param {string} [options.claudeBinary] - Path to claude binary
+   * @param {object} options.runner   - OneShotAgentRunner (required)
+   * @param {string} [options.agentType] - which CLI reasons; default 'claude'
+   *   (env POLPO_MIND_AGENT). Any type the agent factory supports works,
+   *   so the mind can reason with a local model via goose or codex --oss.
+   * @param {string} [options.model]  - model override (env POLPO_MIND_MODEL)
+   * @param {string} [options.cwd]    - working dir for reasoning runs
+   * @param {number} [options.timeoutMs] - per-call deadline
+   *   (env POLPO_MIND_TIMEOUT_MS, default 120s)
    */
   constructor(options) {
     if (!options) options = {};
+    this.runner = options.runner || null;
+    this.agentType = options.agentType || process.env.POLPO_MIND_AGENT || 'claude';
     this.model = options.model || process.env.POLPO_MIND_MODEL || null;
-    this.claudeBinary = options.claudeBinary || 'claude';
-    this._process = null;
-    this._rl = null;
-    this._pending = null; // { resolve, reject, buffer }
+    this.cwd = options.cwd || process.cwd();
+    this.timeoutMs = positiveInt(options.timeoutMs)
+      || positiveInt(process.env.POLPO_MIND_TIMEOUT_MS)
+      || DEFAULT_TIMEOUT_MS;
+    this._inflight = new Set(); // agentInstanceIds of live reasoning runs
+    this._destroyed = false;
   }
 
   /**
@@ -106,18 +138,32 @@ class Reasoner {
 
   /**
    * Evaluate whether a task completed successfully.
+   *
+   * Takes the arm's captured output text. It used to take an array of
+   * conversation messages read back from the WorldModel, but the runner
+   * unregisters the arm before the coordinator is notified, so that
+   * array was always empty and this method was never reached. The
+   * runner's captured output is the only surviving record.
+   *
+   * An array is still accepted so any caller holding messages keeps
+   * working.
+   *
    * @param {string} taskDescription
-   * @param {Array} agentConversation - Last N messages from the agent
-   * @returns {Promise<{ success: boolean, summary: string }>}
+   * @param {string|Array} agentOutput - captured output text, or messages
+   * @returns {Promise<{ success: ?boolean, summary: string }>}
+   *   success is null when the reply could not be parsed, meaning
+   *   "no verdict" rather than a pass.
    */
-  async evaluate(taskDescription, agentConversation) {
-    var convText = agentConversation.map(function (m) {
-      return (m.role || 'unknown') + ': ' + (m.content || '').slice(0, 500);
-    }).join('\n');
+  async evaluate(taskDescription, agentOutput) {
+    var text = Array.isArray(agentOutput)
+      ? agentOutput.map(function (m) {
+          return (m.role || 'unknown') + ': ' + (m.content || '').slice(0, 500);
+        }).join('\n')
+      : String(agentOutput || '');
 
     var prompt = EVALUATE_PROMPT + '\n\n' +
       'Task: ' + taskDescription + '\n\n' +
-      'Agent conversation (last messages):\n' + convText + '\n\n' +
+      'What the agent produced:\n' + text.slice(0, 8000) + '\n\n' +
       'Respond with JSON only:';
 
     var response = await this._ask(prompt);
@@ -198,124 +244,59 @@ class Reasoner {
   }
 
   /**
-   * Send a prompt to the Claude process and wait for a response.
+   * Run one reasoning turn as an isolated one-shot agent run.
+   *
+   * Never shares context with another call, always bounded by
+   * `timeoutMs`, and safe to invoke concurrently: each call is its own
+   * process. The runner resolves (rather than rejects) on a normal
+   * agent failure, so a non-completed status is turned into a throw
+   * here for callers that treat reasoning failure as fatal.
+   *
+   * @param {string} prompt
+   * @returns {Promise<string>} the agent's captured text
    */
-  _ask(prompt) {
-    var self = this;
-    return new Promise(function (resolve, reject) {
-      if (!self._process) {
-        self._spawn();
-      }
-
-      if (self._pending) {
-        reject(new Error('Reasoner is busy'));
-        return;
-      }
-
-      self._pending = { resolve: resolve, reject: reject, buffer: '' };
-
-      var input = JSON.stringify({
-        type: 'user',
-        message: { role: 'user', content: prompt },
-      }) + '\n';
-
-      if (self._process && self._process.stdin.writable) {
-        self._process.stdin.write(input);
-      } else {
-        self._pending = null;
-        reject(new Error('Reasoner process not writable'));
-      }
-    });
-  }
-
-  /**
-   * Spawn the Claude process for reasoning.
-   */
-  _spawn() {
-    var args = [
-      '--output-format', 'stream-json',
-      '--input-format', 'stream-json',
-      '--verbose',
-      '--dangerously-skip-permissions',
-    ];
-
-    if (this.model) {
-      args.push('--model', this.model);
+  async _ask(prompt) {
+    if (!this.runner) {
+      throw new Error('Reasoner requires a one-shot runner');
     }
-
-    var nodeDir = path.dirname(process.execPath);
-    var env = Object.assign({}, process.env);
-    if (!env.PATH || !env.PATH.startsWith(nodeDir)) {
-      env.PATH = nodeDir + ':' + (env.PATH || '');
+    if (this._destroyed) {
+      throw new Error('Reasoner destroyed');
     }
-
-    this._process = spawn(this.claudeBinary, args, {
-      cwd: process.cwd(),
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: env,
-    });
 
     var self = this;
+    var opts = {
+      agentType: this.agentType,
+      cwd: this.cwd,
+      prompt: prompt,
+      name: REASONER_NAME,
+      source: REASONER_SOURCE,
+      timeoutMs: this.timeoutMs,
+      // The reasoner only emits JSON; it should never stall on an
+      // approval prompt nobody is watching.
+      permissionMode: 'bypass',
+      onSpawn: function (agentInstanceId) {
+        self._inflight.add(agentInstanceId);
+      },
+    };
+    if (this.model) opts.model = this.model;
 
-    this._rl = readline.createInterface({ input: this._process.stdout });
-    this._rl.on('line', function (line) {
-      if (!line.trim()) return;
-      try {
-        var msg = JSON.parse(line);
-        self._handleMessage(msg);
-      } catch {
-        // Non-JSON line, ignore
-      }
-    });
+    var result = await this.runner.run(opts);
 
-    this._process.stderr.on('data', function () {});
-
-    this._process.on('exit', function () {
-      self._process = null;
-      self._rl = null;
-      if (self._pending) {
-        var p = self._pending;
-        self._pending = null;
-        // Resolve with whatever we have in the buffer
-        if (p.buffer) {
-          p.resolve(p.buffer);
-        } else {
-          p.reject(new Error('Reasoner process exited'));
-        }
-      }
-    });
-
-    this._process.on('error', function (err) {
-      if (self._pending) {
-        var p = self._pending;
-        self._pending = null;
-        p.reject(err);
-      }
-    });
-  }
-
-  /**
-   * Handle a message from the Claude process.
-   */
-  _handleMessage(msg) {
-    if (!this._pending) return;
-
-    if (msg.type === 'assistant') {
-      // Accumulate text blocks
-      var content = msg.message && msg.message.content;
-      if (Array.isArray(content)) {
-        for (var i = 0; i < content.length; i++) {
-          if (content[i].type === 'text' && content[i].text) {
-            this._pending.buffer += content[i].text;
-          }
-        }
-      }
-    } else if (msg.type === 'result') {
-      // Turn complete, resolve with accumulated text
-      var p = this._pending;
-      this._pending = null;
-      p.resolve(p.buffer);
+    if (result && result.agentInstanceId) {
+      this._inflight.delete(result.agentInstanceId);
     }
+
+    if (!result || result.status !== 'completed') {
+      var why = (result && (result.error || result.status)) || 'no result';
+      log.error('Reasoning run did not complete:', why);
+      throw new Error('Reasoner run failed: ' + why);
+    }
+
+    var text = (result.output || '').trim();
+    if (!text) {
+      throw new Error('Reasoner returned no output');
+    }
+    return text;
   }
 
   /**
@@ -324,16 +305,15 @@ class Reasoner {
   _parseTaskPlan(response) {
     var json = this._extractJson(response);
     if (!json || !Array.isArray(json.tasks)) {
-      // Fallback: single task with the raw response as prompt
-      return {
-        tasks: [{
-          description: 'Execute user goal',
-          agentType: 'claude',
-          targetCwd: '',
-          prompt: response || 'No plan generated',
-          dependsOn: [],
-        }],
-      };
+      // Until v1.2.3 this fell back to dispatching a task whose prompt
+      // WAS the unparsed reply. Arms run with approvals bypassed, so a
+      // malformed reasoner reply became an instruction executed against
+      // the user's machine. A plan we cannot read is a planning
+      // failure; submitGoal reports it and the goal stops here.
+      throw new Error('Reasoner did not return a usable task plan');
+    }
+    if (json.tasks.length === 0) {
+      throw new Error('Reasoner returned an empty task plan');
     }
 
     // Validate and normalize tasks
@@ -356,11 +336,18 @@ class Reasoner {
   _parseEvaluation(response) {
     var json = this._extractJson(response);
     if (!json) {
-      return { success: true, summary: 'Could not evaluate (assuming success)' };
+      // Previously this returned success:true, so a garbled reply was
+      // recorded as a passing verdict and written to long-term memory
+      // as one. null means "no verdict": the coordinator acts only on
+      // an explicit false, so an unreadable reply changes nothing.
+      return { success: null, summary: 'Could not parse evaluation' };
     }
+    var verdict = null;
+    if (json.success === true) verdict = true;
+    else if (json.success === false) verdict = false;
     return {
-      success: json.success !== false,
-      summary: json.summary || 'No summary provided',
+      success: verdict,
+      summary: json.summary || (verdict === null ? 'Evaluation reply had no verdict' : 'No summary provided'),
     };
   }
 
@@ -386,18 +373,24 @@ class Reasoner {
   }
 
   /**
-   * Kill the reasoning process and clean up.
+   * Refuse further reasoning and cancel any run still in flight.
    */
   destroy() {
-    if (this._process) {
-      try { this._process.kill('SIGTERM'); } catch {}
-      this._process = null;
+    this._destroyed = true;
+    for (var id of this._inflight) {
+      try { this.runner.cancel(id); } catch {}
     }
-    if (this._pending) {
-      this._pending.reject(new Error('Reasoner destroyed'));
-      this._pending = null;
-    }
+    this._inflight.clear();
   }
 }
 
-module.exports = { Reasoner };
+/**
+ * Coerce to a positive integer, or null. Used so a malformed env var
+ * falls through to the default instead of producing NaN deadlines.
+ */
+function positiveInt(value) {
+  var n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+}
+
+module.exports = { Reasoner, REASONER_SOURCE };
