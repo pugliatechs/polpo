@@ -450,15 +450,17 @@ Streams the mind's progress for the goal. Events appear in roughly this order; s
 
 ```
 event: snapshot      data: { goalId, status, prompt, plan, replayed: true }  ← only for late subscribers
-event: planning      data: { goalId, prompt, timestamp }
+event: planning      data: { goalId, prompt, client, timestamp }
 event: plan_ready    data: { goalId, tasks: [{id, description, agentType, dependsOn}], timestamp }
 event: task_started  data: { goalId, taskId, description, agentInstanceId, agentName, agentType }
 event: task_chunk    data: { goalId, taskId, text }                          ← assistant output, possibly many
-event: task_done     data: { goalId, taskId, success, summary, durationMs }
+event: task_done     data: { goalId, taskId, success, summary, output, outputTruncated, durationMs }
+event: task_answered data: { goalId, taskId, question, turn }                ← mind answered a blocked arm in-session
+event: task_refused  data: { goalId, taskId, turn, refusals }                ← a guardrail stopped an arm's turn
 event: task_failed   data: { goalId, taskId, reason, terminal?, abandoned? }
 event: replanning    data: { goalId, taskId, attempt, maxAttempts, reason }
 event: cancelled     data: { goalId, reason }                                 ← from DELETE
-event: done          data: { goalId, status, result, taskSummaries, durationMs }
+event: done          data: { goalId, status, result, client, finalOutput, finalOutputTruncated, taskSummaries, durationMs }
 event: error         data: { goalId, message, detail }
 ```
 
@@ -466,9 +468,17 @@ The stream closes after `done`, `cancelled`, or `error`. `: ping` comment lines 
 
 **Late-subscriber handling.** Because the gateway emits a per-goal event stream as a live broadcast, a subscriber that connects *after* `planning` / `plan_ready` already fired would otherwise miss them. The gateway sends a synthetic `snapshot` event on connect for any goal in `running` state, containing the current plan and per-task status. Use this to bootstrap the UI; subsequent live events follow. Already-terminal goals receive a `done`/`error` replay and the stream closes immediately.
 
+### Reading the result
+
+`finalOutput` is the goal's deliverable: the output of the tasks nothing else in the plan consumed (the leaves of the dependency graph). Earlier tasks feed their findings forward into their dependents, so the leaves are what the goal produced. With one leaf it is that task's text; with several they are joined under their task descriptions. Every task's own text is also available as `output`.
+
+Outputs are capped per task at 64 KiB (`POLPO_GOAL_OUTPUT_MAX_CHARS`), keeping the **end** of the text, which is where an agent's answer is. `outputTruncated` / `finalOutputTruncated` say when that happened.
+
+`task_done` is only emitted once the mind has accepted the task. A task the mind judges failed goes straight to `task_failed` / `replanning` instead.
+
 ### `GET /v1/goals`
 
-List the currently-active goals on this host.
+List the goals on this host: everything in progress, plus finished goals kept for a while so a caller can still collect their result. Finished goals are dropped after one hour (`POLPO_MIND_GOAL_TTL_MS`) or beyond the newest 50 (`POLPO_MIND_GOAL_RETENTION`). Task output is **not** included here, to keep the list small; fetch a single goal for it.
 
 ```
 → {
@@ -477,7 +487,9 @@ List the currently-active goals on this host.
       "status":     "planning" | "running" | "completed" | "failed",
       "prompt":     "...",            // truncated to 500 chars
       "result":     "..." | null,
+      "client":     "openclaw" | null,  // who submitted it
       "createdAt":  1700000000000,
+      "finishedAt": 1700000000000 | null,
       "plan": {
         "tasks": [{
           "id", "description", "agentType", "status",
@@ -490,7 +502,7 @@ List the currently-active goals on this host.
 
 ### `GET /v1/goals/:id`
 
-Same shape as one entry from `GET /v1/goals`. Returns `404 goal_not_found` for unknown ids, `400 invalid_goal_id` for ids that don't match `^goal-[a-z0-9-]{4,32}$`.
+Same shape as one entry from `GET /v1/goals`, plus the outputs: `finalOutput`, `finalOutputTruncated`, and `output` / `outputTruncated` on each task. Returns `404 goal_not_found` for unknown ids, `400 invalid_goal_id` for ids that don't match `^goal-[a-z0-9-]{4,32}$`.
 
 ### `DELETE /v1/goals/:id`
 

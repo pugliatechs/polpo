@@ -1406,3 +1406,184 @@ describe('Coordinator: long-term memory records findings', () => {
     try { require('fs').unlinkSync(memPath); } catch {}
   });
 });
+
+describe('Coordinator: what the gateway receives', () => {
+  let im, wm, runner, coordinator;
+  const MIND_ID = 'mind-001';
+
+  beforeEach(() => {
+    im = createMockIM();
+    im.register({ id: MIND_ID, name: 'Alien Mind', agentType: 'mind' });
+    wm = new WorldModel(im, MIND_ID);
+    runner = createMockRunner(im);
+  });
+
+  afterEach(() => {
+    if (coordinator) coordinator.destroy();
+    runner.destroy();
+    wm.destroy();
+  });
+
+  const settle = () => new Promise((r) => setTimeout(r, 30));
+  const mindChat = () => im.getConversation(MIND_ID, 100)
+    .filter((m) => m.source === 'mind').map((m) => m.content);
+
+  function reasoner(tasks, assessment) {
+    return {
+      plan: async () => ({ tasks }),
+      replan: async () => ({ action: 'abandon', reason: 'x' }),
+      assessTurn: async () => assessment || { verdict: 'done', summary: 'ok', answer: null },
+      destroy: () => {},
+    };
+  }
+  const ONE = [{ description: 'Do the thing', agentType: 'claude', targetCwd: '/tmp', prompt: 'p', dependsOn: [] }];
+
+  function events() {
+    const seen = [];
+    coordinator.on('goal:event', (e) => seen.push(e));
+    return seen;
+  }
+
+  it('never reports task_done for a task the assessment failed', async () => {
+    // An earlier revision emitted task_done {success: true} and then a
+    // replan of the same task, so SSE consumers saw success, then failure.
+    coordinator = newCoord(im, wm, reasoner(ONE, { verdict: 'failed', summary: 'refused', answer: null }),
+      runner, { mindInstanceId: MIND_ID });
+    const seen = events();
+    await coordinator.submitGoal('Goal');
+    await runner.endNextTurn('I will not do that.');
+    await settle();
+
+    assert.equal(seen.filter((e) => e.type === 'task_done').length, 0);
+    assert.ok(!mindChat().some((t) => t.indexOf('Completed (') === 0),
+      'chat must not claim completion either');
+  });
+
+  it('includes the task output in task_done', async () => {
+    coordinator = newCoord(im, wm, reasoner(ONE), runner, { mindInstanceId: MIND_ID });
+    const seen = events();
+    await coordinator.submitGoal('Goal');
+    await runner.endNextTurn('the full answer');
+    await settle();
+    const done = seen.find((e) => e.type === 'task_done');
+    assert.equal(done.output, 'the full answer');
+    assert.equal(done.outputTruncated, false);
+  });
+
+  it('puts the deliverable in the done event', async () => {
+    const tasks = [
+      { description: 'research', agentType: 'claude', targetCwd: '/tmp', prompt: 'r', dependsOn: [] },
+      { description: 'write up', agentType: 'claude', targetCwd: '/tmp', prompt: 'w', dependsOn: [0] },
+    ];
+    coordinator = newCoord(im, wm, reasoner(tasks), runner, { mindInstanceId: MIND_ID });
+    const seen = events();
+    await coordinator.submitGoal('Goal');
+    await runner.endNextTurn('raw findings');
+    await settle();
+    await runner.endNextTurn('# Report');
+    await settle();
+
+    const done = seen.find((e) => e.type === 'done');
+    assert.ok(done, 'goal should finish');
+    assert.equal(done.finalOutput, '# Report', 'the leaf task is the deliverable');
+    assert.equal(done.taskSummaries[0].output, 'raw findings');
+  });
+
+  it('records which client submitted the goal', async () => {
+    coordinator = newCoord(im, wm, reasoner(ONE), runner, { mindInstanceId: MIND_ID });
+    const seen = events();
+    const { goalId } = await coordinator.submitGoal('Research the thing', { client: 'openclaw' });
+    const goal = coordinator.getActiveGoals().find((g) => g.id === goalId);
+    assert.equal(goal.client, 'openclaw');
+    assert.equal(seen.find((e) => e.type === 'planning').client, 'openclaw');
+    assert.ok(mindChat().some((t) => t.indexOf('Planning a goal from openclaw: Research the thing') === 0));
+  });
+
+  it('keeps the plain planning line for dashboard goals', async () => {
+    coordinator = newCoord(im, wm, reasoner(ONE), runner, { mindInstanceId: MIND_ID });
+    await coordinator.submitGoal('Goal');
+    assert.ok(mindChat().includes('Planning your goal…'));
+  });
+
+  it('sanitises a client passed straight to the coordinator', async () => {
+    coordinator = newCoord(im, wm, reasoner(ONE), runner, { mindInstanceId: MIND_ID });
+    const { goalId } = await coordinator.submitGoal('Goal', { client: '<b>evil</b>' });
+    const goal = coordinator.getActiveGoals().find((g) => g.id === goalId);
+    assert.match(goal.client, /^[A-Za-z0-9._\-+/]+$/);
+  });
+});
+
+describe('Coordinator: finished goal retention', () => {
+  let im, wm, runner, coordinator;
+  const MIND_ID = 'mind-001';
+
+  beforeEach(() => {
+    im = createMockIM();
+    im.register({ id: MIND_ID, name: 'Alien Mind', agentType: 'mind' });
+    wm = new WorldModel(im, MIND_ID);
+    runner = createMockRunner(im);
+  });
+
+  afterEach(() => {
+    if (coordinator) coordinator.destroy();
+    runner.destroy();
+    wm.destroy();
+  });
+
+  // Goals are planted directly: retention is about what happens to
+  // goals once finished, not about running them.
+  function plant(id, status, finishedAgoMs) {
+    const g = { id, prompt: id, status, plan: { tasks: [] }, createdAt: Date.now() - (finishedAgoMs || 0) };
+    if (status === 'completed' || status === 'failed') g.finishedAt = Date.now() - (finishedAgoMs || 0);
+    coordinator._goals.set(id, g);
+    return g;
+  }
+  const ids = () => coordinator.getActiveGoals().map((g) => g.id).sort();
+
+  it('drops finished goals past their TTL', () => {
+    coordinator = newCoord(im, wm, createMockReasoner(), runner,
+      { mindInstanceId: MIND_ID, finishedGoalTtlMs: 1000, finishedGoalRetention: 100 });
+    plant('old', 'completed', 5000);
+    plant('recent', 'completed', 10);
+    assert.deepEqual(ids(), ['recent']);
+  });
+
+  it('keeps only the newest N finished goals', () => {
+    coordinator = newCoord(im, wm, createMockReasoner(), runner,
+      { mindInstanceId: MIND_ID, finishedGoalTtlMs: 3600000, finishedGoalRetention: 2 });
+    plant('a', 'completed', 300);
+    plant('b', 'failed', 200);
+    plant('c', 'completed', 100);
+    assert.deepEqual(ids(), ['b', 'c']);
+  });
+
+  it('never drops a goal that is still in progress, however old', () => {
+    coordinator = newCoord(im, wm, createMockReasoner(), runner,
+      { mindInstanceId: MIND_ID, finishedGoalTtlMs: 1000, finishedGoalRetention: 1 });
+    plant('running', 'running', 999999);
+    plant('waiting', 'awaiting_approval', 999999);
+    plant('done1', 'completed', 10);
+    plant('done2', 'completed', 5);
+    assert.deepEqual(ids(), ['done2', 'running', 'waiting']);
+  });
+
+  it('stamps finishedAt and prunes when a goal finishes', async () => {
+    coordinator = newCoord(im, wm, createMockReasoner(), runner,
+      { mindInstanceId: MIND_ID, finishedGoalTtlMs: 3600000, finishedGoalRetention: 1 });
+    plant('older', 'completed', 1000);
+    const { goalId } = await coordinator.submitGoal('Goal');
+    runner.completeNextRun('done');
+    await new Promise((r) => setTimeout(r, 30));
+
+    const goal = coordinator._goals.get(goalId);
+    assert.ok(goal && goal.finishedAt, 'the new goal is kept and stamped');
+    assert.equal(coordinator._goals.has('older'), false, 'the older one made room');
+  });
+
+  it('falls back to defaults on malformed configuration', () => {
+    coordinator = newCoord(im, wm, createMockReasoner(), runner,
+      { mindInstanceId: MIND_ID, finishedGoalTtlMs: 'soon', finishedGoalRetention: -3 });
+    assert.equal(coordinator.finishedGoalRetention, 50);
+    assert.equal(coordinator.finishedGoalTtlMs, 3600000);
+  });
+});

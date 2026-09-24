@@ -37,6 +37,8 @@ const convSearch = require('./conversation-search');
 const { scanSessions, loadHistory } = require('./sessions');
 const { analyzeProfile } = require('./profile-analyzer');
 const { makeLogger } = require('../util/logger');
+const { resolveClientLabel } = require('./gateway-tasks');
+const { capTail, goalFinalOutput } = require('../mind/goal-output');
 
 const log = makeLogger('gateway');
 
@@ -674,17 +676,27 @@ function createGatewayRouter(opts) {
     return res.status(503).json({ error: 'mind_not_enabled' });
   }
 
-  function serializeGoal(goal) {
+  /**
+   * @param {object} goal
+   * @param {{withOutput?: boolean}} [opts] - include what the arms
+   *   produced. On for a single goal, off for the list, where up to the
+   *   retention limit of goals times their tasks' output would make one
+   *   response enormous.
+   */
+  function serializeGoal(goal, opts) {
     if (!goal) return null;
-    return {
+    const withOutput = !!(opts && opts.withOutput);
+    const out = {
       id: goal.id,
       status: goal.status,
       prompt: truncate(goal.prompt, 500),
       result: goal.result || null,
+      client: goal.client || null,
       createdAt: goal.createdAt || null,
+      finishedAt: goal.finishedAt || null,
       plan: goal.plan ? {
         tasks: (goal.plan.tasks || []).map(function (t) {
-          return {
+          const task = {
             id: t.id,
             description: t.description,
             agentType: t.agentType,
@@ -695,9 +707,24 @@ function createGatewayRouter(opts) {
             durationMs: (t.startedAt && t.completedAt) ? (t.completedAt - t.startedAt) : null,
             summary: (t.result && t.result.summary) ? String(t.result.summary).slice(0, 1000) : null,
           };
+          if (withOutput) {
+            const capped = capTail(t.output || '');
+            task.output = capped.output || null;
+            task.outputTruncated = capped.outputTruncated;
+          }
+          return task;
         }),
       } : null,
     };
+    if (withOutput) {
+      // The deliverable: what the tasks nothing else consumed produced.
+      // Before this, a caller that asked the mind for a report had no
+      // field anywhere that contained the report.
+      const deliverable = goalFinalOutput(goal);
+      out.finalOutput = deliverable.finalOutput;
+      out.finalOutputTruncated = deliverable.finalOutputTruncated;
+    }
+    return out;
   }
 
   // POST /v1/goals — submit a goal for the mind to decompose + fan out.
@@ -714,12 +741,24 @@ function createGatewayRouter(opts) {
       return res.status(400).json({ error: 'invalid_client' });
     }
 
+    // Same label ladder as /v1/tasks: explicit client (header wins over
+    // body), then the User-Agent's first token, then a pseudonym of the
+    // bearer token. It used to be validated here and then dropped, so a
+    // goal never said which system had submitted it.
+    const clientHeader = req.headers['x-polpo-client'];
+    const uaHeader = req.headers['user-agent'];
+    const client = resolveClientLabel({
+      client: (typeof clientHeader === 'string' && clientHeader.trim()) ? clientHeader.trim() : body.client,
+      userAgent: typeof uaHeader === 'string' ? uaHeader.slice(0, 200) : null,
+      requesterFingerprint: tokenFingerprint(extractBearerToken(req)),
+    });
+
     try {
       // Gateway-submitted goals MUST auto-dispatch. There is no human
       // in the loop on this API surface to /approve a plan preview or
       // /retry an escalated arm; treating gateway callers as
       // interactive would deadlock them on the first plan.
-      const result = await coordinator.submitGoal(prompt, { autoDispatch: true });
+      const result = await coordinator.submitGoal(prompt, { autoDispatch: true, client: client });
       if (!result || !result.goalId) {
         return res.status(500).json({ error: 'goal_create_failed' });
       }
@@ -751,7 +790,7 @@ function createGatewayRouter(opts) {
     const goals = coordinator.getActiveGoals() || [];
     const goal = goals.find(function (g) { return g && g.id === req.params.id; });
     if (!goal) return res.status(404).json({ error: 'goal_not_found' });
-    res.json(serializeGoal(goal));
+    res.json(serializeGoal(goal, { withOutput: true }));
   });
 
   // DELETE /v1/goals/:id — cancel.
@@ -799,10 +838,14 @@ function createGatewayRouter(opts) {
     // If the goal is already in a terminal state, replay a synthetic done
     // event so a late subscriber doesn't hang waiting forever.
     if (existing.status === 'completed' || existing.status === 'failed') {
+      const deliverable = goalFinalOutput(existing);
       writeSseEvent(res, existing.status === 'completed' ? 'done' : 'error', {
         goalId,
         status: existing.status,
         result: existing.result || null,
+        client: existing.client || null,
+        finalOutput: deliverable.finalOutput,
+        finalOutputTruncated: deliverable.finalOutputTruncated,
         replayed: true,
       });
       try { res.end(); } catch {}

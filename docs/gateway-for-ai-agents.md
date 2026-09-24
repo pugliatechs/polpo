@@ -372,19 +372,25 @@ POST /v1/goals
 ```
 event: snapshot      data: { goalId, status, prompt, plan, replayed: true }
                                                     ↑ only when you connect late
-event: planning      data: { goalId, prompt }
+event: planning      data: { goalId, prompt, client }
 event: plan_ready    data: { goalId, tasks: [{id, description, agentType, dependsOn}] }
 event: task_started  data: { goalId, taskId, description, agentInstanceId, agentName, agentType }
 event: task_chunk    data: { goalId, taskId, text }
-event: task_done     data: { goalId, taskId, success, summary, durationMs }
+event: task_done     data: { goalId, taskId, success, summary, output, outputTruncated, durationMs }
+event: task_answered data: { goalId, taskId, question, turn }                ← mind answered a blocked arm in-session
+event: task_refused  data: { goalId, taskId, turn, refusals }                ← a guardrail stopped an arm's turn
 event: task_failed   data: { goalId, taskId, reason, terminal?, abandoned? }
 event: replanning    data: { goalId, taskId, attempt, maxAttempts, reason }
 event: cancelled     data: { goalId, reason }
-event: done          data: { goalId, status, result, taskSummaries, durationMs }
+event: done          data: { goalId, status, result, client, finalOutput, finalOutputTruncated, taskSummaries, durationMs }
 event: error         data: { goalId, message }
 ```
 
 Treat the stream as best-effort live: `snapshot` covers your connection-race window; everything after is real-time.
+
+**The answer is `finalOutput`** on the `done` event (and on `GET /v1/goals/:id`). It is the output of the plan's final tasks, capped at 64 KiB from the end. You do not need to stitch `task_chunk` events together. If you miss the stream, `GET /v1/goals/:id` still has it for an hour after the goal finishes.
+
+Identify yourself with `X-Polpo-Client: <name>` (or `client` in the body). It shows on the goal and in the host's mind chat, so the operator can see which system asked.
 
 ### When to switch from `/v1/goals` back to `/v1/tasks`
 

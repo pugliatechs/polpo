@@ -784,6 +784,9 @@ function validateInput(input, maxTimeoutMs) {
 
 module.exports = {
   GatewayTaskManager,
+  // Shared with the goals route, so a goal is labelled by exactly the
+  // same explicit-client, User-Agent, anon-hash ladder as a task.
+  resolveClientLabel,
   VALID_AGENT_TYPES,
   DEFAULT_TIMEOUT_MS,
   MAX_TIMEOUT_MS_DEFAULT,

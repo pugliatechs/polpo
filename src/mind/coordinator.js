@@ -25,6 +25,7 @@
 const EventEmitter = require('events');
 const { v4: uuidv4 } = require('uuid');
 const { makeLogger } = require('../util/logger');
+const { capTail, goalFinalOutput } = require('./goal-output');
 
 const log = makeLogger('mind-coordinator');
 
@@ -62,6 +63,17 @@ class Coordinator extends EventEmitter {
     this.maxArmTurns = (this.policy && this.policy.maxArmTurns > 0)
       ? this.policy.maxArmTurns
       : 2;
+    // Finished goals are kept for a while, not forever and not zero
+    // time. Forever was the old behaviour: nothing ever left _goals, so
+    // a server fed goals by an external client grew without bound, full
+    // task outputs included. Zero would break any caller that polls
+    // GET /v1/goals/:id for the result after the goal finishes.
+    this.finishedGoalRetention = positiveInt(opts.finishedGoalRetention)
+      || positiveInt(process.env.POLPO_MIND_GOAL_RETENTION)
+      || 50;
+    this.finishedGoalTtlMs = positiveInt(opts.finishedGoalTtlMs)
+      || positiveInt(process.env.POLPO_MIND_GOAL_TTL_MS)
+      || 60 * 60 * 1000;
 
     this._goals = new Map();         // goalId -> Goal
     this._taskToAgent = new Map();   // agentId -> taskId (live runs only)
@@ -99,6 +111,12 @@ class Coordinator extends EventEmitter {
    */
   async submitGoal(prompt, opts) {
     var autoDispatch = !!(opts && opts.autoDispatch);
+    // Who asked, for goals submitted through the gateway. The gateway
+    // already resolves and sanitises it; this re-applies the same
+    // charset so a direct caller cannot put markup into the chat.
+    var client = (opts && typeof opts.client === 'string' && opts.client.trim())
+      ? opts.client.trim().replace(/[^A-Za-z0-9._\-+/]/g, '_').slice(0, 32)
+      : null;
     var goalId = 'goal-' + uuidv4().slice(0, 8);
     var goal = {
       id: goalId,
@@ -108,6 +126,7 @@ class Coordinator extends EventEmitter {
       result: null,
       createdAt: Date.now(),
       autoDispatch: autoDispatch,
+      client: client,
     };
     this._goals.set(goalId, goal);
     this._persistGoalState(goal);
@@ -117,8 +136,16 @@ class Coordinator extends EventEmitter {
     // "first reply" clutters the chat for long goals. The structured
     // goal:event below still carries the full prompt for any SSE
     // consumer that needs it.
-    this._report('Planning your goal…');
-    this._emitGoalEvent(goalId, 'planning', { prompt: prompt });
+    // A goal from an external client has no user bubble in the mind
+    // chat, so without naming the client and the goal here the dashboard
+    // would show a plan appearing from nowhere.
+    if (client) {
+      this._report('Planning a goal from ' + client + ': ' +
+        (prompt.length > 200 ? prompt.slice(0, 200) + '…' : prompt));
+    } else {
+      this._report('Planning your goal…');
+    }
+    this._emitGoalEvent(goalId, 'planning', { prompt: prompt, client: client });
 
     try {
       var plan = await this._planFor(goal);
@@ -672,37 +699,24 @@ class Coordinator extends EventEmitter {
    *   conversation to walk, so we take the runner's snapshot as-is.
    */
   _completeTask(task, output) {
-    task.status = 'completed';
-    task.completedAt = Date.now();
-    task.result = { success: true, summary: 'Completed' };
-
-    // Capture the arm's output text so dependent tasks can use it as context.
-    // This is the 'brokering' that lets the mind share findings between arms.
+    // Capture the arm's output first. Both outcomes below need it: the
+    // success path hands it to dependents as context (the 'brokering'
+    // that lets the mind share findings between arms), and the failure
+    // path hands it to the replanner.
     task.output = typeof output === 'string' ? output : '';
 
-    var duration = task.completedAt - (task.startedAt || task.completedAt);
-    var durationStr = duration < 60000
-      ? Math.round(duration / 1000) + 's'
-      : Math.round(duration / 60000) + 'min';
-
-    this._report('Completed (' + durationStr + '): ' + task.description);
-    this._emitGoalEvent(task.goalId, 'task_done', {
-      taskId: task.id,
-      success: true,
-      summary: (task.output || '').slice(-1000),
-      durationMs: duration,
-    });
-
-    // Act on the verdict the turn assessment already produced. It ran
-    // while the arm was alive, so it is available here synchronously,
-    // BEFORE dependents are dispatched below. That ordering is the
-    // whole point: a refusal must not reach dependents as their
-    // context and then be discovered afterwards.
+    // Act on the turn assessment's verdict BEFORE anything announces
+    // success. It ran while the arm was alive, so it is available here
+    // synchronously. Two things depend on this ordering: dependents must
+    // never receive a refused or failed result as their context, and
+    // SSE consumers must never see task_done {success: true} followed by
+    // a replan of the same task, which is what an earlier revision of
+    // this method emitted.
     var assessment = task.assessment;
     if (assessment && assessment.verdict === 'failed') {
       this._report('Assessment failed for ' + task.description + ': ' +
         (assessment.summary || 'task did not produce a usable result'));
-      task.status = 'running'; // so the failure handler accepts it
+      // Still 'running' here, which is what _failTask accepts.
       this._failTask(
         task.id,
         'assessment: ' + (assessment.summary || 'task did not produce a usable result'),
@@ -711,9 +725,30 @@ class Coordinator extends EventEmitter {
       return;
     }
 
-    if (assessment && assessment.summary) {
-      task.result = { success: true, summary: assessment.summary };
-    }
+    task.status = 'completed';
+    task.completedAt = Date.now();
+    task.result = {
+      success: true,
+      summary: (assessment && assessment.summary) || 'Completed',
+    };
+
+    var duration = task.completedAt - (task.startedAt || task.completedAt);
+    var durationStr = duration < 60000
+      ? Math.round(duration / 1000) + 's'
+      : Math.round(duration / 60000) + 'min';
+
+    this._report('Completed (' + durationStr + '): ' + task.description);
+    var capped = capTail(task.output);
+    this._emitGoalEvent(task.goalId, 'task_done', {
+      taskId: task.id,
+      success: true,
+      // Kept as the short tail for existing consumers; `output` below is
+      // the full (capped) text.
+      summary: (task.output || '').slice(-1000),
+      output: capped.output,
+      outputTruncated: capped.outputTruncated,
+      durationMs: duration,
+    });
 
     // Dispatch dependent tasks and check goal completion synchronously
     // so the coordinator state is consistent before returning.
@@ -1209,17 +1244,27 @@ class Coordinator extends EventEmitter {
       // Granular event for /v1/goals SSE consumers. Includes the per-task
       // summaries so a caller that joined late can rebuild what happened.
       var taskSummaries = (goal.plan && goal.plan.tasks) ? goal.plan.tasks.map(function (t) {
+        var out = capTail(t.output || '');
         return {
           id: t.id,
           description: t.description,
           status: t.status,
           summary: (t.result && t.result.summary) || null,
+          output: out.output || null,
+          outputTruncated: out.outputTruncated,
           durationMs: (t.startedAt && t.completedAt) ? (t.completedAt - t.startedAt) : null,
         };
       }) : [];
+      // The deliverable: output of the tasks nothing else consumed. An
+      // external caller reads this one field instead of reconstructing
+      // the plan's dependency graph itself.
+      var deliverable = goalFinalOutput(goal);
       this._emitGoalEvent(goalId, 'done', {
         status: goal.status,
         result: goal.result,
+        client: goal.client || null,
+        finalOutput: deliverable.finalOutput,
+        finalOutputTruncated: deliverable.finalOutputTruncated,
         taskSummaries: taskSummaries,
         durationMs: Date.now() - goal.createdAt,
       });
@@ -1369,6 +1414,9 @@ class Coordinator extends EventEmitter {
    * Get all active goals.
    */
   getActiveGoals() {
+    // Expired finished goals are dropped lazily here as well, so the TTL
+    // holds even when no new goal finishes to trigger a prune.
+    this._pruneFinishedGoals();
     var goals = [];
     for (var entry of this._goals) {
       goals.push(entry[1]);
@@ -1377,11 +1425,43 @@ class Coordinator extends EventEmitter {
   }
 
   /**
+   * Drop finished goals past their TTL, then the oldest beyond the
+   * retention count. Goals still planning, awaiting approval, running
+   * or waiting on the user are never touched.
+   */
+  _pruneFinishedGoals() {
+    var now = Date.now();
+    var kept = [];
+    for (var entry of this._goals) {
+      var g = entry[1];
+      if (g.status !== 'completed' && g.status !== 'failed') continue;
+      var at = g.finishedAt || g.createdAt || 0;
+      if (now - at > this.finishedGoalTtlMs) {
+        this._goals.delete(g.id);
+      } else {
+        kept.push(g);
+      }
+    }
+    if (kept.length > this.finishedGoalRetention) {
+      kept.sort(function (a, b) { return (a.finishedAt || 0) - (b.finishedAt || 0); });
+      var excess = kept.length - this.finishedGoalRetention;
+      for (var i = 0; i < excess; i++) this._goals.delete(kept[i].id);
+    }
+  }
+
+  /**
    * Persist the goal to the in-flight store, or remove it if terminal.
    * No-op if no store was configured.
    */
   _persistGoalState(goal) {
-    if (!this.goalStore || !goal) return;
+    if (!goal) return;
+    // Every terminal transition comes through here, which makes it the
+    // one place to stamp when a goal finished and to enforce retention.
+    if (goal.status === 'completed' || goal.status === 'failed') {
+      if (!goal.finishedAt) goal.finishedAt = Date.now();
+      this._pruneFinishedGoals();
+    }
+    if (!this.goalStore) return;
     try {
       if (goal.status === 'completed' || goal.status === 'failed') {
         this.goalStore.remove(goal.id);
@@ -1489,6 +1569,15 @@ class Coordinator extends EventEmitter {
     this._taskToAgent.clear();
     this.removeAllListeners();
   }
+}
+
+/**
+ * Coerce to a positive integer, or null, so a malformed env var falls
+ * through to the default instead of disabling retention.
+ */
+function positiveInt(value) {
+  var n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
 }
 
 module.exports = { Coordinator };

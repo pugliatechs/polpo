@@ -24,7 +24,8 @@ function createStubCoordinator() {
   const coordinator = new EventEmitter();
   coordinator._goals = new Map();
 
-  coordinator.submitGoal = async function (prompt) {
+  coordinator.submitGoal = async function (prompt, opts) {
+    coordinator.lastSubmitOpts = opts || null;
     const goalId = 'goal-' + Math.random().toString(36).slice(2, 10);
     const goal = {
       id: goalId,
@@ -388,6 +389,122 @@ describe('Gateway /v1/goals/:id/stream (SSE)', () => {
     // All events must carry the right goalId
     for (const e of events) {
       if (e.data && e.data.goalId) assert.equal(e.data.goalId, g1);
+    }
+  });
+});
+
+
+describe('Gateway /v1/goals: results and attribution', () => {
+  let coordinator, harness;
+  beforeEach(async () => {
+    coordinator = createStubCoordinator();
+    harness = await startServer({
+      taskManager: createStubTaskManager(),
+      getKey: () => VALID_KEY,
+      mind: { coordinator },
+    });
+  });
+  afterEach(async () => { await closeServer(harness.server); });
+
+  async function submit(headers, body) {
+    const r = await fetch(harness.url + '/v1/goals', {
+      method: 'POST',
+      headers: { ...AUTH, 'Content-Type': 'application/json', ...(headers || {}) },
+      body: JSON.stringify(Object.assign({ goal: 'research something' }, body || {})),
+    });
+    assert.equal(r.status, 201);
+    return (await r.json()).goalId;
+  }
+
+  // A finished two-step goal: research feeds the write-up, so the
+  // write-up is the deliverable.
+  function finishWithOutputs(goalId) {
+    const g = coordinator._goals.get(goalId);
+    g.status = 'completed';
+    g.result = 'All tasks completed successfully.';
+    g.finishedAt = Date.now();
+    g.plan = { tasks: [
+      { id: 't-1', index: 0, description: 'research', status: 'completed', dependsOn: [],
+        output: 'raw findings', result: { summary: 'found it' } },
+      { id: 't-2', index: 1, description: 'write up', status: 'completed', dependsOn: [0],
+        output: '# Report\n\nThe answer is 42.', result: { summary: 'wrote it' } },
+    ] };
+    return g;
+  }
+
+  it('passes the X-Polpo-Client header through to the goal', async () => {
+    await submit({ 'X-Polpo-Client': 'openclaw' });
+    assert.equal(coordinator.lastSubmitOpts.client, 'openclaw');
+    assert.equal(coordinator.lastSubmitOpts.autoDispatch, true);
+  });
+
+  it('falls back to the body client, then the User-Agent', async () => {
+    await submit({}, { client: 'from-body' });
+    assert.equal(coordinator.lastSubmitOpts.client, 'from-body');
+
+    await submit({ 'User-Agent': 'openclaw/1.4 (linux)' });
+    assert.equal(coordinator.lastSubmitOpts.client, 'openclaw/1.4');
+  });
+
+  it('falls back to a token pseudonym, never the token itself', async () => {
+    await submit({ 'User-Agent': '' });
+    const label = coordinator.lastSubmitOpts.client;
+    assert.ok(label === 'undici' || /^anon-[0-9a-f]{7}$/.test(label), 'got ' + label);
+    assert.ok(!label.includes(VALID_KEY));
+  });
+
+  it('sanitises a hostile client label', async () => {
+    await submit({ 'X-Polpo-Client': '<img src=x onerror=alert(1)>' });
+    assert.match(coordinator.lastSubmitOpts.client, /^[A-Za-z0-9._\-+/]+$/);
+  });
+
+  it('returns the deliverable and every task output for one goal', async () => {
+    const id = await submit();
+    finishWithOutputs(id);
+    const r = await fetch(harness.url + '/v1/goals/' + id, { headers: AUTH });
+    const body = await r.json();
+
+    assert.equal(body.finalOutput, '# Report\n\nThe answer is 42.');
+    assert.equal(body.finalOutputTruncated, false);
+    assert.equal(body.plan.tasks[0].output, 'raw findings');
+    assert.equal(body.plan.tasks[1].output, '# Report\n\nThe answer is 42.');
+    assert.ok(body.finishedAt);
+  });
+
+  it('keeps outputs out of the list endpoint', async () => {
+    const id = await submit();
+    finishWithOutputs(id);
+    const body = await (await fetch(harness.url + '/v1/goals', { headers: AUTH })).json();
+    const g = body.goals.find((x) => x.id === id);
+    assert.ok(g);
+    assert.equal('finalOutput' in g, false);
+    assert.equal('output' in g.plan.tasks[0], false);
+  });
+
+  it('gives a late SSE subscriber the deliverable too', async () => {
+    const id = await submit();
+    finishWithOutputs(id);
+    const r = await fetch(harness.url + '/v1/goals/' + id + '/stream', { headers: AUTH });
+    const text = await r.text();
+    assert.match(text, /event: done/);
+    assert.match(text, /The answer is 42/);
+    assert.match(text, /"replayed":true/);
+  });
+
+  it('caps a huge output at its tail and says so', async () => {
+    const prev = process.env.POLPO_GOAL_OUTPUT_MAX_CHARS;
+    process.env.POLPO_GOAL_OUTPUT_MAX_CHARS = '100';
+    try {
+      const id = await submit();
+      const g = finishWithOutputs(id);
+      g.plan.tasks[1].output = 'x'.repeat(500) + 'THE END';
+      const body = await (await fetch(harness.url + '/v1/goals/' + id, { headers: AUTH })).json();
+      assert.equal(body.finalOutput.length, 100);
+      assert.ok(body.finalOutput.endsWith('THE END'), 'keeps the tail, where the answer is');
+      assert.equal(body.finalOutputTruncated, true);
+    } finally {
+      if (prev === undefined) delete process.env.POLPO_GOAL_OUTPUT_MAX_CHARS;
+      else process.env.POLPO_GOAL_OUTPUT_MAX_CHARS = prev;
     }
   });
 });
