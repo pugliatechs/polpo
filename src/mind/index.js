@@ -17,6 +17,7 @@ const { Watcher } = require('./watcher');
 const { OneShotAgentRunner } = require('../agent/one-shot-runner');
 const { Memory } = require('./memory');
 const { GoalStore } = require('./goal-store');
+const { attachActivityLog } = require('./activity-log');
 const { loadPolicy } = require('./policies');
 const { makeLogger } = require('../util/logger');
 
@@ -117,22 +118,14 @@ function createMind(instanceManager, options) {
     log.error('Goal recovery failed:', err.message);
   }
 
-  // Log agent events in verbose mode
+  // Log agent transitions in verbose mode. Prompt-free labels, one
+  // stable identity per agent, transitions only: see activity-log.js.
+  var detachActivityLog = null;
   if (options.verbose) {
-    worldModel.on('agent:added', function (data) {
-      log.info('Agent added: ' + data.name + ' (' + data.agentType + ')');
-    });
-    worldModel.on('agent:removed', function (data) {
-      log.info('Agent removed: ' + data.id);
-    });
-    worldModel.on('agent:idle', function (data) {
-      log.info('Agent idle: ' + data.name);
-    });
-    worldModel.on('agent:busy', function (data) {
-      log.info('Agent busy: ' + data.name);
-    });
-    worldModel.on('all:idle', function () {
-      log.info('All agents idle');
+    detachActivityLog = attachActivityLog({
+      worldModel: worldModel,
+      instanceManager: instanceManager,
+      log: log,
     });
   }
 
@@ -332,6 +325,7 @@ function createMind(instanceManager, options) {
     instanceId: mindId,
 
     destroy: function () {
+      if (detachActivityLog) detachActivityLog();
       watcher.destroy();
       instanceManager.removeListener('instance:message', messageHandler);
       coordinator.destroy();
