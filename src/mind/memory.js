@@ -212,6 +212,24 @@ class Memory {
   }
 
   /**
+   * The entry written for a given goal, or null.
+   *
+   * Used when the user follows up on, or asks about, a goal that has
+   * already dropped out of the coordinator's in-memory retention: the
+   * summary here is all that is left of it.
+   *
+   * @param {string} goalId
+   * @returns {?object}
+   */
+  findByGoalId(goalId) {
+    if (typeof goalId !== 'string' || !goalId) return null;
+    for (var i = this._entries.length - 1; i >= 0; i--) {
+      if (this._entries[i].goalId === goalId) return this._entries[i];
+    }
+    return null;
+  }
+
+  /**
    * Return the N most recent entries.
    * @param {number} [n=10]
    * @returns {Array<object>}

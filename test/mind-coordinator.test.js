@@ -1587,3 +1587,203 @@ describe('Coordinator: finished goal retention', () => {
     assert.equal(coordinator.finishedGoalTtlMs, 3600000);
   });
 });
+
+describe('Coordinator: carrying on from a finished goal', () => {
+  let im, wm, runner, coordinator;
+  const MIND_ID = 'mind-001';
+
+  beforeEach(() => {
+    im = createMockIM();
+    im.register({ id: MIND_ID, name: 'Alien Mind', agentType: 'mind' });
+    wm = new WorldModel(im, MIND_ID);
+    runner = createMockRunner(im);
+  });
+
+  afterEach(() => {
+    if (coordinator) coordinator.destroy();
+    runner.destroy();
+    wm.destroy();
+  });
+
+  const settle = () => new Promise((r) => setTimeout(r, 30));
+  const mindMsgs = () => im.getConversation(MIND_ID, 200).filter((m) => m.source === 'mind');
+  const ONE = [{ description: 'Write the report', agentType: 'claude', targetCwd: '/tmp', prompt: 'write', dependsOn: [] }];
+
+  function reasoner(overrides) {
+    const seen = { plans: [], answers: [] };
+    return Object.assign({
+      seen,
+      plan: async (world, prompt) => { seen.plans.push(prompt); return { tasks: ONE }; },
+      replan: async () => ({ action: 'abandon', reason: 'x' }),
+      assessTurn: async () => ({ verdict: 'done', summary: 'ok', answer: null }),
+      answer: async (opts) => { seen.answers.push(opts); return 'The toolchain is Yocto.'; },
+      destroy: () => {},
+    }, overrides || {});
+  }
+
+  async function finishGoal(r, output) {
+    const { goalId } = await coordinator.submitGoal('Research the device', { autoDispatch: true });
+    await runner.endNextTurn(output);
+    await settle();
+    return goalId;
+  }
+
+  it('posts the result in the chat when the goal completes', async () => {
+    const r = reasoner();
+    coordinator = newCoord(im, wm, r, runner, { mindInstanceId: MIND_ID });
+    await finishGoal(r, '# Report\n\nIt runs Linux.');
+
+    const done = mindMsgs().find((m) => m.content.indexOf('Goal completed:') === 0);
+    assert.ok(done, 'expected a completion message');
+    assert.match(done.content, /# Report\n\nIt runs Linux\./);
+  });
+
+  it('offers Follow up and Ask on the completion message', async () => {
+    const r = reasoner();
+    coordinator = newCoord(im, wm, r, runner, { mindInstanceId: MIND_ID });
+    const goalId = await finishGoal(r, 'short result');
+
+    const done = mindMsgs().find((m) => m.content.indexOf('Goal completed:') === 0);
+    const commands = done.actions.map((a) => a.command);
+    assert.deepEqual(commands, ['/followup ' + goalId, '/ask ' + goalId]);
+    assert.equal(done.actions[0].kind, 'input');
+  });
+
+  it('shows the end of a long result and offers the full one', async () => {
+    const r = reasoner();
+    coordinator = newCoord(im, wm, r, runner, { mindInstanceId: MIND_ID });
+    const goalId = await finishGoal(r, 'x'.repeat(10000) + 'THE CONCLUSION');
+
+    const done = mindMsgs().find((m) => m.content.indexOf('Goal completed:') === 0);
+    assert.ok(done.content.includes('THE CONCLUSION'), 'keeps the end, where the answer is');
+    assert.ok(done.content.length < 5000, 'the chat bubble stays bounded');
+    assert.ok(done.actions.some((a) => a.command === '/result ' + goalId));
+  });
+
+  it('says so when no task produced a result', async () => {
+    const r = reasoner();
+    coordinator = newCoord(im, wm, r, runner, { mindInstanceId: MIND_ID });
+    await finishGoal(r, '');
+    const done = mindMsgs().find((m) => m.content.indexOf('Goal completed:') === 0);
+    assert.match(done.content, /No task produced a result to show/);
+  });
+
+  it('gives a follow-up the earlier goal and its result when planning', async () => {
+    const r = reasoner();
+    coordinator = newCoord(im, wm, r, runner, { mindInstanceId: MIND_ID });
+    const parent = await finishGoal(r, '# Report\n\nIt runs Linux.');
+
+    await coordinator.submitGoal('make it shorter', { autoDispatch: true, parentGoalId: parent });
+
+    const planned = r.seen.plans[r.seen.plans.length - 1];
+    assert.match(planned, /FOLLOW-UP to an earlier goal/);
+    assert.match(planned, /Earlier goal: Research the device/);
+    assert.match(planned, /It runs Linux\./);
+    assert.match(planned, /New request: make it shorter/);
+    assert.ok(mindMsgs().some((m) => m.content === 'Planning a follow-up to: Research the device'));
+  });
+
+  it('hands the earlier result to the tasks that start the follow-up plan', async () => {
+    const r = reasoner({
+      plan: async () => ({ tasks: [
+        { description: 'shorten', agentType: 'claude', targetCwd: '/tmp', prompt: 'shorten it', dependsOn: [] },
+        { description: 'check', agentType: 'claude', targetCwd: '/tmp', prompt: 'check it', dependsOn: [0] },
+      ] }),
+    });
+    coordinator = newCoord(im, wm, r, runner, { mindInstanceId: MIND_ID });
+    const { goalId: parent } = await coordinator.submitGoal('Research', { autoDispatch: true });
+    await runner.endNextTurn('first step');
+    await settle();
+    await runner.endNextTurn('# Report\n\nIt runs Linux.');
+    await settle();
+
+    const before = runner.promptsSent().length;
+    await coordinator.submitGoal('make it shorter', { autoDispatch: true, parentGoalId: parent });
+    const rootPrompt = runner.promptsSent()[before];
+    assert.match(rootPrompt, /<parent_goal_result>/);
+    assert.match(rootPrompt, /It runs Linux\./);
+
+    await runner.endNextTurn('shortened');
+    await settle();
+    const dependentPrompt = runner.promptsSent()[before + 1];
+    assert.ok(!/<parent_goal_result>/.test(dependentPrompt),
+      'dependents get it through their predecessor, not again');
+  });
+
+  it('falls back to the memory summary once the earlier goal has been dropped', async () => {
+    const memPath = tempMemoryPath();
+    const memory = new Memory({ path: memPath });
+    memory.load();
+    memory.save({ type: 'goal', goalId: 'goal-gone1234', goalPrompt: 'Old research',
+      taskSummaries: ['✓ Research: it runs Linux'] });
+    const r = reasoner();
+    coordinator = newCoord(im, wm, r, runner, { mindInstanceId: MIND_ID, memory });
+
+    await coordinator.submitGoal('make it shorter', { autoDispatch: true, parentGoalId: 'goal-gone1234' });
+    const planned = r.seen.plans[r.seen.plans.length - 1];
+    assert.match(planned, /Only a short summary of its result survived/);
+    assert.match(planned, /it runs Linux/);
+    try { require('fs').unlinkSync(memPath); } catch {}
+  });
+
+  it('plans an unknown parent as a new goal, and says so', async () => {
+    const r = reasoner();
+    coordinator = newCoord(im, wm, r, runner, { mindInstanceId: MIND_ID });
+    await coordinator.submitGoal('make it shorter', { autoDispatch: true, parentGoalId: 'goal-nothere1' });
+    assert.ok(mindMsgs().some((m) => /no longer available, so this is planned as a new goal/.test(m.content)));
+    assert.ok(!/FOLLOW-UP/.test(r.seen.plans[r.seen.plans.length - 1]));
+  });
+
+  it('answers a question from the stored result without spawning an arm', async () => {
+    const r = reasoner();
+    coordinator = newCoord(im, wm, r, runner, { mindInstanceId: MIND_ID });
+    const goalId = await finishGoal(r, 'Built with Yocto on an i.MX6.');
+
+    const runsBefore = runner.promptsSent().length;
+    const ok = await coordinator.askAboutGoal(goalId, 'which toolchain?');
+
+    assert.equal(ok, true);
+    assert.equal(runner.promptsSent().length, runsBefore, 'no arm, no plan');
+    assert.equal(r.seen.answers[0].question, 'which toolchain?');
+    assert.match(r.seen.answers[0].result, /Yocto on an i\.MX6/);
+    const answer = mindMsgs().find((m) => m.content === 'The toolchain is Yocto.');
+    assert.ok(answer, 'answer posted');
+    assert.ok(answer.actions.some((a) => a.command === '/ask ' + goalId), 'can ask again');
+  });
+
+  it('asks about the latest finished goal when no id is given', async () => {
+    const r = reasoner();
+    coordinator = newCoord(im, wm, r, runner, { mindInstanceId: MIND_ID });
+    await finishGoal(r, 'result text');
+    await coordinator.askAboutGoal(null, 'anything?');
+    assert.equal(r.seen.answers.length, 1);
+  });
+
+  it('refuses to answer about a goal that is still running', async () => {
+    const r = reasoner();
+    coordinator = newCoord(im, wm, r, runner, { mindInstanceId: MIND_ID });
+    const { goalId } = await coordinator.submitGoal('Research', { autoDispatch: true });
+    const ok = await coordinator.askAboutGoal(goalId, 'done yet?');
+    assert.equal(ok, false);
+    assert.equal(r.seen.answers.length, 0);
+    assert.ok(mindMsgs().some((m) => /still running/.test(m.content)));
+  });
+
+  it('reports a failed answer instead of throwing', async () => {
+    const r = reasoner({ answer: async () => { throw new Error('reasoner down'); } });
+    coordinator = newCoord(im, wm, r, runner, { mindInstanceId: MIND_ID });
+    const goalId = await finishGoal(r, 'result');
+    const ok = await coordinator.askAboutGoal(goalId, 'q?');
+    assert.equal(ok, false);
+    assert.ok(mindMsgs().some((m) => m.content === 'Could not answer: reasoner down'));
+  });
+
+  it('returns the full result for /result', async () => {
+    const r = reasoner();
+    coordinator = newCoord(im, wm, r, runner, { mindInstanceId: MIND_ID });
+    const goalId = await finishGoal(r, 'y'.repeat(9000));
+    const res = coordinator.getGoalResult(goalId);
+    assert.equal(res.result.length, 9000);
+    assert.equal(coordinator.getGoalResult(null).id, goalId, 'defaults to the latest');
+  });
+});

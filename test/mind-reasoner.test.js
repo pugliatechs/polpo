@@ -302,4 +302,69 @@ describe('Reasoner', () => {
       assert.equal(r._parseReplan('{"action":"split","tasks":[]}').action, 'abandon');
     });
   });
+
+  describe('answer', () => {
+    it('grounds the answer on the stored result and the question', async () => {
+      const runner = createMockRunner({ output: '  It uses Yocto.  ' });
+      const text = await new Reasoner({ runner }).answer({
+        goalPrompt: 'Research the device', result: 'Built with Yocto.', question: 'which toolchain?',
+      });
+      assert.equal(text, 'It uses Yocto.');
+      const prompt = runner.calls[0].prompt;
+      assert.match(prompt, /The goal: Research the device/);
+      assert.match(prompt, /Built with Yocto\./);
+      assert.match(prompt, /Question: which toolchain\?/);
+    });
+
+    it('forbids tools, since reasoning runs have them with approvals bypassed', async () => {
+      const runner = createMockRunner({ output: 'ok' });
+      await new Reasoner({ runner }).answer({ goalPrompt: 'g', result: 'r', question: 'q' });
+      assert.match(runner.calls[0].prompt, /Do not run commands, read files, search the web, or use any tool/);
+    });
+
+    it('tells the model to say so when the result has no answer', async () => {
+      const runner = createMockRunner({ output: 'ok' });
+      await new Reasoner({ runner }).answer({ goalPrompt: 'g', result: 'r', question: 'q' });
+      assert.match(runner.calls[0].prompt, /If the result does not contain the answer, say so/);
+    });
+
+    it('keeps the end of a very long result', async () => {
+      const runner = createMockRunner({ output: 'ok' });
+      await new Reasoner({ runner }).answer({
+        goalPrompt: 'g', result: 'HEAD' + 'x'.repeat(20000) + 'TAIL', question: 'q',
+      });
+      const prompt = runner.calls[0].prompt;
+      assert.ok(prompt.includes('TAIL'));
+      assert.ok(!prompt.includes('HEAD'));
+      assert.match(prompt, /earlier part omitted/);
+    });
+
+    it('says when only a summary survived', async () => {
+      const runner = createMockRunner({ output: 'ok' });
+      await new Reasoner({ runner }).answer({ goalPrompt: 'g', result: 'r', question: 'q', fromMemory: true });
+      assert.match(runner.calls[0].prompt, /Only a short summary of the result survived/);
+    });
+  });
 });
+
+describe('splitGoalArg', () => {
+  const { splitGoalArg } = require('../src/mind/index');
+
+  it('takes a leading goal id', () => {
+    assert.deepEqual(splitGoalArg(' goal-ab12cd34 make it shorter'), { goalId: 'goal-ab12cd34', text: 'make it shorter' });
+  });
+
+  it('treats text without an id as referring to the latest goal', () => {
+    assert.deepEqual(splitGoalArg('make it shorter'), { goalId: null, text: 'make it shorter' });
+  });
+
+  it('does not accept something that only looks like an id', () => {
+    assert.equal(splitGoalArg('goal-<script> hi').goalId, null);
+    assert.equal(splitGoalArg('goal-AB hi').goalId, null);
+  });
+
+  it('handles an id with nothing after it', () => {
+    assert.deepEqual(splitGoalArg('goal-ab12cd34'), { goalId: 'goal-ab12cd34', text: '' });
+  });
+});
+

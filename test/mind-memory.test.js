@@ -215,3 +215,19 @@ describe('Memory', () => {
     assert.ok((mode & 0o077) === 0, 'file should not be world/group readable: got ' + mode.toString(8));
   });
 });
+
+describe('Memory.findByGoalId', () => {
+  const { Memory } = require('../src/mind/memory');
+  const p = require('path').join(require('os').tmpdir(), 'polpo-mem-byid-' + process.pid + '.jsonl');
+
+  it('finds the entry written for a goal, newest first', () => {
+    const m = new Memory({ path: p });
+    m.load();
+    m.save({ type: 'goal', goalId: 'goal-aaaa1111', goalPrompt: 'first' });
+    m.save({ type: 'goal', goalId: 'goal-aaaa1111', goalPrompt: 'second' });
+    assert.equal(m.findByGoalId('goal-aaaa1111').goalPrompt, 'second');
+    assert.equal(m.findByGoalId('goal-none0000'), null);
+    assert.equal(m.findByGoalId(''), null);
+    try { require('fs').unlinkSync(p); } catch {}
+  });
+});

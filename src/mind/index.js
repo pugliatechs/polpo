@@ -273,6 +273,77 @@ function createMind(instanceManager, options) {
       return;
     }
 
+    // ---- Carrying on from a finished goal ----
+    //
+    // Each takes an optional goal id first (the result message's buttons
+    // always send one); without it they refer to the most recently
+    // finished goal.
+
+    if (text === '/result' || text.startsWith('/result ')) {
+      var resArg = splitGoalArg(text.slice('/result'.length));
+      var res = coordinator.getGoalResult(resArg.goalId);
+      instanceManager.addMessage(mindId, {
+        role: 'assistant',
+        content: !res
+          ? 'There is no finished goal to show.'
+          : (res.fromMemory ? 'Only a summary of this result is still available:\n\n' : '') +
+            (res.result || 'That goal produced no result text.') +
+            (res.truncated ? '\n\n(Result capped at its last 64 KiB.)' : ''),
+        source: 'mind',
+      });
+      return;
+    }
+
+    if (text === '/ask' || text.startsWith('/ask ')) {
+      var askArg = splitGoalArg(text.slice('/ask'.length));
+      instanceManager.updateStatus(mindId, 'busy');
+      coordinator.askAboutGoal(askArg.goalId, askArg.text).catch(function (err) {
+        instanceManager.addMessage(mindId, {
+          role: 'assistant',
+          content: 'Could not answer: ' + err.message,
+          source: 'mind',
+        });
+      }).then(function () {
+        instanceManager.updateStatus(mindId, 'idle');
+      });
+      return;
+    }
+
+    if (text === '/followup' || text.startsWith('/followup ')) {
+      var fuArg = splitGoalArg(text.slice('/followup'.length));
+      var parentId = fuArg.goalId || coordinator.latestFinishedGoalId();
+      if (!fuArg.text) {
+        instanceManager.addMessage(mindId, {
+          role: 'assistant',
+          content: 'Follow up with what? For example: /followup make the report shorter',
+          source: 'mind',
+        });
+        return;
+      }
+      if (!parentId) {
+        instanceManager.addMessage(mindId, {
+          role: 'assistant',
+          content: 'There is no finished goal to follow up on. Send it as a new goal instead.',
+          source: 'mind',
+        });
+        return;
+      }
+      instanceManager.updateStatus(mindId, 'busy');
+      coordinator.submitGoal(fuArg.text, {
+        autoDispatch: process.env.POLPO_MIND_AUTO_DISPATCH === '1',
+        parentGoalId: parentId,
+      }).catch(function (err) {
+        instanceManager.addMessage(mindId, {
+          role: 'assistant',
+          content: 'Error: ' + err.message,
+          source: 'mind',
+        });
+      }).then(function () {
+        instanceManager.updateStatus(mindId, 'idle');
+      });
+      return;
+    }
+
     // Everything else is a goal. By default goals submitted via chat
     // are *interactive*: the mind plans, posts the plan preview, and
     // waits for /approve before dispatching. Operators who want the
@@ -337,4 +408,21 @@ function createMind(instanceManager, options) {
   };
 }
 
-module.exports = { createMind };
+/**
+ * Split "<goal-id> rest of text" into its parts. The id is optional:
+ * without one, the command refers to the most recently finished goal.
+ *
+ * @param {string} rest - the text after the command
+ * @returns {{goalId: ?string, text: string}}
+ */
+function splitGoalArg(rest) {
+  var trimmed = String(rest || '').trim();
+  var first = trimmed.split(/\s+/)[0] || '';
+  if (/^goal-[a-z0-9-]{4,32}$/.test(first)) {
+    return { goalId: first, text: trimmed.slice(first.length).trim() };
+  }
+  return { goalId: null, text: trimmed };
+}
+
+// splitGoalArg is exported for unit tests.
+module.exports = { createMind, splitGoalArg };

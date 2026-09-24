@@ -27,6 +27,14 @@ const { v4: uuidv4 } = require('uuid');
 const { makeLogger } = require('../util/logger');
 const { capTail, goalFinalOutput } = require('./goal-output');
 
+// How much of a finished goal's result the chat shows inline. The rest is
+// one tap away (/result); a chat bubble is not the place for 64 KiB.
+var CHAT_RESULT_MAX_CHARS = 4000;
+// How much of an earlier goal's result a follow-up carries into planning
+// and into the tasks that start the follow-up plan.
+var PARENT_RESULT_MAX_CHARS = 8000;
+var GOAL_ID_RE = /^goal-[a-z0-9-]{4,32}$/;
+
 const log = makeLogger('mind-coordinator');
 
 class Coordinator extends EventEmitter {
@@ -117,6 +125,12 @@ class Coordinator extends EventEmitter {
     var client = (opts && typeof opts.client === 'string' && opts.client.trim())
       ? opts.client.trim().replace(/[^A-Za-z0-9._\-+/]/g, '_').slice(0, 32)
       : null;
+    // A follow-up to an earlier goal. Its result is snapshotted now, not
+    // at planning time, so it cannot fall out of retention mid-plan.
+    var parentGoalId = (opts && typeof opts.parentGoalId === 'string' && GOAL_ID_RE.test(opts.parentGoalId))
+      ? opts.parentGoalId
+      : null;
+    var parentContext = parentGoalId ? this._parentContextFor(parentGoalId) : null;
     var goalId = 'goal-' + uuidv4().slice(0, 8);
     var goal = {
       id: goalId,
@@ -127,6 +141,8 @@ class Coordinator extends EventEmitter {
       createdAt: Date.now(),
       autoDispatch: autoDispatch,
       client: client,
+      parentGoalId: parentContext ? parentGoalId : null,
+      parentContext: parentContext,
     };
     this._goals.set(goalId, goal);
     this._persistGoalState(goal);
@@ -139,9 +155,13 @@ class Coordinator extends EventEmitter {
     // A goal from an external client has no user bubble in the mind
     // chat, so without naming the client and the goal here the dashboard
     // would show a plan appearing from nowhere.
-    if (client) {
-      this._report('Planning a goal from ' + client + ': ' +
-        (prompt.length > 200 ? prompt.slice(0, 200) + '…' : prompt));
+    if (parentGoalId && !parentContext) {
+      this._report('That earlier goal is no longer available, so this is planned as a new goal.');
+    }
+    if (parentContext) {
+      this._report('Planning a follow-up to: ' + oneLine(parentContext.prompt, 120));
+    } else if (client) {
+      this._report('Planning a goal from ' + client + ': ' + oneLine(prompt, 200));
     } else {
       this._report('Planning your goal…');
     }
@@ -201,12 +221,34 @@ class Coordinator extends EventEmitter {
       }
     }
     var prompt = goal.prompt;
+    if (goal.parentContext) {
+      // Without this a follow-up like "make it shorter" was planned with
+      // no idea what "it" was: the only context a new goal got was a
+      // keyword search over past goals, and a request like that shares
+      // no keywords with the goal it refers to.
+      var pc = goal.parentContext;
+      prompt = [
+        'This is a FOLLOW-UP to an earlier goal the user already ran. Their new request refers to its result.',
+        '',
+        'Earlier goal: ' + pc.prompt,
+        '',
+        (pc.fromMemory
+          ? 'Only a short summary of its result survived:'
+          : 'Its result:'),
+        pc.result || '(it produced no result text)',
+        '',
+        'Plan only what the new request asks for. The tasks that start your plan receive the earlier ' +
+          'result automatically, so do not copy it into task prompts.',
+        '',
+        'New request: ' + goal.prompt,
+      ].join('\n');
+    }
     if (tweakFeedback) {
       // Append the user's feedback to the prompt as guidance. We do this
       // rather than calling a separate replan() method so reasoners that
       // only implement plan() still work; replan() is reserved for
       // failure recovery on a specific task.
-      prompt = goal.prompt +
+      prompt = prompt +
         '\n\nFEEDBACK ON THE PREVIOUS PLAN (revise accordingly):\n' +
         tweakFeedback;
     }
@@ -396,6 +438,189 @@ class Coordinator extends EventEmitter {
   get MAX_REPLANS() { return 2; }
 
   /**
+   * Post what a finished goal produced into the chat, with the ways to
+   * carry on from it.
+   *
+   * The chat used to end a goal with "Goal completed: <prompt>" and
+   * nothing else. The arms that did the work unregister when they
+   * finish, so the result could only be found by hunting for the files
+   * they wrote or opening their transcripts.
+   */
+  _reportGoalResult(goal) {
+    var headline = goal.status === 'completed' ? 'Goal completed: ' : 'Goal partially failed: ';
+    var deliverable = goalFinalOutput(goal);
+    var lines = [headline + oneLine(goal.prompt, 200)];
+    var longer = false;
+    if (deliverable.finalOutput) {
+      var shown = capTail(deliverable.finalOutput, CHAT_RESULT_MAX_CHARS);
+      longer = shown.outputTruncated || deliverable.finalOutputTruncated;
+      lines.push('', shown.output);
+      if (longer) {
+        lines.push('', '(This is the end of a longer result. Tap Full result to see all of it.)');
+      }
+    } else {
+      lines.push('', 'No task produced a result to show.');
+    }
+    this._report(lines.join('\n'), this._resultActions(goal.id, longer));
+  }
+
+  /**
+   * Buttons for carrying on from a finished goal. Re-offered on every
+   * answer, since a button row disables itself once used.
+   */
+  _resultActions(goalId, withFullResult) {
+    var actions = [
+      { label: 'Follow up…', command: '/followup ' + goalId, kind: 'input',
+        inputPrompt: 'What should the mind do next with this result?', style: 'primary' },
+      { label: 'Ask…', command: '/ask ' + goalId, kind: 'input',
+        inputPrompt: 'Ask a question about this result…', style: 'secondary' },
+    ];
+    if (withFullResult) {
+      actions.push({ label: 'Full result', command: '/result ' + goalId, kind: 'send', style: 'secondary' });
+    }
+    return actions;
+  }
+
+  /**
+   * The most recently finished goal, or null.
+   * @returns {?object}
+   */
+  _latestFinishedGoal() {
+    var latest = null;
+    for (var entry of this._goals) {
+      var g = entry[1];
+      if (g.status !== 'completed' && g.status !== 'failed') continue;
+      if (!latest || (g.finishedAt || 0) > (latest.finishedAt || 0)) latest = g;
+    }
+    return latest;
+  }
+
+  /**
+   * Id of the goal a bare /followup or /ask refers to.
+   * @returns {?string}
+   */
+  latestFinishedGoalId() {
+    var g = this._latestFinishedGoal();
+    return g ? g.id : null;
+  }
+
+  /**
+   * What an earlier goal produced, for a follow-up or a question.
+   *
+   * Prefers the goal itself while it is still retained. Once it has
+   * dropped out, falls back to its long-term memory entry, which only
+   * keeps a summary; `fromMemory` says so.
+   *
+   * @param {string} goalId
+   * @returns {?{id: string, prompt: string, result: ?string, fromMemory: boolean}}
+   *   null when the goal is unknown or still running
+   */
+  _parentContextFor(goalId) {
+    var goal = this._goals.get(goalId);
+    if (goal) {
+      if (goal.status !== 'completed' && goal.status !== 'failed') return null;
+      var d = goalFinalOutput(goal);
+      return {
+        id: goal.id,
+        prompt: goal.prompt,
+        result: d.finalOutput ? capTail(d.finalOutput, PARENT_RESULT_MAX_CHARS).output : null,
+        fromMemory: false,
+      };
+    }
+    var mem = this.memory && typeof this.memory.findByGoalId === 'function'
+      ? this.memory.findByGoalId(goalId)
+      : null;
+    if (!mem) return null;
+    return {
+      id: goalId,
+      prompt: mem.goalPrompt || '',
+      result: Array.isArray(mem.taskSummaries) && mem.taskSummaries.length
+        ? mem.taskSummaries.join('\n')
+        : null,
+      fromMemory: true,
+    };
+  }
+
+  /**
+   * The earlier goal's result, for the tasks that start a follow-up.
+   * Tasks further down the plan get it indirectly, through their
+   * predecessors' output.
+   */
+  _buildParentContext(goal) {
+    var pc = goal && goal.parentContext;
+    if (!pc || !pc.result) return '';
+    return '<parent_goal_result>\n' +
+      'This task is part of a follow-up to an earlier goal the user ran: "' +
+      this._escapeAttr(oneLine(pc.prompt, 300)) + '".\n' +
+      (pc.fromMemory
+        ? 'Only a short summary of its result survived:\n\n'
+        : 'Its result is below; the user\'s new request refers to it.\n\n') +
+      pc.result + '\n' +
+      '</parent_goal_result>\n\n';
+  }
+
+  /**
+   * The full result of a finished goal, for /result.
+   * @param {?string} goalId - null for the most recent finished goal
+   * @returns {?{id: string, prompt: string, result: ?string, truncated: boolean, fromMemory: boolean}}
+   */
+  getGoalResult(goalId) {
+    var id = goalId || this.latestFinishedGoalId();
+    if (!id) return null;
+    var goal = this._goals.get(id);
+    if (goal && (goal.status === 'completed' || goal.status === 'failed')) {
+      var d = goalFinalOutput(goal);
+      return { id: id, prompt: goal.prompt, result: d.finalOutput, truncated: d.finalOutputTruncated, fromMemory: false };
+    }
+    var pc = goal ? null : this._parentContextFor(id);
+    if (!pc) return null;
+    return { id: id, prompt: pc.prompt, result: pc.result, truncated: false, fromMemory: true };
+  }
+
+  /**
+   * Answer a question about a finished goal's result, without planning
+   * or spawning any arm. One reasoner call over the stored result.
+   *
+   * @param {?string} goalId - null for the most recent finished goal
+   * @param {string} question
+   * @returns {Promise<boolean>} whether an answer was posted
+   */
+  async askAboutGoal(goalId, question) {
+    var id = goalId || this.latestFinishedGoalId();
+    var context = id ? this._parentContextFor(id) : null;
+    if (!context) {
+      this._report(id && this._goals.has(id)
+        ? 'That goal is still running. Ask again once it has finished.'
+        : 'There is no finished goal to ask about.');
+      return false;
+    }
+    if (!question || !question.trim()) {
+      this._report('Ask what? For example: /ask ' + id + ' which toolchain does it use?');
+      return false;
+    }
+    if (!this.reasoner || typeof this.reasoner.answer !== 'function') {
+      this._report('This mind cannot answer questions about results.');
+      return false;
+    }
+
+    this._report('Checking the result of: ' + oneLine(context.prompt, 120));
+    var answer;
+    try {
+      answer = await this.reasoner.answer({
+        goalPrompt: context.prompt,
+        result: context.result || '',
+        fromMemory: context.fromMemory,
+        question: question.trim(),
+      });
+    } catch (err) {
+      this._report('Could not answer: ' + ((err && err.message) || 'unknown error'));
+      return false;
+    }
+    this._report(answer, this._resultActions(id, false));
+    return true;
+  }
+
+  /**
    * Build a context block from completed predecessor tasks, to prepend
    * to a dependent task's prompt. This is how arms share findings:
    * the mind brokers information between them.
@@ -551,7 +776,10 @@ class Coordinator extends EventEmitter {
     var contextBlock = goal && goal.plan
       ? this._buildPredecessorContext(task, goal.plan.tasks)
       : '';
-    var finalPrompt = contextBlock + task.prompt;
+    var parentBlock = (!task.dependsOn || task.dependsOn.length === 0)
+      ? this._buildParentContext(goal)
+      : '';
+    var finalPrompt = parentBlock + contextBlock + task.prompt;
 
     var cwd = task.targetCwd && task.targetCwd.trim()
       ? task.targetCwd
@@ -1231,9 +1459,7 @@ class Coordinator extends EventEmitter {
         ? 'Some tasks failed. Check individual task results.'
         : 'All tasks completed successfully.';
 
-      this._report(goal.status === 'completed'
-        ? 'Goal completed: ' + goal.prompt
-        : 'Goal partially failed: ' + goal.prompt);
+      this._reportGoalResult(goal);
 
       // Persist to memory so future goals can benefit from past work
       this._persistGoalToMemory(goal);
@@ -1326,6 +1552,9 @@ class Coordinator extends EventEmitter {
 
       this.memory.save({
         type: 'goal',
+        // Lets a follow-up or a question find this entry by goal id once
+        // the goal itself has dropped out of in-memory retention.
+        goalId: goal.id,
         goalPrompt: goal.prompt,
         outcome: outcome,
         taskCount: goal.plan ? goal.plan.tasks.length : 0,
@@ -1569,6 +1798,14 @@ class Coordinator extends EventEmitter {
     this._taskToAgent.clear();
     this.removeAllListeners();
   }
+}
+
+/**
+ * One line of at most `max` characters, for chat headlines.
+ */
+function oneLine(text, max) {
+  var s = String(text || '').replace(/\s+/g, ' ').trim();
+  return s.length > max ? s.slice(0, max) + '…' : s;
 }
 
 /**

@@ -108,6 +108,22 @@ var STOP_REASON_TEXT = {
   pause_turn: 'it paused mid-task (interrupted)',
 };
 
+var ANSWER_PROMPT = [
+  'The user ran a goal through a team of coding agents and is asking a question about its result.',
+  '',
+  'Rules:',
+  '- Answer using ONLY the result text below. Do not add facts that are not in it.',
+  '- Do not run commands, read files, search the web, or use any tool. Everything you',
+  '  may use is in this message.',
+  '- If the result does not contain the answer, say so in one sentence and suggest',
+  '  using Follow up to have the agents find out.',
+  '- Answer directly and concisely in markdown. No preamble, no restating the question.',
+].join('\n');
+
+// How much of a result an answer is grounded on. The end is kept: that
+// is where an agent's conclusions are.
+var ANSWER_RESULT_MAX_CHARS = 12000;
+
 var REPLAN_PROMPT = [
   'You are the coordination brain of Polpo. A task failed during execution and you must decide how to recover.',
   '',
@@ -213,6 +229,38 @@ class Reasoner {
 
     var response = await this._ask(prompt);
     return this._parseAssessment(response, canAnswer);
+  }
+
+  /**
+   * Answer a question about a finished goal from its stored result.
+   *
+   * No plan and no arms: one reasoning run over text the mind already
+   * has. It is the cheap path for "what did you find about X?", which
+   * would otherwise be submitted as a whole new goal.
+   *
+   * @param {object} opts
+   * @param {string} opts.goalPrompt
+   * @param {string} opts.result
+   * @param {string} opts.question
+   * @param {boolean} [opts.fromMemory] - only a summary of the result survived
+   * @returns {Promise<string>} markdown answer
+   */
+  async answer(opts) {
+    opts = opts || {};
+    var result = String(opts.result || '');
+    if (result.length > ANSWER_RESULT_MAX_CHARS) {
+      result = '(earlier part omitted)\n' + result.slice(-ANSWER_RESULT_MAX_CHARS);
+    }
+    var prompt = ANSWER_PROMPT + '\n\n' +
+      'The goal: ' + (opts.goalPrompt || '(unknown)') + '\n\n' +
+      (opts.fromMemory
+        ? 'Only a short summary of the result survived:\n'
+        : 'The result:\n') +
+      (result || '(no result text)') + '\n\n' +
+      'Question: ' + String(opts.question || '') + '\n';
+
+    var text = await this._ask(prompt);
+    return text.trim().slice(0, 20000);
   }
 
   /**

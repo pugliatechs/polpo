@@ -137,6 +137,21 @@ Type these in the mind's conversation:
 | `/agents` | Show current state of all agents |
 | `/goals` | List active goals with task status |
 | `/cancel` | Cancel all active goals (running, planning, or awaiting approval) |
+| `/result [goalId]` | Show the full result of a finished goal (the latest one by default). |
+| `/ask [goalId] <question>` | Answer a question about a finished goal's result. No plan, no arms: one reasoning call over the stored result. |
+| `/followup [goalId] <request>` | Start a new goal that builds on a finished one. The planner and the first tasks receive the earlier goal and its result. |
+
+### After a goal finishes
+
+The chat posts what the goal produced: the output of the plan's final tasks, capped at 4000 characters from the end, where an agent's conclusions are. The message carries three buttons:
+
+- **Follow up…** takes a request such as "make it shorter" or "now translate it to Italian" and starts a new goal that knows what "it" is. The planner is told the earlier goal and given its result (up to 8000 characters), and the tasks that start the new plan get the result in a `<parent_goal_result>` block. Tasks further down receive it through their predecessors, as usual.
+- **Ask…** answers a question about the result directly, such as "which toolchain does it use?". It uses one reasoning call over the stored text and spawns nothing. The reasoner is told to answer only from that text, to use no tools, and to say so when the answer is not there. Each answer offers Ask and Follow up again.
+- **Full result** appears when the chat only showed the end of a longer result.
+
+Before this, every message after a goal was planned as an unrelated new goal. The only link to earlier work was a keyword search over long-term memory, and a request like "make it shorter" shares no keywords with the goal it refers to.
+
+Finished goals are kept in memory for an hour, or up to the newest 50 (`POLPO_MIND_GOAL_TTL_MS`, `POLPO_MIND_GOAL_RETENTION`). After that, Follow up and Ask fall back to the goal's long-term memory entry, which keeps only one-line task summaries, and they say so.
 
 ### Bypassing interactive mode
 
