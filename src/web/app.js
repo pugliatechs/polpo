@@ -432,12 +432,12 @@
       return (
         '<div class="stats-session-row">' +
           '<span class="stats-session-agent ' + safeAgent + '">' + escapeHtml(agentLabel) + '</span>' +
-          '<span class="stats-session-name" title="' + escapeHtml(sess.name) + '">' + escapeHtml(sess.name) + '</span>' +
+          '<span class="stats-session-name" title="' + escapeAttr(sess.name) + '">' + escapeHtml(sess.name) + '</span>' +
           '<span class="stats-session-meta">' +
             '<span>' + formatUptime(sess.uptime) + '</span>' +
             '<span>' + sess.messages + ' msgs</span>' +
           '</span>' +
-          '<span class="stats-session-status ' + escapeHtml(sess.status) + '">' + escapeHtml(sess.status) + '</span>' +
+          '<span class="stats-session-status ' + escapeAttr(sess.status) + '">' + escapeHtml(sess.status) + '</span>' +
         '</div>'
       );
     }).join('');
@@ -1552,7 +1552,7 @@
       var imgCls = 'msg msg-' + (m.role || 'user');
       return (
         '<div class="' + imgCls + '">' +
-          '<img class="msg-inline-image" src="' + escapeHtml(m.content) + '" alt="image">' +
+          '<img class="msg-inline-image" src="' + escapeAttr(m.content) + '" alt="image">' +
           timeHtml +
         '</div>'
       );
@@ -1572,7 +1572,7 @@
     if (m._pending) cls += ' msg-pending';
     if (m._failed) cls += ' msg-failed';
     var cmsgAttr = m.clientMsgId
-      ? ' data-client-msg-id="' + escapeHtml(m.clientMsgId) + '"'
+      ? ' data-client-msg-id="' + escapeAttr(m.clientMsgId) + '"'
       : '';
     var rendered = m.role === 'assistant'
       ? renderMarkdown(m.content || '')
@@ -1585,7 +1585,7 @@
         m.attachments.map(function (att) {
           if (att.mediaType && att.mediaType.startsWith('image/')) {
             var thumbUrl = '/api/uploads/' + encodeURIComponent(att.path.split('/').pop());
-            return '<img class="msg-attachment-thumb" src="' + escapeHtml(thumbUrl) + '" alt="' + escapeHtml(att.filename) + '">';
+            return '<img class="msg-attachment-thumb" src="' + escapeAttr(thumbUrl) + '" alt="' + escapeAttr(att.filename) + '">';
           }
           return '<span class="msg-attachment-file">&#128196; ' + escapeHtml(att.filename) + '</span>';
         }).join('') +
@@ -1602,9 +1602,9 @@
         m.outboxFiles.map(function (f) {
           var sizeStr = f.size != null ? humanFileSize(f.size) : '';
           return '<a class="msg-outbox-chip" ' +
-            'data-instance-id="' + escapeHtml(instIdForLink) + '" ' +
-            'data-outbox-name="' + escapeHtml(f.name) + '" ' +
-            'title="Download ' + escapeHtml(f.name) + '">' +
+            'data-instance-id="' + escapeAttr(instIdForLink) + '" ' +
+            'data-outbox-name="' + escapeAttr(f.name) + '" ' +
+            'title="Download ' + escapeAttr(f.name) + '">' +
             '<span class="msg-outbox-chip-icon">&#11015;</span>' +
             '<span>' + escapeHtml(f.name) + '</span>' +
             (sizeStr ? '<span class="msg-outbox-chip-size">' + escapeHtml(sizeStr) + '</span>' : '') +
@@ -1622,11 +1622,11 @@
     var actionsHtml = '';
     if (m.role === 'assistant' && Array.isArray(m.actions) && m.actions.length > 0) {
       actionsHtml = '<div class="msg-actions" data-msg-actions="' +
-        escapeHtml(JSON.stringify(m.actions)) + '">' +
+        escapeAttr(JSON.stringify(m.actions)) + '">' +
         m.actions.map(function (a, i) {
           var style = a.style && /^[a-z]+$/i.test(a.style) ? a.style : 'secondary';
           return '<button type="button" ' +
-            'class="msg-action-btn msg-action-' + escapeHtml(style) + '" ' +
+            'class="msg-action-btn msg-action-' + escapeAttr(style) + '" ' +
             'data-action-idx="' + i + '">' +
             escapeHtml(a.label || a.command || '???') +
             '</button>';
@@ -1754,7 +1754,7 @@
     var toolId = tool.id || '';
 
     return (
-      '<div class="msg msg-tool-block"' + (toolId ? ' data-tool-id="' + escapeHtml(toolId) + '"' : '') + '>' +
+      '<div class="msg msg-tool-block"' + (toolId ? ' data-tool-id="' + escapeAttr(toolId) + '"' : '') + '>' +
         '<div class="tool-block-header">' +
           '<span class="tool-block-name">' + escapeHtml(name) + '</span>' +
           (description ? '<span class="tool-block-desc">' + escapeHtml(description) + '</span>' : '') +
@@ -2283,7 +2283,7 @@
     container.classList.add('msg-actions-input-mode');
     var promptHint = action.inputPrompt || 'Type your reply…';
     container.innerHTML =
-      '<input type="text" class="msg-action-input" placeholder="' + escapeHtml(promptHint) + '" autocomplete="off">' +
+      '<input type="text" class="msg-action-input" placeholder="' + escapeAttr(promptHint) + '" autocomplete="off">' +
       '<button type="button" class="msg-action-input-send msg-action-btn msg-action-primary">Send</button>' +
       '<button type="button" class="msg-action-input-cancel msg-action-btn msg-action-secondary">Cancel</button>';
     var input = container.querySelector('.msg-action-input');
@@ -2512,7 +2512,7 @@
     $templateBar.innerHTML = filtered.map(function (t) {
       var isCustom = !DEFAULT_TEMPLATES.some(function (d) { return d.id === t.id; });
       return '<button class="template-btn' + (isCustom ? ' template-custom' : '') + '" ' +
-        'data-template-text="' + escapeHtml(t.text).replace(/"/g, '&quot;') + '">' +
+        'data-template-text="' + escapeAttr(t.text) + '">' +
         escapeHtml(t.label) + '</button>';
     }).join('') +
     '<button class="template-btn template-add" title="Add custom template">+</button>';
@@ -3018,7 +3018,7 @@
       if (att.previewUrl) {
         return (
           '<div class="attachment-chip" data-idx="' + idx + '">' +
-            '<img class="attachment-thumb" src="' + att.previewUrl + '" alt="' + escapeHtml(att.filename) + '">' +
+            '<img class="attachment-thumb" src="' + escapeAttr(att.previewUrl) + '" alt="' + escapeAttr(att.filename) + '">' +
             '<span class="attachment-name">' + escapeHtml(att.filename) + '</span>' +
             '<button class="attachment-remove" data-idx="' + idx + '">&times;</button>' +
           '</div>'
@@ -3071,7 +3071,7 @@
         var inputId = 'q' + qi + '_o' + oi;
         return (
           '<label class="question-option" for="' + inputId + '">' +
-            '<input type="' + inputType + '" name="' + inputName + '" id="' + inputId + '" value="' + escapeHtml(opt.label) + '">' +
+            '<input type="' + inputType + '" name="' + inputName + '" id="' + inputId + '" value="' + escapeAttr(opt.label) + '">' +
             '<div class="option-content">' +
               '<span class="option-label">' + escapeHtml(opt.label) + '</span>' +
               (opt.description ? '<span class="option-desc">' + escapeHtml(opt.description) + '</span>' : '') +
@@ -3091,7 +3091,7 @@
         '</label>'
       );
       return (
-        '<div class="question-item" data-qi="' + qi + '" data-multi="' + (q.multiSelect ? '1' : '0') + '" data-question="' + escapeHtml(q.question) + '">' +
+        '<div class="question-item" data-qi="' + qi + '" data-multi="' + (q.multiSelect ? '1' : '0') + '" data-question="' + escapeAttr(q.question) + '">' +
           (q.header ? '<div class="question-tag">' + escapeHtml(q.header) + '</div>' : '') +
           '<div class="question-text">' + escapeHtml(q.question) + '</div>' +
           '<div class="question-options">' + optionsHtml + '</div>' +
@@ -3195,10 +3195,36 @@
   }
 
   // ---- Helpers ----
+  /**
+   * Escape for use in TEXT content.
+   *
+   * This serializes a text node, and the HTML fragment serialization
+   * algorithm escapes only &, U+00A0, < and > in text. Quotes are NOT
+   * escaped, because they are not special in text content. That makes
+   * this unsafe for attribute values: use escapeAttr there.
+   */
   function escapeHtml(str) {
     var div = document.createElement('div');
     div.appendChild(document.createTextNode(str));
     return div.innerHTML;
+  }
+
+  /**
+   * Escape for use inside a quoted HTML ATTRIBUTE value.
+   *
+   * escapeHtml alone leaves quotes intact, so a value containing one
+   * terminates the attribute early and the rest of it is reparsed as
+   * markup. That silently broke the mind's inline action buttons (the
+   * actions JSON lives in a data-* attribute, and its very first quote
+   * ended the attribute, so JSON.parse got "{" and the click handler
+   * bailed out), and it is an injection vector anywhere the value is
+   * not authored by the user: file paths from git, uploaded filenames,
+   * package names from a remote skill search.
+   */
+  function escapeAttr(str) {
+    return escapeHtml(str == null ? '' : String(str))
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 
   function renderMarkdown(str) {
@@ -3598,7 +3624,7 @@
         : s.slug || s.project;
       var sessionAgentType = VALID_AGENT_TYPES.indexOf(s.agentType) !== -1 ? s.agentType : 'claude';
       return (
-        '<div class="instance-card session-card" data-session-id="' + escapeHtml(s.sessionId) + '" data-cwd="' + escapeHtml(s.cwd || '') + '" data-project="' + escapeHtml(s.project) + '" data-agent-type="' + sessionAgentType + '">' +
+        '<div class="instance-card session-card" data-session-id="' + escapeAttr(s.sessionId) + '" data-cwd="' + escapeAttr(s.cwd || '') + '" data-project="' + escapeAttr(s.project) + '" data-agent-type="' + sessionAgentType + '">' +
           '<div class="card-top">' +
             '<span class="card-name">' + escapeHtml(title) + '</span>' +
             '<span class="badge badge-session">' + ago + '</span>' +
@@ -3862,7 +3888,7 @@
 
     $cwdSuggestions.classList.remove('hidden');
     $cwdSuggestions.innerHTML = matches.map(function (c) {
-      return '<div class="cwd-suggestion" data-cwd="' + escapeHtml(c) + '">' +
+      return '<div class="cwd-suggestion" data-cwd="' + escapeAttr(c) + '">' +
         '<span class="cwd-project-name">' + escapeHtml(cwdMap[c]) + '</span>' +
         '<span class="cwd-path">' + escapeHtml(c) + '</span></div>';
     }).join('');
@@ -3988,10 +4014,10 @@
         ? '<span>' + skill.ruleFiles + ' extra file' + (skill.ruleFiles !== 1 ? 's' : '') + '</span>'
         : '';
       return (
-        '<div class="instance-card skill-card" data-skill-name="' + escapeHtml(skill.name) + '">' +
+        '<div class="instance-card skill-card" data-skill-name="' + escapeAttr(skill.name) + '">' +
           '<div class="card-top">' +
             '<span class="card-name">' + escapeHtml(skill.name) + '</span>' +
-            '<button class="btn-skill-remove btn-icon btn-danger" data-skill-name="' + escapeHtml(skill.name) + '" title="Remove">&#10005;</button>' +
+            '<button class="btn-skill-remove btn-icon btn-danger" data-skill-name="' + escapeAttr(skill.name) + '" title="Remove">&#10005;</button>' +
           '</div>' +
           (skill.description ? '<div class="card-meta"><span>' + escapeHtml(truncateText(skill.description, 80)) + '</span></div>' : '') +
           (tagsHtml || extraInfo ? '<div class="skill-tags">' + tagsHtml + extraInfo + '</div>' : '') +
@@ -4064,7 +4090,7 @@
     $skillsSearchResults.innerHTML = skillSearchResults.map(function (result) {
       var isInstalled = installedNames.has(result.name);
       return (
-        '<div class="instance-card skill-search-card" data-package="' + escapeHtml(result.package) + '">' +
+        '<div class="instance-card skill-search-card" data-package="' + escapeAttr(result.package) + '">' +
           '<div class="card-top">' +
             '<span class="card-name">' + escapeHtml(result.name) + '</span>' +
             '<span class="badge badge-session">' + escapeHtml(result.installs) + '</span>' +
@@ -4073,7 +4099,7 @@
           '<div class="skill-actions">' +
             (isInstalled
               ? '<span class="skill-installed-label">Installed</span>'
-              : '<button class="btn btn-skill-install" data-package="' + escapeHtml(result.package) + '">Install</button>'
+              : '<button class="btn btn-skill-install" data-package="' + escapeAttr(result.package) + '">Install</button>'
             ) +
           '</div>' +
         '</div>'
@@ -4244,7 +4270,7 @@
           name = f.path.substring(slashIdx + 1);
         }
 
-        html += '<div class="changes-file-item" data-idx="' + globalIdx + '" data-path="' + escapeHtml(f.path) + '" title="' + escapeHtml(statusLabels[st] || st) + ': ' + escapeHtml(f.path) + '">';
+        html += '<div class="changes-file-item" data-idx="' + globalIdx + '" data-path="' + escapeAttr(f.path) + '" title="' + escapeAttr(statusLabels[st] || st) + ': ' + escapeAttr(f.path) + '">';
         html += '<span class="changes-file-status ' + statusClass + '">' + escapeHtml(label) + '</span>';
         html += '<span class="changes-file-path"><span class="changes-file-dir">' + escapeHtml(dir) + '</span>' + escapeHtml(name) + '</span>';
         html += '</div>';
@@ -4466,7 +4492,7 @@
           var role = r.role === 'user' ? 'User' : r.role === 'assistant' ? 'Assistant' : r.role;
           var time = r.timestamp ? new Date(r.timestamp).toLocaleDateString() : '';
           return (
-            '<div class="search-result-item" data-session-id="' + escapeHtml(r.sessionId) + '">' +
+            '<div class="search-result-item" data-session-id="' + escapeAttr(r.sessionId) + '">' +
               '<div class="search-result-meta">' + escapeHtml(role) + (time ? ' &middot; ' + time : '') + ' &middot; ' + escapeHtml(r.sessionId.slice(0, 8)) + '</div>' +
               '<div class="search-result-snippet">' + snippet + '</div>' +
             '</div>'
