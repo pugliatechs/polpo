@@ -31,6 +31,7 @@ class CodexAgent {
     this.name = options.name || `Codex (${path.basename(options.cwd || process.cwd())})`;
     this.type = options.type || 'terminal';
     this.project = options.project || path.basename(options.cwd || process.cwd());
+    this.source = options.source || null;
     this.cwd = options.cwd || process.cwd();
     this.resumeSessionId = options.resumeSessionId || null;
     this.model = options.model || null;
@@ -60,6 +61,7 @@ class CodexAgent {
       project: this.project,
       cwd: this.cwd,
       agentType: 'codex',
+      source: this.source,
     });
 
     return new Promise((resolve, reject) => {

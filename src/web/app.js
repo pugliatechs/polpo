@@ -1069,6 +1069,15 @@
       $mindList.innerHTML = '';
     }
 
+    // Live instances the mind does not own. This block used to render
+    // with no header at all, wedged between Distributed Mind and Recent
+    // Sessions, so there was nothing to tell the reader that these are
+    // running right now while the ones below are history on disk.
+    var $activeSection = document.getElementById('active-section');
+    if ($activeSection) {
+      if (regular.length > 0) $activeSection.classList.remove('hidden');
+      else $activeSection.classList.add('hidden');
+    }
     $instanceList.innerHTML = regular.map(renderInstanceCard).join('');
 
     // Attach click handlers to ALL cards (mind section + regular)

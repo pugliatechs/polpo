@@ -17,6 +17,7 @@ class PolpoAgent {
     this.name = options.name || `Claude Code (${options.type || 'terminal'})`;
     this.type = options.type || 'terminal';
     this.project = options.project || process.cwd().split('/').pop();
+    this.source = options.source || null;
     this.cwd = options.cwd || process.cwd();
     this.onPrompt = options.onPrompt || null;
     this.onApprove = options.onApprove || null;
@@ -33,6 +34,7 @@ class PolpoAgent {
       type: this.type,
       project: this.project,
       cwd: this.cwd,
+      source: this.source,
     });
 
     return new Promise((resolve, reject) => {

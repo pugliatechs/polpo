@@ -31,6 +31,7 @@ class GeminiAgent {
     this.name = options.name || `Gemini (${path.basename(options.cwd || process.cwd())})`;
     this.type = options.type || 'terminal';
     this.project = options.project || path.basename(options.cwd || process.cwd());
+    this.source = options.source || null;
     this.cwd = options.cwd || process.cwd();
     this.resumeSessionId = options.resumeSessionId || null;
     this.model = options.model || null;
@@ -63,6 +64,7 @@ class GeminiAgent {
       project: this.project,
       cwd: this.cwd,
       agentType: 'gemini',
+      source: this.source,
     });
 
     return new Promise((resolve, reject) => {

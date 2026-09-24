@@ -35,6 +35,13 @@ class WrappedAgent {
     this.name = options.name || `Session (${path.basename(options.cwd || process.cwd())})`;
     this.type = options.type || 'terminal';
     this.project = options.project || path.basename(options.cwd || process.cwd());
+    // Origin tag ('mind:<goal>', 'gateway:<client>', 'mind-reasoner').
+    // Sent at registration rather than patched on afterwards: the
+    // instance:registered event fires inside register(), so a source
+    // applied later is invisible to anything listening for that event,
+    // which is how the mind's own reasoner ended up as a card in the
+    // dashboard sidebar despite being filtered everywhere else.
+    this.source = options.source || null;
     this.cwd = options.cwd || process.cwd();
     this.resumeSessionId = options.resumeSessionId || null;
     this.model = options.model || null;
@@ -68,6 +75,7 @@ class WrappedAgent {
       type: this.type,
       project: this.project,
       cwd: this.cwd,
+      source: this.source,
     });
 
     return new Promise((resolve, reject) => {
