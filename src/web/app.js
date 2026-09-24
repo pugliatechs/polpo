@@ -4842,20 +4842,69 @@
     section.classList.remove('hidden');
   }
 
+  // One deferred re-fetch after the server tells us it served a stale
+  // profile while recomputing. Guarded so a persistently stale answer
+  // cannot turn into a polling loop.
+  var profileStaleRetryPending = false;
+
+  function setProfileStatus(text) {
+    var el = document.getElementById('profile-status');
+    if (el) el.textContent = text;
+  }
+
+  function profileCardEl() {
+    return $profileSection ? $profileSection.querySelector('.profile-card') : null;
+  }
+
+  /**
+   * Load the Builder Profile.
+   *
+   * The section is revealed BEFORE the request, showing a status line.
+   * It used to stay hidden until the response arrived, and because the
+   * analysis takes tens of seconds over a large session history, the
+   * whole section simply materialised out of nowhere long after the
+   * page had settled. Failures left it hidden forever with no hint that
+   * anything had been attempted.
+   */
   function loadProfile() {
+    if (!$profileSection) return;
+    var card = profileCardEl();
+    if (card) card.classList.add('is-loading');
+    setProfileStatus('Analyzing your sessions...');
+    $profileSection.classList.remove('hidden');
+
     authFetch('/api/profile?days=90&agent=all')
       .then(function (r) {
         if (!r.ok) throw new Error('profile_failed');
-        return r.json();
+        var stale = r.headers && r.headers.get && r.headers.get('X-Profile-Stale') === '1';
+        return r.json().then(function (data) { return { data: data, stale: stale }; });
       })
-      .then(function (data) {
-        if (!data || !data.dimensions || !data.archetype) return;
+      .then(function (res) {
+        var data = res.data;
+        if (!data || !data.dimensions || !data.archetype) {
+          setProfileStatus('No session data to profile yet.');
+          return;
+        }
         renderProfile(data);
-        $profileSection.classList.remove('hidden');
+        if (card) card.classList.remove('is-loading');
+
+        // The server answered from cache and is recomputing behind it.
+        // Come back once for the fresh numbers so the user does not
+        // have to press refresh to stop seeing an old timestamp.
+        if (res.stale && !profileStaleRetryPending) {
+          profileStaleRetryPending = true;
+          setTimeout(function () {
+            profileStaleRetryPending = false;
+            loadProfile();
+          }, 60000);
+        }
       })
       .catch(function () {
-        // Leave section hidden — the API may be unavailable
-        // (e.g. older host) or there may be zero sessions.
+        // Say so rather than hiding. The host may be older than this
+        // endpoint, or the analysis may have failed outright; either
+        // way an empty space is indistinguishable from "no profile".
+        if (card) card.classList.add('is-loading');
+        setProfileStatus('Could not load your profile. Use the refresh button to retry.');
       });
   }
 

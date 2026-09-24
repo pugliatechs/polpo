@@ -2775,6 +2775,18 @@ h5.plan-h { font-size: 13px; }
 }
 
 /* ---- Builder Profile (Paxel-style) ---- */
+/* While the profile is being computed (or failed), the card shows only
+   its status line. The analysis takes tens of seconds over a large
+   session history, so the section renders immediately with this rather
+   than staying hidden until the response lands. */
+.profile-card.is-loading > *:not(#profile-status) {
+  display: none;
+}
+
+.profile-card:not(.is-loading) > #profile-status {
+  display: none;
+}
+
 .profile-card {
   padding: 0 16px 12px;
   display: flex;

@@ -1130,35 +1130,104 @@ function createApiRouter(instanceManager, getAuthState, pushManager, outboxManag
 
   // ---- Builder Profile ----
   // Paxel-style "how you work with AI agents" report, computed locally
-  // from the same transcripts Polpo already reads. Expensive (scans +
-  // loads session histories), so guarded against concurrent runs and
-  // cached briefly to keep repeated dashboard opens cheap.
-  let profileInProgress = false;
-  let profileCache = null; // { key, at, data }
+  // from the same transcripts Polpo already reads.
+  //
+  // This is genuinely expensive: it scans every session store and loads
+  // a bounded sample of histories, measured at 30 to 40 seconds against
+  // a thousand sessions. It does not block the event loop (worst stall
+  // measured at 56ms), so the rest of the dashboard stays responsive,
+  // but a caller waiting on a cold result waits a long time.
+  //
+  // Two consequences shaped what follows. A 60s in-memory cache meant
+  // every server restart, and every reload a minute apart, paid the
+  // full cost again. And a second dashboard tab got a bare 429 that the
+  // client turned into a permanently hidden section. So: the cache is
+  // persisted, stale results are served immediately while a refresh
+  // runs behind them, and concurrent callers share one run instead of
+  // one of them being turned away.
   const PROFILE_CACHE_TTL_MS = 60_000;
+  const PROFILE_CACHE_PATH = path.join(os.homedir(), '.config', 'polpo', 'profile-cache.json');
+
+  let profileCache = null;      // { key, at, data }
+  let profileInFlight = null;   // { key, promise }
+
+  // Warm from disk so the first request after a restart answers from
+  // the last known profile instead of blocking for half a minute.
+  try {
+    const raw = fs.readFileSync(PROFILE_CACHE_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.key === 'string' && typeof parsed.at === 'number' && parsed.data) {
+      profileCache = parsed;
+    }
+  } catch {
+    // No cache yet, or unreadable. Compute on demand.
+  }
+
+  function persistProfileCache(entry) {
+    try {
+      fs.mkdirSync(path.dirname(PROFILE_CACHE_PATH), { recursive: true });
+      fs.writeFileSync(PROFILE_CACHE_PATH, JSON.stringify(entry), { mode: 0o600 });
+    } catch (err) {
+      // Non-fatal: the in-memory cache still serves this process.
+      log.error('profile cache write failed:', err && err.message);
+    }
+  }
+
+  /**
+   * Run the analysis, or join the run already under way for this key.
+   * Without this, concurrent callers either duplicated a 40s scan or
+   * got a 429.
+   */
+  function runProfileAnalysis(cacheKey, days, source) {
+    if (profileInFlight && profileInFlight.key === cacheKey) {
+      return profileInFlight.promise;
+    }
+    const promise = analyzeProfile({ days, source })
+      .then((data) => {
+        const entry = { key: cacheKey, at: Date.now(), data };
+        profileCache = entry;
+        persistProfileCache(entry);
+        return data;
+      })
+      .finally(() => {
+        if (profileInFlight && profileInFlight.promise === promise) profileInFlight = null;
+      });
+    profileInFlight = { key: cacheKey, promise };
+    return promise;
+  }
 
   router.get('/profile', async (req, res) => {
     const days = Math.min(Math.max(parseInt(req.query.days, 10) || 90, 1), 365);
     const source = ['all', 'claude', 'codex', 'gemini', 'opencode', 'pi', 'goose'].includes(req.query.agent)
       ? req.query.agent : 'all';
     const cacheKey = days + ':' + source;
+    const force = req.query.refresh === '1';
 
-    if (profileCache && profileCache.key === cacheKey && Date.now() - profileCache.at < PROFILE_CACHE_TTL_MS) {
-      return res.json(profileCache.data);
+    const cached = profileCache && profileCache.key === cacheKey ? profileCache : null;
+    const fresh = cached && Date.now() - cached.at < PROFILE_CACHE_TTL_MS;
+
+    if (cached && fresh && !force) {
+      return res.json(cached.data);
     }
-    if (profileInProgress) {
-      return res.status(429).json({ error: 'Profile analysis already in progress' });
+
+    // Stale-while-revalidate: answer now with what we have and let the
+    // refresh finish in the background. The payload carries generatedAt,
+    // which the dashboard already displays, so a stale answer is
+    // visibly stale rather than silently wrong.
+    if (cached && !force) {
+      runProfileAnalysis(cacheKey, days, source).catch((err) => {
+        log.error('/profile background refresh failed:', err && err.message);
+      });
+      res.set('X-Profile-Stale', '1');
+      return res.json(cached.data);
     }
-    profileInProgress = true;
+
     try {
-      const data = await analyzeProfile({ days, source });
-      profileCache = { key: cacheKey, at: Date.now(), data };
+      const data = await runProfileAnalysis(cacheKey, days, source);
       res.json(data);
     } catch (err) {
       log.error('/profile failed:', err && err.message);
       res.status(500).json({ error: 'Profile analysis failed' });
-    } finally {
-      profileInProgress = false;
     }
   });
 
