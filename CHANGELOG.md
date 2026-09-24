@@ -1,5 +1,38 @@
 # Changelog
 
+## [1.2.3](https://github.com/pugliatechs/polpo/compare/v1.2.2...v1.2.3) (2026-09-24)
+
+
+### Features
+
+* **gateway:** let external agents follow up on a goal or ask about its result ([42c7696](https://github.com/pugliatechs/polpo/commit/42c7696a0c75053773f30fe536ae2ee0afa36905))
+* **mind:** answer a blocked arm instead of killing and replacing it ([58d70ad](https://github.com/pugliatechs/polpo/commit/58d70ad194e5f6ac797db7f2312ca2ace8b55750))
+* **mind:** make guardrail refusals visible instead of silent ([31e292d](https://github.com/pugliatechs/polpo/commit/31e292d81302be35fb3719e2081e2339cc3c6a0e))
+* **mind:** show a goal's result, and let the user follow up on it or ask about it ([da7b8d1](https://github.com/pugliatechs/polpo/commit/da7b8d1ba6dc324fc82befb83495da5694910168))
+* **tunnel:** supervise the tunnel and announce rotated URLs ([870ddb5](https://github.com/pugliatechs/polpo/commit/870ddb5d6c4fd5eb47d95b3cce711cb7c9eae232))
+* **web:** group gateway tasks in their own sidebar section ([d2ded19](https://github.com/pugliatechs/polpo/commit/d2ded198fc1ee02c88391ca1012ca3a91b89885e))
+
+
+### Bug Fixes
+
+* **agent:** send the origin tag at registration, and label the live sessions ([563b2dc](https://github.com/pugliatechs/polpo/commit/563b2dc55402a37da6c781c313182c50680c99b4))
+* **codex:** stop passing flags that codex exec no longer accepts ([58695b9](https://github.com/pugliatechs/polpo/commit/58695b946a2611398c33d2642928381247846c1b))
+* **gateway:** give external callers the result of a goal ([1aab995](https://github.com/pugliatechs/polpo/commit/1aab99597e8f61fe53dae2ade5c22d10a620db8b))
+* **mind:** give the mind back the output of its own arms ([302688c](https://github.com/pugliatechs/polpo/commit/302688cfe8b1759459a84d6fcec551d83ef578c6))
+* **mind:** stop writing prompt text into the verbose agent log ([848bb93](https://github.com/pugliatechs/polpo/commit/848bb939cb89745f99d82d0f45051c21a370c074))
+* **mind:** the dispatch line printed the task description twice ([7b4dd90](https://github.com/pugliatechs/polpo/commit/7b4dd90f0ac96d4f36f7f9268a1e6a1d31030ca0))
+* **sessions:** resume a session from the directory it was created in ([63980e3](https://github.com/pugliatechs/polpo/commit/63980e3743998afcba30ca8a735ea1b09890dea2))
+* **tunnel:** say why a tunnel failed, and keep retrying one that fails at startup ([a5cce6c](https://github.com/pugliatechs/polpo/commit/a5cce6c9dc63b5a0a3540c5ec9bb06e0a08157e2))
+* **web:** inline action buttons did nothing, and attribute escaping was unsafe ([f273e8f](https://github.com/pugliatechs/polpo/commit/f273e8ffb480f16255279090b5c57c50d8e11c34))
+* **web:** show the Builder Profile from page load instead of tens of seconds later ([225ce7a](https://github.com/pugliatechs/polpo/commit/225ce7a2f3fd49f3c99c9455114f505c08337236))
+* **web:** the Builder Profile explainer opened off-screen and could not be closed ([cec80dd](https://github.com/pugliatechs/polpo/commit/cec80ddf35cc368fa61de4999ccb7b93651f3e52))
+* **web:** version display goes empty / stale after polpo release ([72c9805](https://github.com/pugliatechs/polpo/commit/72c9805b609494e54988a023e48967a09e9df74c))
+
+
+### Miscellaneous Chores
+
+* release 1.2.3 ([736a6d7](https://github.com/pugliatechs/polpo/commit/736a6d7f3e2472fd4e045b7b5fe59e9e3db436bb))
+
 ## [1.2.2](https://github.com/pugliatechs/polpo/compare/v1.2.1...v1.2.2) (2026-06-30)
 
 
