@@ -1128,6 +1128,12 @@ describe('Coordinator: the mind sees what its arms produced', () => {
 
   const settle = () => new Promise((r) => setTimeout(r, 30));
 
+  // _report writes into the mind instance's conversation rather than
+  // emitting an event, so this is what the user actually sees in chat.
+  const mindChat = () => im.getConversation(MIND_ID, 100)
+    .filter((m) => m.source === 'mind')
+    .map((m) => m.content);
+
   it('assesses the arm output the runner captured', async () => {
     const reasoner = reasonerSpy();
     coordinator = newCoord(im, wm, reasoner, runner, { mindInstanceId: MIND_ID });
@@ -1256,6 +1262,20 @@ describe('Coordinator: the mind sees what its arms produced', () => {
     );
   });
 
+  it('names the arm once in the dispatch line', async () => {
+    // The arm's instance name is itself 'Mind arm: <description>', so
+    // reporting that name plus the description printed the whole
+    // description twice in the chat.
+    coordinator = newCoord(im, wm, reasonerSpy(), runner, { mindInstanceId: MIND_ID });
+    await coordinator.submitGoal('Goal');
+
+    const line = mindChat().find((t) => t.indexOf('Assigned to') === 0);
+    assert.ok(line, 'expected a dispatch line, got: ' + JSON.stringify(mindChat()));
+    assert.equal(line, 'Assigned to claude: Do the thing');
+    const occurrences = line.split('Do the thing').length - 1;
+    assert.equal(occurrences, 1, 'description must appear once: ' + line);
+  });
+
   it('records the execution on a completed run', async () => {
     coordinator = newCoord(im, wm, reasonerSpy(), runner, { mindInstanceId: MIND_ID });
     const { goalId } = await coordinator.submitGoal('Goal');
@@ -1283,9 +1303,7 @@ describe('Coordinator: the mind sees what its arms produced', () => {
 
   it('shows the user what went wrong when it escalates', async () => {
     const reasoner = reasonerSpy(null, { action: 'retry', prompt: 'try again' });
-    const reports = [];
     coordinator = newCoord(im, wm, reasoner, runner, { mindInstanceId: MIND_ID });
-    coordinator.on('mind:report', (m) => reports.push(m.text || m.message || ''));
 
     await coordinator.submitGoal('Goal', { autoDispatch: false });
     coordinator.approvePlan(null);

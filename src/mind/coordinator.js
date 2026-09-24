@@ -572,7 +572,12 @@ class Coordinator extends EventEmitter {
         } catch {}
         var inst = self.instanceManager.get(agentInstanceId);
         var name = inst ? (inst.name || agentInstanceId) : agentInstanceId;
-        self._report('Assigned to ' + name + ': ' + task.description);
+        // Report the agent TYPE, not the instance name. The arm's
+        // display name is itself 'Mind arm: <description>', so using it
+        // here printed the description twice in the chat line. The
+        // structured event below still carries the instance name for
+        // consumers that want it.
+        self._report('Assigned to ' + task.agentType + ': ' + task.description);
         self._emitGoalEvent(task.goalId, 'task_started', {
           taskId: task.id,
           description: task.description,
