@@ -1,4 +1,5 @@
 const { spawn, execFileSync } = require('child_process');
+const { createOutputTail } = require('./output-tail');
 
 const name = 'cloudflared';
 
@@ -43,17 +44,20 @@ function start(port) {
 
     let resolved = false;
     let markerSeen = false;
+    // What cloudflared said, so a startup failure can report why.
+    const tail = createOutputTail();
 
     const timeout = setTimeout(() => {
       if (!resolved) {
         resolved = true;
         child.kill('SIGTERM');
-        reject(new Error('cloudflared: timed out waiting for tunnel URL (30s)'));
+        reject(new Error('cloudflared: timed out waiting for tunnel URL (30s)' + tail.hint()));
       }
     }, 30000);
 
     function onData(data) {
       const line = data.toString();
+      if (!resolved) tail.push(line);
       if (!markerSeen && READY_MARKER.test(line)) {
         markerSeen = true;
       }
@@ -95,7 +99,7 @@ function start(port) {
       if (!resolved) {
         resolved = true;
         clearTimeout(timeout);
-        reject(new Error(`cloudflared exited with code ${code}`));
+        reject(new Error(`cloudflared exited with code ${code}${tail.hint()}`));
       }
     });
   });

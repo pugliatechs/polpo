@@ -84,6 +84,7 @@ class TunnelSupervisor extends EventEmitter {
     this._rotations = [];         // timestamps of rotations, for the rolling cap
     this._retryTimer = null;
     this._gaveUp = false;
+    this._lastError = null;       // why the most recent attempt failed
   }
 
   get url() {
@@ -97,14 +98,32 @@ class TunnelSupervisor extends EventEmitter {
   }
 
   /**
-   * Start the tunnel for the first time. Rejects if the initial start
-   * fails (callers treat that as "no tunnel", same as before this
-   * module existed). Subsequent deaths are handled internally.
+   * Start the tunnel for the first time. Subsequent deaths are handled
+   * internally.
    *
-   * @returns {Promise<{url: string}>}
+   * By default a failed first attempt rejects. With `retryOnFailure` it
+   * resolves with `{url: null, retrying: true, error}` and keeps trying
+   * on the usual backoff; the URL then arrives as a 'url' event. Without
+   * this a transient failure at boot (network not up yet, a VPN in the
+   * way) left polpo with no tunnel for its whole lifetime, because the
+   * restart logic only ever covered a tunnel that had already come up.
+   *
+   * @param {{retryOnFailure?: boolean}} [opts]
+   * @returns {Promise<{url: ?string, retrying?: boolean, error?: string}>}
    */
-  async start() {
-    const handle = await this._startTunnel(this._tunnelOpts);
+  async start(opts) {
+    const retryOnFailure = !!(opts && opts.retryOnFailure);
+    let handle;
+    try {
+      handle = await this._startTunnel(this._tunnelOpts);
+    } catch (err) {
+      if (!retryOnFailure) throw err;
+      const message = (err && err.message) || 'unknown error';
+      this._lastError = message;
+      this.emit('start-failed', { error: message });
+      this._scheduleRestart();
+      return { url: null, retrying: !this._gaveUp, error: message };
+    }
     this._adopt(handle);
     return { url: this._url };
   }
@@ -169,11 +188,11 @@ class TunnelSupervisor extends EventEmitter {
     if (!this._withinRotationBudget()) {
       this._gaveUp = true;
       this.log.error(
-        'giving up: more than ' + this._maxRotations + ' tunnel rotations in the ' +
-        'last hour. The provider is probably rate-limiting or degraded. ' +
-        'Restart polpo to try again, or switch to a named tunnel for a stable URL.'
+        'giving up: more than ' + this._maxRotations + ' tunnel attempts in the ' +
+        'last hour' + (this._lastError ? ' (last error' + errorSuffix(this._lastError) + ')' : '') +
+        '. Restart polpo to try again, or switch to a named tunnel for a stable URL.'
       );
-      this.emit('gave-up', { rotations: this._rotations.length });
+      this.emit('gave-up', { rotations: this._rotations.length, lastError: this._lastError });
       return;
     }
 
@@ -203,11 +222,13 @@ class TunnelSupervisor extends EventEmitter {
           }
           return;
         }
-        this.log.info('tunnel restored: ' + handle.url);
+        this._lastError = null;
+        this.log.info('tunnel up: ' + handle.url);
         this._adopt(handle);
       })
       .catch((err) => {
-        this.log.warn('tunnel restart failed: ' + (err && err.message));
+        this._lastError = (err && err.message) || 'unknown error';
+        this.log.warn('tunnel attempt failed: ' + this._lastError);
         this._scheduleRestart();
       });
   }
@@ -221,6 +242,13 @@ class TunnelSupervisor extends EventEmitter {
     this._rotations = this._rotations.filter((t) => t >= cutoff);
     return this._rotations.length < this._maxRotations;
   }
+}
+
+/**
+ * ': message' for the give-up line, kept on one line and short.
+ */
+function errorSuffix(message) {
+  return ': ' + String(message).replace(/\s+/g, ' ').slice(0, 300);
 }
 
 module.exports = {

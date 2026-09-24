@@ -1,4 +1,5 @@
 const { spawn, execFileSync } = require('child_process');
+const { createOutputTail } = require('./output-tail');
 const http = require('http');
 const readline = require('readline');
 
@@ -20,6 +21,10 @@ function start(port) {
     });
 
     let resolved = false;
+    // What ngrok said, so a startup failure can report why. Its log
+    // goes to stdout as JSON; stderr carries anything else it prints.
+    const tail = createOutputTail();
+    child.stderr.on('data', (d) => { if (!resolved) tail.push(d); });
 
     const timeout = setTimeout(() => {
       if (!resolved) {
@@ -35,7 +40,7 @@ function start(port) {
             if (!resolved) {
               resolved = true;
               child.kill('SIGTERM');
-              reject(new Error('ngrok: timed out waiting for tunnel URL (15s)'));
+              reject(new Error('ngrok: timed out waiting for tunnel URL (15s)' + tail.hint()));
             }
           });
       }
@@ -45,6 +50,7 @@ function start(port) {
     const rl = readline.createInterface({ input: child.stdout });
     rl.on('line', (line) => {
       if (resolved) return;
+      tail.push(line + '\n');
       try {
         const entry = JSON.parse(line);
         const url = entry.url || (entry.msg && entry.msg.match(/https:\/\/[^\s"]+\.ngrok[^\s"]*/)?.[0]);
@@ -70,7 +76,7 @@ function start(port) {
       if (!resolved) {
         resolved = true;
         clearTimeout(timeout);
-        reject(new Error(`ngrok exited with code ${code}`));
+        reject(new Error(`ngrok exited with code ${code}${tail.hint()}`));
       }
     });
   });

@@ -268,6 +268,14 @@ Auto-detect tries cloudflared first, then falls back to localtunnel. ngrok and S
 
 If the tunnel fails, the server still runs normally on LAN.
 
+A tunnel that fails to start is retried in the background with backoff, and the URL and QR code are printed as soon as it comes up. The same applies if a running tunnel dies later. The log line says why an attempt failed, taken from the provider's own output, for example:
+
+```
+[tunnel 2026-09-24 13:22:26.769209] Tunnel failed: cloudflared exited with code 1: failed to request quick Tunnel: Post "https://api.trycloudflare.com/tunnel": context deadline exceeded
+```
+
+A timeout reaching `api.trycloudflare.com` like this one usually means something on the network path is blocking it, such as a VPN. After ten attempts within an hour polpo stops retrying and names the last error; restart it once the network is fixed.
+
 ## Remote Sessions (Full Control)
 
 The `session` command spawns a CLI process with JSON streaming and gives your phone full bidirectional control. Use `--agent` to select the agent type.

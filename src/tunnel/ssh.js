@@ -1,4 +1,5 @@
 const { spawn, execFileSync } = require('child_process');
+const { createOutputTail } = require('./output-tail');
 
 const name = 'ssh';
 
@@ -33,10 +34,12 @@ function start(port, opts = {}) {
     });
 
     let resolved = false;
-    let stderrBuf = '';
+    // Bounded, and only fed until the tunnel is up: the old buffer kept
+    // growing for as long as the ssh process lived.
+    const tail = createOutputTail();
 
     child.stderr.on('data', (data) => {
-      stderrBuf += data.toString();
+      if (!resolved) tail.push(data);
     });
 
     // SSH doesn't output a URL. Detect success by waiting for the process
@@ -67,8 +70,7 @@ function start(port, opts = {}) {
       if (!resolved) {
         resolved = true;
         clearTimeout(successTimer);
-        const hint = stderrBuf.trim() ? `: ${stderrBuf.trim().split('\n').pop()}` : '';
-        reject(new Error(`ssh exited with code ${code}${hint}`));
+        reject(new Error(`ssh exited with code ${code}${tail.hint()}`));
       }
     });
   });

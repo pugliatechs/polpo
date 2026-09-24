@@ -259,6 +259,9 @@ async function runServer() {
 
   const port = parseInt(flags.port) || 7890;
   let tunnel = null;
+  // Held separately from `tunnel`: when the first attempt fails there is
+  // no tunnel yet, but a retry is pending and shutdown must cancel it.
+  let tunnelSupervisor = null;
 
   // Start tunnel if requested.
   //
@@ -275,6 +278,9 @@ async function runServer() {
       const { startTunnel } = require('../src/tunnel/index');
       const { TunnelSupervisor } = require('../src/tunnel/supervisor');
       const { displayQR } = require('../src/tunnel/qr');
+      // Runtime tunnel events carry a timestamp like every other log
+      // line. Only the startup banner is printed plain.
+      const tunnelLog = require('../src/util/logger').makeLogger('tunnel');
 
       const supervisor = new TunnelSupervisor({
         startTunnel,
@@ -285,13 +291,19 @@ async function runServer() {
           tunnelPort: flags['tunnel-port'] ? parseInt(flags['tunnel-port']) : undefined,
         },
       });
+      tunnelSupervisor = supervisor;
 
       // Coalesce pushes: a flapping provider could otherwise fire one
       // notification per rotation and bury the user in alerts about
       // URLs that are already stale by the time they tap.
       const PUSH_COALESCE_MS = 5 * 60 * 1000;
       let lastPushAt = 0;
-      let isFirstUrl = true;
+      // The URL from a successful first attempt arrives while start() is
+      // still running and is printed by the startup banner below. Any URL
+      // after that is news: either the tunnel finally came up after a
+      // failed start, or it rotated.
+      let startupDone = false;
+      let announcedUrl = false;
 
       supervisor.on('url', ({ url }) => {
         // Store the BARE url — the /api/qr-codes route stitches the
@@ -300,13 +312,18 @@ async function runServer() {
           server.setTunnelInfo({ url, provider: flags.tunnel || 'auto' });
         }
 
-        if (isFirstUrl) {
-          isFirstUrl = false;
-          return;   // startup banner is printed below, outside the handler
-        }
+        if (!startupDone) return;   // the startup banner prints this one
 
-        // --- rotation (not the initial start) ---
-        console.log(`\n  🌐 Tunnel URL changed: ${url}`);
+        const firstUrl = !announcedUrl;
+        announcedUrl = true;
+        tunnel = { url, close: () => supervisor.stop() };
+        tunnelLog.info(firstUrl ? `Tunnel active: ${url}` : `Tunnel URL changed: ${url}`);
+        if (firstUrl && token) {
+          // Same details the startup banner prints for a tunnel that came
+          // up straight away.
+          tunnelLog.info(`Auth enabled (mode: ${authMode || 'token'})`);
+          if (authMode === 'pin') tunnelLog.info(`PIN: ${server.authState.pin}`);
+        }
         displayQR(token ? `${url}?token=${token}` : url);
 
         // Tell any connected dashboard to re-render its Mobile Setup QR.
@@ -326,34 +343,50 @@ async function runServer() {
         }
       });
 
+      // Fires inside start(), before the supervisor logs its first retry
+      // delay, so the reason comes first in the log.
+      supervisor.on('start-failed', ({ error }) => {
+        tunnelLog.warn(`Tunnel failed: ${error}`);
+        tunnelLog.warn('Retrying in the background; the URL and QR code will be printed here when it comes up. The server is reachable on LAN meanwhile.');
+      });
+
       supervisor.on('gave-up', () => {
-        console.error('  ⚠️  Tunnel supervisor gave up after repeated failures.');
-        console.error('     Restart polpo, or use a named Cloudflare tunnel for a stable URL.');
+        // The supervisor has already logged why, with the last error.
+        tunnel = null;
         if (typeof server.setTunnelInfo === 'function') server.setTunnelInfo(null);
         if (typeof server.broadcastToDashboards === 'function') {
           server.broadcastToDashboards({ type: 'tunnel:down' });
         }
       });
 
-      await supervisor.start();
-      tunnel = { url: supervisor.url, close: () => supervisor.stop() };
+      const started = await supervisor.start({ retryOnFailure: true });
+      startupDone = true;
+      if (started.url) {
+        announcedUrl = true;
+        tunnel = { url: supervisor.url, close: () => supervisor.stop() };
 
-      // Build URL with token baked in for QR code
-      let tunnelUrl = tunnel.url;
-      if (token) {
-        tunnelUrl += `?token=${token}`;
-      }
-
-      console.log(`  🌐 Tunnel active: ${tunnel.url}`);
-      if (token) {
-        console.log(`  🔒 Auth enabled (mode: ${authMode || 'token'})`);
-        if (authMode === 'pin') {
-          console.log(`  🔑 PIN: ${server.authState.pin}`);
+        // Build URL with token baked in for QR code
+        let tunnelUrl = tunnel.url;
+        if (token) {
+          tunnelUrl += `?token=${token}`;
         }
+
+        console.log(`  🌐 Tunnel active: ${tunnel.url}`);
+        if (token) {
+          console.log(`  🔒 Auth enabled (mode: ${authMode || 'token'})`);
+          if (authMode === 'pin') {
+            console.log(`  🔑 PIN: ${server.authState.pin}`);
+          }
+        }
+        displayQR(tunnelUrl);
       }
-      displayQR(tunnelUrl);
+      // Otherwise the failure was reported by the 'start-failed' handler
+      // above and a retry is pending; LAN addresses print below.
     } catch (err) {
-      console.error(`  ⚠️  Tunnel failed: ${err.message}`);
+      // Only reached for errors outside the tunnel attempt itself (a bad
+      // provider name, a module failing to load): start() no longer
+      // rejects on a failed attempt, it retries.
+      require('../src/util/logger').makeLogger('tunnel').error(`Tunnel failed: ${err.message}`);
       console.log('  Server is still running on LAN.\n');
     }
   }
@@ -423,7 +456,9 @@ async function runServer() {
   process.on('SIGINT', async () => {
     console.log('\n  Shutting down...');
     cleanupServerInfo();
-    if (tunnel) {
+    if (tunnelSupervisor) {
+      try { tunnelSupervisor.stop(); } catch (e) { /* ignore */ }
+    } else if (tunnel) {
       try { tunnel.close(); } catch (e) { /* ignore */ }
     }
     await server.stop();
@@ -432,7 +467,9 @@ async function runServer() {
 
   process.on('SIGTERM', async () => {
     cleanupServerInfo();
-    if (tunnel) {
+    if (tunnelSupervisor) {
+      try { tunnelSupervisor.stop(); } catch (e) { /* ignore */ }
+    } else if (tunnel) {
       try { tunnel.close(); } catch (e) { /* ignore */ }
     }
     await server.stop();

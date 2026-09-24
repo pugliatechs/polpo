@@ -372,3 +372,92 @@ describe('TunnelSupervisor: teardown', () => {
     assert.doesNotThrow(() => sup.stop());
   });
 });
+
+describe('TunnelSupervisor: a tunnel that fails at startup', () => {
+  // A transient failure at boot (network not up yet, a VPN in the way)
+  // used to leave polpo without a tunnel for its whole lifetime: the
+  // restart logic only ever covered a tunnel that had already come up.
+
+  it('still rejects by default, as before', async () => {
+    const time = createFakeTime();
+    const provider = createFakeProvider(['https://a-b-c.trycloudflare.com']);
+    provider.failTimes(1);
+    const sup = newSupervisor(provider, time);
+    await assert.rejects(() => sup.start(), /provider unavailable/);
+    assert.equal(time.pendingCount(), 0, 'no retry scheduled without the opt-in');
+  });
+
+  it('with retryOnFailure, resolves with the reason and schedules a retry', async () => {
+    const time = createFakeTime();
+    const provider = createFakeProvider(['https://a-b-c.trycloudflare.com']);
+    provider.failTimes(1);
+    const sup = newSupervisor(provider, time);
+
+    const res = await sup.start({ retryOnFailure: true });
+    assert.equal(res.url, null);
+    assert.equal(res.retrying, true);
+    assert.match(res.error, /provider unavailable/);
+    assert.equal(time.pendingCount(), 1);
+  });
+
+  it('reports the failure before scheduling the retry', async () => {
+    const time = createFakeTime();
+    const provider = createFakeProvider(['https://a-b-c.trycloudflare.com']);
+    provider.failTimes(1);
+    const sup = newSupervisor(provider, time);
+    const order = [];
+    sup.on('start-failed', () => order.push('start-failed'));
+    sup.on('rotating', () => order.push('rotating'));
+    await sup.start({ retryOnFailure: true });
+    assert.deepEqual(order, ['start-failed', 'rotating']);
+  });
+
+  it('delivers the URL as a url event once a retry succeeds', async () => {
+    const time = createFakeTime();
+    const provider = createFakeProvider(['https://late-comer-url.trycloudflare.com']);
+    provider.failTimes(2);
+    const sup = newSupervisor(provider, time);
+    const urls = [];
+    sup.on('url', (e) => urls.push(e.url));
+
+    await sup.start({ retryOnFailure: true });
+    await time.advance(1000);      // second attempt fails
+    await time.advance(2000);      // third attempt succeeds
+
+    assert.deepEqual(urls, ['https://late-comer-url.trycloudflare.com']);
+    assert.equal(sup.url, 'https://late-comer-url.trycloudflare.com');
+  });
+
+  it('names the last error when it finally gives up', async () => {
+    const time = createFakeTime();
+    const provider = createFakeProvider([]);
+    provider.failTimes(1000);
+    const logged = [];
+    const sup = newSupervisor(provider, time, {
+      maxRotationsPerHour: 2,
+      logger: { info() {}, warn() {}, error: (m) => logged.push(m) },
+    });
+    let gaveUp = null;
+    sup.on('gave-up', (e) => { gaveUp = e; });
+
+    await sup.start({ retryOnFailure: true });
+    for (let i = 0; i < 5 && !gaveUp; i++) await time.advance(60000);
+
+    assert.ok(gaveUp, 'should give up once the attempt budget is spent');
+    assert.match(gaveUp.lastError, /provider unavailable/);
+    assert.ok(logged.some((m) => /last error: provider unavailable/.test(m)), logged.join('\n'));
+  });
+
+  it('a pending startup retry is cancelled by stop()', async () => {
+    const time = createFakeTime();
+    const provider = createFakeProvider(['https://never-used-url.trycloudflare.com']);
+    provider.failTimes(1);
+    const sup = newSupervisor(provider, time);
+    const urls = [];
+    sup.on('url', (e) => urls.push(e.url));
+    await sup.start({ retryOnFailure: true });
+    sup.stop();
+    await time.advance(5000);
+    assert.deepEqual(urls, []);
+  });
+});
