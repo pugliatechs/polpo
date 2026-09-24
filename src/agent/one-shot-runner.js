@@ -93,7 +93,9 @@ class OneShotAgentRunner extends EventEmitter {
    *   effect together with onTurnEnd.
    * @param {function(object): (Promise<?string>|?string)} [opts.onTurnEnd]
    *   called when the agent goes idle with turns still available. Receives
-   *   `{output, fullOutput, turn, maxTurns, agentInstanceId}` where `output`
+   *   `{output, fullOutput, turn, maxTurns, agentInstanceId, stopReason}`
+   *   where `stopReason` is how the turn ended ('end_turn', 'refusal', ...)
+   *   or null when the agent type does not report it, and `output`
    *   is just this turn's text. Return a string to send it as the next
    *   prompt in the SAME session, preserving the agent's context; return
    *   anything else to end the run. Throwing ends the run without failing
@@ -192,6 +194,8 @@ class OneShotAgentRunner extends EventEmitter {
       maxTurns: maxTurns,
       turns: 0,
       turnStart: 0,   // offset into `output` where the current turn began
+      refusals: 0,    // turns a guardrail ended ('refusal' stop reason)
+      lastStopReason: null,
       resolve: null,   // set just below
     };
     this._runs.set(agentInstanceId, record);
@@ -282,6 +286,8 @@ class OneShotAgentRunner extends EventEmitter {
       r.status = 'running';
       if (first && r.onStatus) { try { r.onStatus('running'); } catch {} }
     } else if (r.status === 'running' && data.status === 'idle') {
+      r.lastStopReason = typeof data.stopReason === 'string' ? data.stopReason : null;
+      if (r.lastStopReason === 'refusal') r.refusals += 1;
       this._endTurn(r);
     }
   }
@@ -319,6 +325,7 @@ class OneShotAgentRunner extends EventEmitter {
         turn: record.turns,
         maxTurns: record.maxTurns,
         agentInstanceId: record.agentInstanceId,
+        stopReason: record.lastStopReason,
       }))
       .then((followUp) => {
         // The run may have been cancelled or timed out while the caller
@@ -408,6 +415,9 @@ class OneShotAgentRunner extends EventEmitter {
       durationMs: durationMs,
       agentInstanceId: record.agentInstanceId,
       turns: record.turns || 1,
+      // null when the agent type does not report it (only claude does).
+      stopReason: record.lastStopReason || null,
+      refusals: record.refusals || 0,
     };
 
     // Drop the record from the live map; further events for this agent

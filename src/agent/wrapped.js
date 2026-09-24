@@ -42,6 +42,9 @@ class WrappedAgent {
     // which is how the mind's own reasoner ended up as a card in the
     // dashboard sidebar despite being filtered everywhere else.
     this.source = options.source || null;
+    // How the most recent assistant message ended ('end_turn',
+    // 'tool_use', 'refusal', ...). Reported with the idle status.
+    this._lastStopReason = null;
     this.cwd = options.cwd || process.cwd();
     this.resumeSessionId = options.resumeSessionId || null;
     this.model = options.model || null;
@@ -325,6 +328,13 @@ class WrappedAgent {
       }
 
       case 'assistant': {
+        // Remember how the latest assistant message ended. 'refusal'
+        // means a guardrail stopped it; the turn still ends with an
+        // ordinary 'result', so without this the hub cannot tell a
+        // blocked agent from a finished one.
+        if (msg.message && typeof msg.message.stop_reason === 'string') {
+          this._lastStopReason = msg.message.stop_reason;
+        }
         const content = msg.message && msg.message.content;
         if (!Array.isArray(content)) break;
 
@@ -390,7 +400,11 @@ class WrappedAgent {
 
       case 'result': {
         this.busy = false;
-        this._sendToHub({ type: 'status', status: 'idle' });
+        const stopReason = (typeof msg.stop_reason === 'string' && msg.stop_reason)
+          || this._lastStopReason
+          || null;
+        this._lastStopReason = null;
+        this._sendToHub({ type: 'status', status: 'idle', stopReason: stopReason });
         if (msg.result) {
           this._sendToHub({
             type: 'message',

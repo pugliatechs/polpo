@@ -446,6 +446,8 @@ class Coordinator extends EventEmitter {
       error: result.error || null,
       durationMs: result.durationMs || 0,
       agentInstanceId: result.agentInstanceId || task.agentId || null,
+      stopReason: result.stopReason || null,
+      refusals: result.refusals || 0,
       at: Date.now(),
     };
   }
@@ -741,6 +743,21 @@ class Coordinator extends EventEmitter {
       return null;
     }
     var goal = this._goals.get(task.goalId);
+
+    // A guardrail refusal ends the turn exactly like a finished answer
+    // does, so until the stop reason was carried through, the only way
+    // to learn an arm had been blocked was to dig through transcripts.
+    if (turn.stopReason === 'refusal') {
+      task.refusals = (task.refusals || 0) + 1;
+      this._report('Guardrail stopped ' + task.description +
+        ' (turn ' + turn.turn + '). Deciding whether the rest of the task can continue.');
+      this._emitGoalEvent(task.goalId, 'task_refused', {
+        taskId: task.id,
+        turn: turn.turn,
+        refusals: task.refusals,
+      });
+    }
+
     var assessment;
     try {
       assessment = await this.reasoner.assessTurn({
@@ -750,6 +767,7 @@ class Coordinator extends EventEmitter {
         output: turn.output,
         turn: turn.turn,
         maxTurns: turn.maxTurns,
+        stopReason: turn.stopReason || null,
       });
     } catch (err) {
       // A reasoner that is down must not discard work the arm has

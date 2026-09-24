@@ -89,8 +89,24 @@ var ASSESS_PROMPT = [
   '- Choose "failed" when the block needs a human: a missing secret, an',
   '  ambiguous product call, or a refusal on policy grounds.',
   '- The answer must be a direct instruction to the agent, not a description.',
+  '- Use "How the turn ended" below. A turn that ended mid tool call or on its',
+  '  output limit was INTERRUPTED: the agent did not ask anything. If the task',
+  '  is not finished, choose needs_input and tell it to continue where it left off.',
+  '- If a safety guardrail stopped the agent, NEVER tell it to work around,',
+  '  rephrase around, or retry the blocked action. If the rest of the task is',
+  '  legitimate, choose needs_input and redirect it to that part only. If the',
+  '  blocked action was the task itself, choose failed.',
   '- Respond ONLY with valid JSON. No markdown, no code fences.',
 ].join('\n');
+
+// Plain-language description of a stop reason for the assessment prompt.
+var STOP_REASON_TEXT = {
+  end_turn: 'it finished its turn normally',
+  refusal: 'a safety guardrail stopped it',
+  tool_use: 'it was cut off in the middle of a tool call (interrupted)',
+  max_tokens: 'it hit its output limit (interrupted)',
+  pause_turn: 'it paused mid-task (interrupted)',
+};
 
 var REPLAN_PROMPT = [
   'You are the coordination brain of Polpo. A task failed during execution and you must decide how to recover.',
@@ -174,6 +190,8 @@ class Reasoner {
    * @param {string} opts.output       what the arm produced this turn
    * @param {number} [opts.turn]
    * @param {number} [opts.maxTurns]
+   * @param {?string} [opts.stopReason] - how the turn ended, when the
+   *   agent reports it ('end_turn', 'refusal', 'tool_use', ...)
    * @returns {Promise<{verdict:'done'|'needs_input'|'failed', summary:string, answer:?string}>}
    *   verdict is 'done' when the reply could not be parsed, so an
    *   unreadable assessment never invents a failure.
@@ -187,6 +205,7 @@ class Reasoner {
       'Task: ' + (opts.taskDescription || '(unknown)') + '\n\n' +
       (opts.taskPrompt ? 'What the agent was asked:\n' + String(opts.taskPrompt).slice(0, 2000) + '\n\n' : '') +
       'What the agent just produced:\n' + String(opts.output || '').slice(0, 8000) + '\n\n' +
+      'How the turn ended: ' + describeStopReason(opts.stopReason) + '\n\n' +
       (canAnswer
         ? 'You may answer it: it has turns remaining.\n\n'
         : 'You may NOT answer it: it has no turns left, so choose done or failed.\n\n') +
@@ -421,6 +440,16 @@ class Reasoner {
     }
     this._inflight.clear();
   }
+}
+
+/**
+ * Describe a stop reason for the assessment prompt. Unknown values are
+ * reported as unknown rather than echoed, since they come from an
+ * agent process.
+ */
+function describeStopReason(reason) {
+  if (!reason) return 'unknown (this agent does not report it)';
+  return STOP_REASON_TEXT[reason] || 'unknown';
 }
 
 /**

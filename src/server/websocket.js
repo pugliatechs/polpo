@@ -605,7 +605,12 @@ function handleAgentMessage(instanceId, msg, instanceManager, activeWatchers) {
     case 'status':
       // If JSONL watcher is active, it provides status via stop_reason detection
       if (!activeWatchers.has(instanceId)) {
-        instanceManager.updateStatus(instanceId, msg.status);
+        // Only a short, known token is forwarded: this value comes from
+        // the agent process and ends up in chat and in reasoner prompts.
+        const stopReason = typeof msg.stopReason === 'string' && /^[a-z_]{1,32}$/.test(msg.stopReason)
+          ? msg.stopReason
+          : null;
+        instanceManager.updateStatus(instanceId, msg.status, { stopReason });
       }
       break;
     case 'message':

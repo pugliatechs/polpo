@@ -119,9 +119,11 @@ function createMockRunner(im) {
      * and act on what it returns, exactly as the real runner does.
      * Returns the follow-up prompt if the caller sent one, else null.
      */
-    async endTurn(agentInstanceId, output) {
+    async endTurn(agentInstanceId, output, stopReason) {
       const r = activeRuns.get(agentInstanceId);
       if (!r) throw new Error('no run for ' + agentInstanceId);
+      r.lastStopReason = stopReason || null;
+      if (stopReason === 'refusal') r.refusals = (r.refusals || 0) + 1;
       r.output = (r.output ? r.output + '\n' : '') + (output || '');
       r.turns = (r.turns || 0) + 1;
       const maxTurns = r.opts.maxTurns || 1;
@@ -135,6 +137,7 @@ function createMockRunner(im) {
         turn: r.turns,
         maxTurns: maxTurns,
         agentInstanceId: agentInstanceId,
+        stopReason: r.lastStopReason,
       });
       if (typeof followUp !== 'string' || !followUp.trim()) {
         runner._finishRun(r, 'completed', r.output, null);
@@ -144,10 +147,10 @@ function createMockRunner(im) {
       return followUp;
     },
     /** Drive the most-recent still-running arm through one full turn. */
-    async endNextTurn(output) {
+    async endNextTurn(output, stopReason) {
       const r = runner._lastActive();
       if (!r) throw new Error('no active run');
-      return runner.endTurn(r.agentInstanceId, output);
+      return runner.endTurn(r.agentInstanceId, output, stopReason);
     },
     followUpsFor(agentInstanceId) {
       const r = allRuns.find((x) => x.agentInstanceId === agentInstanceId);
@@ -1274,6 +1277,49 @@ describe('Coordinator: the mind sees what its arms produced', () => {
     assert.equal(line, 'Assigned to claude: Do the thing');
     const occurrences = line.split('Do the thing').length - 1;
     assert.equal(occurrences, 1, 'description must appear once: ' + line);
+  });
+
+  it('tells the user when a guardrail stops an arm', async () => {
+    const reasoner = reasonerSpy({ verdict: 'needs_input', summary: 'blocked on one step', answer: 'continue with the hardware survey only' });
+    coordinator = newCoord(im, wm, reasoner, runner, { mindInstanceId: MIND_ID });
+    await coordinator.submitGoal('Goal');
+    const task = coordinator.getActiveGoals()[0].plan.tasks[0];
+
+    await runner.endNextTurn('partial findings', 'refusal');
+    await settle();
+
+    assert.ok(mindChat().some((t) => t.indexOf('Guardrail stopped Do the thing') === 0),
+      'expected a guardrail line in: ' + JSON.stringify(mindChat()));
+    assert.equal(task.refusals, 1);
+  });
+
+  it('passes the stop reason to the assessment', async () => {
+    const reasoner = reasonerSpy();
+    coordinator = newCoord(im, wm, reasoner, runner, { mindInstanceId: MIND_ID });
+    await coordinator.submitGoal('Goal');
+    await runner.endNextTurn('cut off', 'tool_use');
+    await settle();
+    assert.equal(reasoner.seen.assess[0].stopReason, 'tool_use');
+  });
+
+  it('stays quiet when the turn ended normally', async () => {
+    coordinator = newCoord(im, wm, reasonerSpy(), runner, { mindInstanceId: MIND_ID });
+    await coordinator.submitGoal('Goal');
+    await runner.endNextTurn('all done', 'end_turn');
+    await settle();
+    assert.ok(!mindChat().some((t) => t.indexOf('Guardrail') !== -1));
+  });
+
+  it('records refusals on the execution record', async () => {
+    coordinator = newCoord(im, wm, reasonerSpy(), runner, { mindInstanceId: MIND_ID });
+    await coordinator.submitGoal('Goal');
+    const task = coordinator.getActiveGoals()[0].plan.tasks[0];
+    const armId = runner._lastActive().agentInstanceId;
+    const r = { status: 'completed', output: 'x', error: null, durationMs: 1,
+      agentInstanceId: armId, stopReason: 'end_turn', refusals: 2 };
+    coordinator._recordExecution(task, r);
+    assert.equal(task.execution.refusals, 2);
+    assert.equal(task.execution.stopReason, 'end_turn');
   });
 
   it('records the execution on a completed run', async () => {

@@ -108,12 +108,24 @@ class InstanceManager extends EventEmitter {
       }));
   }
 
-  updateStatus(id, status) {
+  /**
+   * @param {string} id
+   * @param {string} status
+   * @param {{stopReason?: ?string}} [meta] - how the agent's turn ended,
+   *   when it knows. Carried on the status event so a listener can tell
+   *   an agent that finished ('end_turn') from one a guardrail stopped
+   *   ('refusal'): both arrive as a plain 'idle' otherwise.
+   */
+  updateStatus(id, status, meta) {
     const instance = this.instances.get(id);
     if (instance) {
       instance.status = status;
       instance.lastActivity = Date.now();
-      this.emit('instance:status', { id, status });
+      const stopReason = meta && typeof meta.stopReason === 'string' ? meta.stopReason : null;
+      if (status === 'idle') instance.lastStopReason = stopReason;
+      const event = { id, status };
+      if (stopReason) event.stopReason = stopReason;
+      this.emit('instance:status', event);
     }
   }
 

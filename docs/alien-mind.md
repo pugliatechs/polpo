@@ -433,6 +433,30 @@ already been injected into dependents as their context. The recovery was
 gated on a `_noDependentsStarted` check that was false for any task that had
 dependents at all.
 
+## Guardrail refusals
+
+A safety refusal ends an agent's turn the same way a finished answer does:
+the CLI emits an ordinary result and the agent goes idle. So the stop reason
+is carried through every hop (agent status, instance event, runner turn,
+execution record) instead of being dropped at the first one.
+
+When an arm's turn ends in a refusal, the mind says so in the chat
+("Guardrail stopped <task>") and emits a `task_refused` goal event. The
+assessment is told how the turn ended and is instructed never to tell the
+arm to work around, rephrase around, or retry the blocked action. If the
+rest of the task is legitimate it redirects the arm to that part only;
+if the blocked action was the task itself, the task fails and goes to
+recovery like any other failure.
+
+The same field tells the assessment when a turn was cut off mid tool call
+or at the output limit, so an interrupted arm is told to continue rather
+than being read as an arm asking a question.
+
+Only the claude agent reports a stop reason today. For the others it is
+null, and the prompt says it is unknown rather than guessing.
+
+`task.execution.refusals` counts the refused turns in a run.
+
 ## The reasoner is not an arm
 
 Reasoning runs register a real instance like any other agent, tagged
