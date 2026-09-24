@@ -667,6 +667,22 @@ function createGatewayRouter(opts) {
   // on the host); if not enabled, these routes return 503.
 
   const MAX_GOAL_PROMPT = 50_000;
+  const MAX_GOAL_QUESTION = 2_000;
+  const GOAL_ID_RE = /^goal-[a-z0-9-]{4,32}$/;
+
+  /**
+   * A retained goal by id, or null. Finished goals are kept for an hour
+   * (or up to the newest 50), so a parent or a goal being asked about
+   * has to be recent.
+   */
+  function findGoal(coordinator, goalId) {
+    const goals = coordinator.getActiveGoals() || [];
+    return goals.find(function (g) { return g && g.id === goalId; }) || null;
+  }
+
+  function isFinished(goal) {
+    return goal && (goal.status === 'completed' || goal.status === 'failed');
+  }
 
   function getCoordinator() {
     return mind && mind.coordinator ? mind.coordinator : null;
@@ -741,6 +757,26 @@ function createGatewayRouter(opts) {
       return res.status(400).json({ error: 'invalid_client' });
     }
 
+    // A follow-up to an earlier goal: the planner and the first tasks get
+    // that goal's result. Unlike the chat, which quietly falls back to a
+    // memory summary, an API caller gets an explicit error when the parent
+    // is not usable, so it never mistakes a plan made without context for
+    // a real follow-up.
+    let parentGoalId = null;
+    if (body.parentGoalId !== undefined && body.parentGoalId !== null) {
+      if (typeof body.parentGoalId !== 'string' || !GOAL_ID_RE.test(body.parentGoalId)) {
+        return res.status(400).json({ error: 'invalid_parent_goal_id' });
+      }
+      const parent = findGoal(coordinator, body.parentGoalId);
+      if (!parent) {
+        return res.status(404).json({ error: 'parent_goal_not_found' });
+      }
+      if (!isFinished(parent)) {
+        return res.status(409).json({ error: 'parent_goal_not_finished', status: parent.status });
+      }
+      parentGoalId = parent.id;
+    }
+
     // Same label ladder as /v1/tasks: explicit client (header wins over
     // body), then the User-Agent's first token, then a pseudonym of the
     // bearer token. It used to be validated here and then dropped, so a
@@ -758,12 +794,17 @@ function createGatewayRouter(opts) {
       // in the loop on this API surface to /approve a plan preview or
       // /retry an escalated arm; treating gateway callers as
       // interactive would deadlock them on the first plan.
-      const result = await coordinator.submitGoal(prompt, { autoDispatch: true, client: client });
+      const result = await coordinator.submitGoal(prompt, {
+        autoDispatch: true,
+        client: client,
+        parentGoalId: parentGoalId,
+      });
       if (!result || !result.goalId) {
         return res.status(500).json({ error: 'goal_create_failed' });
       }
       res.status(201).json({
         goalId: result.goalId,
+        parentGoalId: parentGoalId,
         streamUrl: '/v1/goals/' + result.goalId + '/stream',
       });
     } catch (err) {
@@ -791,6 +832,46 @@ function createGatewayRouter(opts) {
     const goal = goals.find(function (g) { return g && g.id === req.params.id; });
     if (!goal) return res.status(404).json({ error: 'goal_not_found' });
     res.json(serializeGoal(goal, { withOutput: true }));
+  });
+
+  // POST /v1/goals/:id/ask: answer a question about a finished goal's
+  // result. One reasoning call over the stored result: no plan, no arms,
+  // and nothing written to the host's mind chat. Synchronous; bounded by
+  // the reasoner's deadline (POLPO_MIND_TIMEOUT_MS, 120 s by default).
+  router.post('/goals/:id/ask', goalLimiter, smallJson, async (req, res) => {
+    const coordinator = getCoordinator();
+    if (!coordinator) return notSupported(res);
+    if (!GOAL_ID_RE.test(req.params.id)) {
+      return res.status(400).json({ error: 'invalid_goal_id' });
+    }
+    const body = req.body || {};
+    const question = typeof body.question === 'string' ? body.question.trim() : '';
+    if (!question || question.length > MAX_GOAL_QUESTION) {
+      return res.status(400).json({ error: 'invalid_question' });
+    }
+    if (typeof coordinator.answerQuestion !== 'function') return notSupported(res);
+
+    const goal = findGoal(coordinator, req.params.id);
+    if (!goal) return res.status(404).json({ error: 'goal_not_found' });
+    if (!isFinished(goal)) {
+      return res.status(409).json({ error: 'goal_not_finished', status: goal.status });
+    }
+
+    try {
+      const out = await coordinator.answerQuestion(goal.id, question);
+      if (out.ok) {
+        return res.json({ goalId: goal.id, question, answer: out.answer });
+      }
+      const status = out.error === 'goal_not_found' ? 404
+        : out.error === 'goal_not_finished' ? 409
+        : out.error === 'invalid_question' ? 400
+        : out.error === 'not_supported' ? 503
+        : 502;
+      return res.status(status).json({ error: out.error });
+    } catch (err) {
+      log.error('/v1/goals/:id/ask failed:', err && err.message);
+      return res.status(502).json({ error: 'answer_failed' });
+    }
   });
 
   // DELETE /v1/goals/:id — cancel.

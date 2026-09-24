@@ -359,11 +359,21 @@ Use `/v1/tasks` when:
 ```
 POST /v1/goals
 {
-  "goal":   "<your high-level instruction, ≤ 50_000 chars>",
-  "client": "<your-label>"          // optional
+  "goal":         "<your high-level instruction, ≤ 50_000 chars>",
+  "client":       "<your-label>",       // optional
+  "parentGoalId": "<a finished goal>"   // optional: follow up on its result
 }
-→ 201 { goalId, streamUrl }
+→ 201 { goalId, parentGoalId, streamUrl }
 ```
+
+### Building on a finished goal
+
+Two ways to carry on from a goal's result without resending it:
+
+- **Follow up:** `POST /v1/goals` with `parentGoalId`. The mind plans your new request knowing the earlier goal and its result, so `"make it shorter"` or `"now add a section on security"` works as-is. Use this when the next step needs agents to do work.
+- **Ask:** `POST /v1/goals/:id/ask` with `{ "question": "..." }` → `{ answer }`. One reasoning call over the stored result, no agents. Use this when the answer should already be in the result. If it is not, the answer says so; follow up instead.
+
+Both need the goal to be finished and still retained (one hour after it finished). Otherwise: 409 `parent_goal_not_finished` / `goal_not_finished` while it runs, 404 once it has been dropped. Neither falls back silently.
 
 503 `mind_not_enabled` means the host hasn't opted into the mind (`POLPO_MIND=1`). Fall back to `/v1/tasks` and decompose the work yourself.
 
@@ -549,7 +559,8 @@ Execute      POST /v1/uploads               body: {filename, mediaType, dataBase
 Profile      GET  /v1/profile?days=N&agent=X   statistics on operator
                                                 working style (no transcripts)
 
-Mind goals   POST /v1/goals                 body: {goal, client?}
+Mind goals   POST /v1/goals                 body: {goal, client?, parentGoalId?}
+Ask a goal   POST /v1/goals/:id/ask          body: {question}  → {answer}
 (experim.)   GET  /v1/goals/:id/stream      SSE (snapshot, planning, plan_ready,
                                                   task_started, task_chunk,
                                                   task_done, task_failed,

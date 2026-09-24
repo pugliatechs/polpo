@@ -578,8 +578,50 @@ class Coordinator extends EventEmitter {
   }
 
   /**
-   * Answer a question about a finished goal's result, without planning
-   * or spawning any arm. One reasoner call over the stored result.
+   * Answer a question about one finished goal's result, without planning
+   * or spawning any arm: one reasoner call over the stored result.
+   *
+   * No chat side effects, so the gateway can use it directly; the chat
+   * path (askAboutGoal) wraps it with its messages.
+   *
+   * @param {string} goalId - explicit; callers resolve "latest" themselves
+   * @param {string} question
+   * @returns {Promise<{ok: true, answer: string, fromMemory: boolean} |
+   *                   {ok: false, error: string, message: string}>}
+   *   error is one of 'goal_not_found', 'goal_not_finished',
+   *   'invalid_question', 'not_supported', 'answer_failed'
+   */
+  async answerQuestion(goalId, question) {
+    var goal = goalId ? this._goals.get(goalId) : null;
+    if (goal && goal.status !== 'completed' && goal.status !== 'failed') {
+      return { ok: false, error: 'goal_not_finished', message: 'That goal is still running. Ask again once it has finished.' };
+    }
+    var context = goalId ? this._parentContextFor(goalId) : null;
+    if (!context) {
+      return { ok: false, error: 'goal_not_found', message: 'There is no finished goal to ask about.' };
+    }
+    if (typeof question !== 'string' || !question.trim()) {
+      return { ok: false, error: 'invalid_question', message: 'Ask what? For example: /ask ' + goalId + ' which toolchain does it use?' };
+    }
+    if (!this.reasoner || typeof this.reasoner.answer !== 'function') {
+      return { ok: false, error: 'not_supported', message: 'This mind cannot answer questions about results.' };
+    }
+    try {
+      var answer = await this.reasoner.answer({
+        goalPrompt: context.prompt,
+        result: context.result || '',
+        fromMemory: context.fromMemory,
+        question: question.trim(),
+      });
+      return { ok: true, answer: answer, fromMemory: context.fromMemory, prompt: context.prompt };
+    } catch (err) {
+      return { ok: false, error: 'answer_failed', message: 'Could not answer: ' + ((err && err.message) || 'unknown error') };
+    }
+  }
+
+  /**
+   * Chat version of answerQuestion: resolves "the latest finished goal"
+   * when no id is given, and posts progress and the answer to the chat.
    *
    * @param {?string} goalId - null for the most recent finished goal
    * @param {string} question
@@ -587,36 +629,16 @@ class Coordinator extends EventEmitter {
    */
   async askAboutGoal(goalId, question) {
     var id = goalId || this.latestFinishedGoalId();
-    var context = id ? this._parentContextFor(id) : null;
-    if (!context) {
-      this._report(id && this._goals.has(id)
-        ? 'That goal is still running. Ask again once it has finished.'
-        : 'There is no finished goal to ask about.');
+    var ready = id ? this._parentContextFor(id) : null;
+    if (ready && question && question.trim() && this.reasoner && typeof this.reasoner.answer === 'function') {
+      this._report('Checking the result of: ' + oneLine(ready.prompt, 120));
+    }
+    var res = await this.answerQuestion(id, question);
+    if (!res.ok) {
+      this._report(res.message);
       return false;
     }
-    if (!question || !question.trim()) {
-      this._report('Ask what? For example: /ask ' + id + ' which toolchain does it use?');
-      return false;
-    }
-    if (!this.reasoner || typeof this.reasoner.answer !== 'function') {
-      this._report('This mind cannot answer questions about results.');
-      return false;
-    }
-
-    this._report('Checking the result of: ' + oneLine(context.prompt, 120));
-    var answer;
-    try {
-      answer = await this.reasoner.answer({
-        goalPrompt: context.prompt,
-        result: context.result || '',
-        fromMemory: context.fromMemory,
-        question: question.trim(),
-      });
-    } catch (err) {
-      this._report('Could not answer: ' + ((err && err.message) || 'unknown error'));
-      return false;
-    }
-    this._report(answer, this._resultActions(id, false));
+    this._report(res.answer, this._resultActions(id, false));
     return true;
   }
 

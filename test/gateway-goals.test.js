@@ -49,6 +49,13 @@ function createStubCoordinator() {
     return { goalId };
   };
   coordinator.getActiveGoals = function () { return Array.from(this._goals.values()); };
+  // Controllable answer for /v1/goals/:id/ask.
+  coordinator.answerCalls = [];
+  coordinator.nextAnswer = { ok: true, answer: 'It uses Yocto.' };
+  coordinator.answerQuestion = async function (goalId, question) {
+    coordinator.answerCalls.push({ goalId, question });
+    return coordinator.nextAnswer;
+  };
   coordinator.cancelGoal = function (goalId) {
     const g = this._goals.get(goalId);
     if (g) {
@@ -508,3 +515,153 @@ describe('Gateway /v1/goals: results and attribution', () => {
     }
   });
 });
+
+describe('Gateway /v1/goals: follow-ups and questions', () => {
+  let coordinator, harness;
+  beforeEach(async () => {
+    coordinator = createStubCoordinator();
+    harness = await startServer({
+      taskManager: createStubTaskManager(),
+      getKey: () => VALID_KEY,
+      mind: { coordinator },
+    });
+  });
+  afterEach(async () => { await closeServer(harness.server); });
+
+  const json = { ...AUTH, 'Content-Type': 'application/json' };
+
+  async function newGoal(status) {
+    const r = await fetch(harness.url + '/v1/goals', {
+      method: 'POST', headers: json, body: JSON.stringify({ goal: 'research something' }),
+    });
+    const { goalId } = await r.json();
+    if (status) {
+      const g = coordinator._goals.get(goalId);
+      g.status = status;
+      g.finishedAt = Date.now();
+    }
+    return goalId;
+  }
+
+  async function post(path, body) {
+    const r = await fetch(harness.url + path, { method: 'POST', headers: json, body: JSON.stringify(body) });
+    let parsed = null;
+    try { parsed = await r.json(); } catch {}
+    return { status: r.status, body: parsed };
+  }
+
+  it('starts a follow-up to a finished goal', async () => {
+    const parent = await newGoal('completed');
+    const r = await post('/v1/goals', { goal: 'make it shorter', parentGoalId: parent });
+    assert.equal(r.status, 201);
+    assert.equal(r.body.parentGoalId, parent);
+    assert.equal(coordinator.lastSubmitOpts.parentGoalId, parent);
+    assert.equal(coordinator.lastSubmitOpts.autoDispatch, true);
+  });
+
+  it('accepts a follow-up to a goal that partially failed', async () => {
+    const parent = await newGoal('failed');
+    const r = await post('/v1/goals', { goal: 'retry the failed part', parentGoalId: parent });
+    assert.equal(r.status, 201);
+  });
+
+  it('rejects a follow-up to a goal that is still running', async () => {
+    const parent = await newGoal();
+    const r = await post('/v1/goals', { goal: 'make it shorter', parentGoalId: parent });
+    assert.equal(r.status, 409);
+    assert.equal(r.body.error, 'parent_goal_not_finished');
+  });
+
+  it('rejects a follow-up to a goal it does not know', async () => {
+    // The chat falls back to a memory summary here; an API caller is told
+    // plainly instead of getting a plan made without the context it asked for.
+    const r = await post('/v1/goals', { goal: 'make it shorter', parentGoalId: 'goal-gone1234' });
+    assert.equal(r.status, 404);
+    assert.equal(r.body.error, 'parent_goal_not_found');
+  });
+
+  it('rejects a malformed parent id', async () => {
+    for (const bad of ['../etc', 'goal-<x>', 42, {}]) {
+      const r = await post('/v1/goals', { goal: 'x', parentGoalId: bad });
+      assert.equal(r.status, 400, 'for ' + JSON.stringify(bad));
+      assert.equal(r.body.error, 'invalid_parent_goal_id');
+    }
+  });
+
+  it('keeps plain goals as they were', async () => {
+    const r = await post('/v1/goals', { goal: 'a new goal' });
+    assert.equal(r.status, 201);
+    assert.equal(r.body.parentGoalId, null);
+    assert.equal(coordinator.lastSubmitOpts.parentGoalId, null);
+  });
+
+  it('answers a question about a finished goal', async () => {
+    const id = await newGoal('completed');
+    const r = await post('/v1/goals/' + id + '/ask', { question: '  which toolchain?  ' });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body, { goalId: id, question: 'which toolchain?', answer: 'It uses Yocto.' });
+    assert.deepEqual(coordinator.answerCalls, [{ goalId: id, question: 'which toolchain?' }]);
+  });
+
+  it('will not answer about a goal that is still running', async () => {
+    const id = await newGoal();
+    const r = await post('/v1/goals/' + id + '/ask', { question: 'done yet?' });
+    assert.equal(r.status, 409);
+    assert.equal(r.body.error, 'goal_not_finished');
+    assert.equal(coordinator.answerCalls.length, 0);
+  });
+
+  it('returns 404 for a goal it does not know', async () => {
+    const r = await post('/v1/goals/goal-gone1234/ask', { question: 'q?' });
+    assert.equal(r.status, 404);
+  });
+
+  it('rejects an empty or oversized question', async () => {
+    const id = await newGoal('completed');
+    for (const q of ['', '   ', 'x'.repeat(2001), 42]) {
+      const r = await post('/v1/goals/' + id + '/ask', { question: q });
+      assert.equal(r.status, 400);
+      assert.equal(r.body.error, 'invalid_question');
+    }
+    assert.equal(coordinator.answerCalls.length, 0);
+  });
+
+  it('rejects a malformed goal id', async () => {
+    const r = await post('/v1/goals/not-a-goal/ask', { question: 'q?' });
+    assert.equal(r.status, 400);
+  });
+
+  it('reports a failed answer without leaking the internal error', async () => {
+    const id = await newGoal('completed');
+    coordinator.nextAnswer = { ok: false, error: 'answer_failed', message: 'Could not answer: reasoner stack trace here' };
+    const r = await post('/v1/goals/' + id + '/ask', { question: 'q?' });
+    assert.equal(r.status, 502);
+    assert.deepEqual(r.body, { error: 'answer_failed' });
+  });
+
+  it('requires the bearer token', async () => {
+    const id = await newGoal('completed');
+    const r = await fetch(harness.url + '/v1/goals/' + id + '/ask', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: 'q?' }),
+    });
+    assert.equal(r.status, 401);
+  });
+});
+
+describe('Gateway /v1/goals/:id/ask: mind disabled', () => {
+  let harness;
+  beforeEach(async () => {
+    harness = await startServer({ taskManager: createStubTaskManager(), getKey: () => VALID_KEY });
+  });
+  afterEach(async () => { await closeServer(harness.server); });
+
+  it('returns 503 mind_not_enabled', async () => {
+    const r = await fetch(harness.url + '/v1/goals/goal-abcd1234/ask', {
+      method: 'POST',
+      headers: { ...AUTH, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: 'q?' }),
+    });
+    assert.equal(r.status, 503);
+  });
+});
+

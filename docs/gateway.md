@@ -431,18 +431,42 @@ POST /v1/goals
 Authorization: Bearer $POLPO_GATEWAY_KEY
 {
   "goal": "Refactor the auth module and update the tests",
-  "client": "openclaw"
+  "client": "openclaw",
+  "parentGoalId": "goal-cafe1234"   // optional: follow up on a finished goal
 }
 
 → 201 {
     "goalId": "goal-deadbeef",
+    "parentGoalId": "goal-cafe1234" | null,
     "streamUrl": "/v1/goals/goal-deadbeef/stream"
   }
 ```
 
+**Follow-ups.** With `parentGoalId`, the new goal builds on a finished one: the planner is told the earlier goal and given its result, and the tasks that start the new plan receive that result in a `<parent_goal_result>` block. A request like `"make it shorter"` therefore knows what "it" is, without the caller resending the result. The parent must be finished (`completed` or `failed`) and still retained (one hour, newest 50).
+
 Rate limit: **10 per minute per token** (goals fan out across N arms — much heavier than one-shot tasks).
 
-Errors: 400 `invalid_goal` (empty or > 50 000 chars), 400 `invalid_client` (non-string), 429 `rate_limited`, 503 `mind_not_enabled`.
+Errors: 400 `invalid_goal` (empty or > 50 000 chars), 400 `invalid_client` (non-string), 400 `invalid_parent_goal_id`, 404 `parent_goal_not_found` (unknown or no longer retained), 409 `parent_goal_not_finished`, 429 `rate_limited`, 503 `mind_not_enabled`.
+
+### `POST /v1/goals/:id/ask`
+
+Answer a question about a finished goal's result. One reasoning call over the stored result: no plan, no arms, nothing written to the host's mind chat. Far cheaper than submitting a new goal to ask about a result you already have.
+
+```
+POST /v1/goals/goal-deadbeef/ask
+Authorization: Bearer $POLPO_GATEWAY_KEY
+{ "question": "Which build toolchain does it use?" }
+
+→ 200 {
+    "goalId": "goal-deadbeef",
+    "question": "Which build toolchain does it use?",
+    "answer": "..."
+  }
+```
+
+The answer is grounded only on the goal's result. When the result does not contain it, the answer says so rather than guessing; submit a follow-up goal to have the agents find out. The request is synchronous and bounded by the reasoner's deadline (`POLPO_MIND_TIMEOUT_MS`, 120 s by default). Shares the goals rate limit.
+
+Errors: 400 `invalid_goal_id`, 400 `invalid_question` (empty or > 2 000 chars), 404 `goal_not_found` (unknown or no longer retained), 409 `goal_not_finished`, 502 `answer_failed`, 503 `mind_not_enabled`.
 
 ### `GET /v1/goals/:id/stream` (SSE)
 
