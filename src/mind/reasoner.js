@@ -64,12 +64,32 @@ var SYSTEM_PROMPT = [
   '- If a past goal addressed the same or similar problem, reference it in your task prompts (e.g., "Following the approach from the past auth refactor...").',
 ].join('\n');
 
-var EVALUATE_PROMPT = [
-  'You are evaluating whether a coding agent successfully completed a task.',
-  'Given the task description and the agent\'s conversation, determine if the task was completed successfully.',
+var ASSESS_PROMPT = [
+  'A coding agent has stopped and is waiting. Decide what its output means.',
+  'The agent is STILL ALIVE: if it is only missing a detail you can supply,',
+  'you can answer it and it will continue with everything it has already done.',
   '',
-  'Respond ONLY with valid JSON:',
-  '{ "success": true/false, "summary": "brief explanation" }',
+  'Respond ONLY with valid JSON, one of:',
+  '',
+  '1) The task is finished:',
+  '{ "verdict": "done", "summary": "what it accomplished" }',
+  '',
+  '2) It is blocked on something you can answer from the goal or its context:',
+  '{ "verdict": "needs_input", "summary": "what it asked", "answer": "the answer to send it" }',
+  '',
+  '3) It refused, failed, or needs a human decision you cannot make:',
+  '{ "verdict": "failed", "summary": "why" }',
+  '',
+  'Rules:',
+  '- "done" means the work is actually done, not that the agent stopped politely.',
+  '  An agent that explains why it cannot proceed has NOT done the task.',
+  '- Choose "needs_input" only when the answer is genuinely derivable from the',
+  '  goal, the task, or what the agent already produced. Never invent a fact,',
+  '  a credential, a file path, or a product decision.',
+  '- Choose "failed" when the block needs a human: a missing secret, an',
+  '  ambiguous product call, or a refusal on policy grounds.',
+  '- The answer must be a direct instruction to the agent, not a description.',
+  '- Respond ONLY with valid JSON. No markdown, no code fences.',
 ].join('\n');
 
 var REPLAN_PROMPT = [
@@ -137,37 +157,43 @@ class Reasoner {
   }
 
   /**
-   * Evaluate whether a task completed successfully.
+   * Decide what an arm's output means, while the arm is still alive.
    *
-   * Takes the arm's captured output text. It used to take an array of
-   * conversation messages read back from the WorldModel, but the runner
-   * unregisters the arm before the coordinator is notified, so that
-   * array was always empty and this method was never reached. The
-   * runner's captured output is the only surviving record.
+   * This replaced evaluate(). Two reasons. It used to run after the
+   * agent had been destroyed, which made a verdict of "failed" useless
+   * for anything but bookkeeping and arrived after dependent tasks had
+   * already consumed the output. And it could only ever judge; it could
+   * not answer. Running at turn end means a "needs_input" verdict can
+   * be sent straight back into the same session, so an arm that asks
+   * for a detail keeps the work it has already done.
    *
-   * An array is still accepted so any caller holding messages keeps
-   * working.
-   *
-   * @param {string} taskDescription
-   * @param {string|Array} agentOutput - captured output text, or messages
-   * @returns {Promise<{ success: ?boolean, summary: string }>}
-   *   success is null when the reply could not be parsed, meaning
-   *   "no verdict" rather than a pass.
+   * @param {object} opts
+   * @param {string} opts.taskDescription
+   * @param {string} [opts.taskPrompt]
+   * @param {string} [opts.goalPrompt]
+   * @param {string} opts.output       what the arm produced this turn
+   * @param {number} [opts.turn]
+   * @param {number} [opts.maxTurns]
+   * @returns {Promise<{verdict:'done'|'needs_input'|'failed', summary:string, answer:?string}>}
+   *   verdict is 'done' when the reply could not be parsed, so an
+   *   unreadable assessment never invents a failure.
    */
-  async evaluate(taskDescription, agentOutput) {
-    var text = Array.isArray(agentOutput)
-      ? agentOutput.map(function (m) {
-          return (m.role || 'unknown') + ': ' + (m.content || '').slice(0, 500);
-        }).join('\n')
-      : String(agentOutput || '');
+  async assessTurn(opts) {
+    opts = opts || {};
+    var canAnswer = (opts.maxTurns || 1) > (opts.turn || 1);
 
-    var prompt = EVALUATE_PROMPT + '\n\n' +
-      'Task: ' + taskDescription + '\n\n' +
-      'What the agent produced:\n' + text.slice(0, 8000) + '\n\n' +
+    var prompt = ASSESS_PROMPT + '\n\n' +
+      (opts.goalPrompt ? 'Overall goal: ' + opts.goalPrompt + '\n\n' : '') +
+      'Task: ' + (opts.taskDescription || '(unknown)') + '\n\n' +
+      (opts.taskPrompt ? 'What the agent was asked:\n' + String(opts.taskPrompt).slice(0, 2000) + '\n\n' : '') +
+      'What the agent just produced:\n' + String(opts.output || '').slice(0, 8000) + '\n\n' +
+      (canAnswer
+        ? 'You may answer it: it has turns remaining.\n\n'
+        : 'You may NOT answer it: it has no turns left, so choose done or failed.\n\n') +
       'Respond with JSON only:';
 
     var response = await this._ask(prompt);
-    return this._parseEvaluation(response);
+    return this._parseAssessment(response, canAnswer);
   }
 
   /**
@@ -331,23 +357,36 @@ class Reasoner {
   }
 
   /**
-   * Parse an evaluation from the LLM response.
+   * Parse a turn assessment.
+   *
+   * Defaults to 'done' when the reply is unreadable. Failing open on a
+   * parse error is deliberate here: the alternative is manufacturing a
+   * failure, which would replan or escalate work that may well have
+   * succeeded. An unreadable assessment is an absence of evidence.
    */
-  _parseEvaluation(response) {
+  _parseAssessment(response, canAnswer) {
     var json = this._extractJson(response);
-    if (!json) {
-      // Previously this returned success:true, so a garbled reply was
-      // recorded as a passing verdict and written to long-term memory
-      // as one. null means "no verdict": the coordinator acts only on
-      // an explicit false, so an unreadable reply changes nothing.
-      return { success: null, summary: 'Could not parse evaluation' };
+    if (!json || typeof json.verdict !== 'string') {
+      return { verdict: 'done', summary: 'Could not parse assessment', answer: null };
     }
-    var verdict = null;
-    if (json.success === true) verdict = true;
-    else if (json.success === false) verdict = false;
+    var verdict = json.verdict;
+    if (verdict !== 'done' && verdict !== 'needs_input' && verdict !== 'failed') {
+      return { verdict: 'done', summary: 'Unknown verdict: ' + verdict, answer: null };
+    }
+    var answer = typeof json.answer === 'string' && json.answer.trim() ? json.answer : null;
+    // needs_input without an answer, or with no turn left to spend it
+    // on, is just a failure the coordinator has to route elsewhere.
+    if (verdict === 'needs_input' && (!answer || !canAnswer)) {
+      return {
+        verdict: 'failed',
+        summary: json.summary || 'Agent needs input that cannot be supplied',
+        answer: null,
+      };
+    }
     return {
-      success: verdict,
-      summary: json.summary || (verdict === null ? 'Evaluation reply had no verdict' : 'No summary provided'),
+      verdict: verdict,
+      summary: json.summary || '',
+      answer: verdict === 'needs_input' ? answer : null,
     };
   }
 

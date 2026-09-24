@@ -86,7 +86,18 @@ class OneShotAgentRunner extends EventEmitter {
    * @param {string} opts.name            instance display name ("Gateway: openclaw")
    * @param {string} opts.source          origin tag ("gateway:openclaw", "mind:goal-42")
    * @param {string} [opts.project]       project label; defaults to basename(cwd)
-   * @param {number} [opts.timeoutMs]     per-run deadline (default 5 min)
+   * @param {number} [opts.timeoutMs]     per-run deadline (default 5 min),
+   *   measured across the whole run including any follow-up turns
+   * @param {number} [opts.maxTurns]      how many agent turns this run may
+   *   take (default 1, the classic one-shot). Values above 1 only have an
+   *   effect together with onTurnEnd.
+   * @param {function(object): (Promise<?string>|?string)} [opts.onTurnEnd]
+   *   called when the agent goes idle with turns still available. Receives
+   *   `{output, fullOutput, turn, maxTurns, agentInstanceId}` where `output`
+   *   is just this turn's text. Return a string to send it as the next
+   *   prompt in the SAME session, preserving the agent's context; return
+   *   anything else to end the run. Throwing ends the run without failing
+   *   it.
    * @param {Array}  [opts.attachments]   [{ path, mediaType, filename }] pre-staged
    * @param {string} [opts.permissionMode] 'bypass' | 'default' (overrides autoApprove)
    * @param {string} [opts.model]         optional model override
@@ -118,6 +129,14 @@ class OneShotAgentRunner extends EventEmitter {
     const timeoutMs = (opts.timeoutMs && Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0)
       ? opts.timeoutMs
       : DEFAULT_TIMEOUT_MS;
+    // A run is still one task. maxTurns caps how many times the caller
+    // may answer the agent WITHIN that task before it is forced to end,
+    // so an agent that asks a question does not have to be killed and
+    // restarted from an empty context to receive the answer. The
+    // overall timeoutMs still bounds the whole run across all turns.
+    const maxTurns = (opts.maxTurns && Number.isFinite(opts.maxTurns) && opts.maxTurns > 0)
+      ? Math.floor(opts.maxTurns)
+      : 1;
     const permissionMode = opts.permissionMode
       || (this.autoApprove ? 'bypass' : 'default');
     const project = opts.project
@@ -169,6 +188,10 @@ class OneShotAgentRunner extends EventEmitter {
       onApproval: typeof opts.onApproval === 'function' ? opts.onApproval : null,
       onStatus: typeof opts.onStatus === 'function' ? opts.onStatus : null,
       onTerminal: typeof opts.onTerminal === 'function' ? opts.onTerminal : null,
+      onTurnEnd: typeof opts.onTurnEnd === 'function' ? opts.onTurnEnd : null,
+      maxTurns: maxTurns,
+      turns: 0,
+      turnStart: 0,   // offset into `output` where the current turn began
       resolve: null,   // set just below
     };
     this._runs.set(agentInstanceId, record);
@@ -251,12 +274,75 @@ class OneShotAgentRunner extends EventEmitter {
   _routeStatus(data) {
     const r = this._runs.get(data && data.id);
     if (!r) return;
-    if (r.status === 'starting' && data.status === 'busy') {
+    // 'awaiting_turn' is a follow-up that has been sent but whose
+    // agent has not gone busy yet. Treating it like 'starting' keeps a
+    // stray idle event from being read as the turn already finishing.
+    if ((r.status === 'starting' || r.status === 'awaiting_turn') && data.status === 'busy') {
+      const first = r.status === 'starting';
       r.status = 'running';
-      if (r.onStatus) { try { r.onStatus('running'); } catch {} }
+      if (first && r.onStatus) { try { r.onStatus('running'); } catch {} }
     } else if (r.status === 'running' && data.status === 'idle') {
-      this._finalize(r, 'completed', null);
+      this._endTurn(r);
     }
+  }
+
+  /**
+   * The agent went idle. Either that is the end of the run, or the
+   * caller gets one chance to reply into the SAME live session.
+   *
+   * Returning a string from onTurnEnd sends it as the next prompt and
+   * the agent keeps its context. Returning anything else ends the run.
+   * This is what lets an arm ask "which database?" and be answered,
+   * instead of being killed and replaced by a fresh arm that has to
+   * redo everything it had already worked out.
+   */
+  _endTurn(record) {
+    record.turns += 1;
+
+    // Chunks are joined with '\n', and turnStart was recorded before
+    // that separator existed, so drop the one leading newline it adds.
+    // Only that one: the agent's own leading whitespace is its text.
+    const turnOutput = record.output.slice(record.turnStart).replace(/^\n/, '');
+
+    if (!record.onTurnEnd || record.turns >= record.maxTurns) {
+      this._finalize(record, 'completed', null);
+      return;
+    }
+
+    // Not terminal: cancel() and the run deadline both still apply.
+    record.status = 'deciding';
+
+    Promise.resolve()
+      .then(() => record.onTurnEnd({
+        output: turnOutput,
+        fullOutput: record.output,
+        turn: record.turns,
+        maxTurns: record.maxTurns,
+        agentInstanceId: record.agentInstanceId,
+      }))
+      .then((followUp) => {
+        // The run may have been cancelled or timed out while the caller
+        // was deciding; _finalize is idempotent but we must not send.
+        if (this._isTerminal(record.status)) return;
+        if (typeof followUp !== 'string' || !followUp.trim()) {
+          this._finalize(record, 'completed', null);
+          return;
+        }
+        record.turnStart = record.output.length;
+        record.status = 'awaiting_turn';
+        const sent = this.instanceManager.sendToAgent(record.agentInstanceId, {
+          type: 'prompt',
+          text: followUp,
+        });
+        if (!sent) this._finalize(record, 'failed', 'agent_send_failed');
+      })
+      .catch(() => {
+        // A caller that throws while deciding does not fail the run;
+        // the work the agent already did still counts.
+        if (!this._isTerminal(record.status)) {
+          this._finalize(record, 'completed', null);
+        }
+      });
   }
 
   _routeMessage(data) {
@@ -321,6 +407,7 @@ class OneShotAgentRunner extends EventEmitter {
       error: record.error,
       durationMs: durationMs,
       agentInstanceId: record.agentInstanceId,
+      turns: record.turns || 1,
     };
 
     // Drop the record from the live map; further events for this agent

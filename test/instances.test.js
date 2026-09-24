@@ -279,3 +279,68 @@ describe('InstanceManager', () => {
     });
   });
 });
+
+describe('InstanceManager: internal instances', () => {
+  let mgr;
+
+  beforeEach(() => {
+    mgr = new InstanceManager();
+  });
+
+  // The mind's reasoner runs on the shared one-shot runner, so it
+  // registers a real instance like any arm. It is machinery, not a
+  // session: listing it puts a phantom card in the dashboard sidebar,
+  // inflates the /health instance count, and offers the planner its own
+  // reasoning process as an arm it could assign work to.
+  function registerAll() {
+    mgr.register({ id: 'u1', name: 'User session' });
+    mgr.register({ id: 'a1', name: 'Mind arm', source: 'mind:goal-1' });
+    mgr.register({ id: 'g1', name: 'Gateway task', source: 'gateway:openclaw' });
+    mgr.register({ id: 'r1', name: 'Mind reasoner', source: 'mind-reasoner' });
+  }
+
+  it('keeps internal instances out of getAll', () => {
+    registerAll();
+    const names = mgr.getAll().map((i) => i.name);
+    assert.deepEqual(names, ['User session', 'Mind arm', 'Gateway task']);
+  });
+
+  it('returns them when explicitly asked', () => {
+    registerAll();
+    assert.equal(mgr.getAll({ includeInternal: true }).length, 4);
+  });
+
+  it('keeps arms and gateway tasks visible', () => {
+    // Only the exact internal sources are hidden. 'mind:...' is an arm
+    // doing user work and must stay listed.
+    registerAll();
+    const sources = mgr.getAll().map((i) => i.source);
+    assert.ok(sources.includes('mind:goal-1'));
+    assert.ok(sources.includes('gateway:openclaw'));
+    assert.ok(!sources.includes('mind-reasoner'));
+  });
+
+  it('leaves an internal instance fully addressable', () => {
+    // The runner drives it by id, so hiding it from listings must not
+    // make it unreachable.
+    registerAll();
+    assert.ok(mgr.get('r1'));
+    mgr.updateStatus('r1', 'busy');
+    assert.equal(mgr.get('r1').status, 'busy');
+    mgr.addMessage('r1', { role: 'assistant', content: 'thinking' });
+    assert.equal(mgr.getConversation('r1').length, 1);
+  });
+
+  it('exposes the predicate for other listing surfaces', () => {
+    assert.equal(typeof InstanceManager.isInternalInstance, 'function');
+    assert.equal(InstanceManager.isInternalInstance({ source: 'mind-reasoner' }), true);
+    assert.equal(InstanceManager.isInternalInstance({ source: 'mind:goal-1' }), false);
+    assert.equal(InstanceManager.isInternalInstance({ source: null }), false);
+    assert.equal(InstanceManager.isInternalInstance(null), false);
+  });
+
+  it('does not count internal instances in an empty listing', () => {
+    mgr.register({ id: 'r1', name: 'Mind reasoner', source: 'mind-reasoner' });
+    assert.deepEqual(mgr.getAll(), []);
+  });
+});

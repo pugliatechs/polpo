@@ -1,6 +1,23 @@
 const { v4: uuidv4 } = require('uuid');
 const EventEmitter = require('events');
 
+// Origin tags for instances that are Polpo's own machinery rather than
+// work the user can see or act on. They are ordinary agents and stay
+// addressable by id, but they are not sessions: listing them puts a
+// phantom card in the dashboard sidebar, inflates the /health instance
+// count, and offers the planner its own reasoning process as an arm it
+// could assign work to.
+const INTERNAL_SOURCES = new Set(['mind-reasoner']);
+
+/**
+ * True for instances that exist to run Polpo itself.
+ * @param {object} inst
+ * @returns {boolean}
+ */
+function isInternalInstance(inst) {
+  return !!(inst && inst.source && INTERNAL_SOURCES.has(inst.source));
+}
+
 class InstanceManager extends EventEmitter {
   constructor() {
     super();
@@ -58,25 +75,37 @@ class InstanceManager extends EventEmitter {
     return this.instances.get(id);
   }
 
-  getAll() {
-    return Array.from(this.instances.values()).map((inst) => ({
-      id: inst.id,
-      name: inst.name,
-      type: inst.type,
-      project: inst.project,
-      cwd: inst.cwd,
-      status: inst.status,
-      lastActivity: inst.lastActivity,
-      registeredAt: inst.registeredAt,
-      conversationLength: inst.conversation.length,
-      pendingApproval: inst.pendingApproval,
-      autoApprove: inst.autoApprove,
-      sessionId: inst.sessionId,
-      canReceivePrompts: inst.canReceivePrompts,
-      firstPrompt: inst.firstPrompt,
-      agentType: inst.agentType,
-      source: inst.source,
-    }));
+  /**
+   * Every instance a caller should see.
+   *
+   * Internal instances (see isInternalInstance) are excluded unless
+   * `includeInternal` is set, so no listing surface has to remember to
+   * filter them out individually.
+   *
+   * @param {{includeInternal?: boolean}} [opts]
+   */
+  getAll(opts) {
+    const includeInternal = !!(opts && opts.includeInternal);
+    return Array.from(this.instances.values())
+      .filter((inst) => includeInternal || !isInternalInstance(inst))
+      .map((inst) => ({
+        id: inst.id,
+        name: inst.name,
+        type: inst.type,
+        project: inst.project,
+        cwd: inst.cwd,
+        status: inst.status,
+        lastActivity: inst.lastActivity,
+        registeredAt: inst.registeredAt,
+        conversationLength: inst.conversation.length,
+        pendingApproval: inst.pendingApproval,
+        autoApprove: inst.autoApprove,
+        sessionId: inst.sessionId,
+        canReceivePrompts: inst.canReceivePrompts,
+        firstPrompt: inst.firstPrompt,
+        agentType: inst.agentType,
+        source: inst.source,
+      }));
   }
 
   updateStatus(id, status) {
@@ -175,5 +204,10 @@ class InstanceManager extends EventEmitter {
     return false;
   }
 }
+
+// Attached rather than exported separately so the module keeps its
+// single-class export shape and every existing require stays valid.
+InstanceManager.isInternalInstance = isInternalInstance;
+InstanceManager.INTERNAL_SOURCES = INTERNAL_SOURCES;
 
 module.exports = InstanceManager;

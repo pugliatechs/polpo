@@ -1,6 +1,7 @@
 const WebSocket = require('ws');
 const url = require('url');
 const { validateWsAuth } = require('./auth');
+const InstanceManager = require('./instances');
 const { JsonlWatcher } = require('./jsonl-watcher');
 const { CodexJsonlAdapter } = require('./codex-jsonl-adapter');
 const { GeminiJsonAdapter } = require('./gemini-json-adapter');
@@ -48,8 +49,13 @@ function setupWebSocket(server, instanceManager, getAuthState, pushManager, outb
     }
   }
 
-  // Forward all instance events to dashboard clients
+  // Forward all instance events to dashboard clients.
+  //
+  // Internal instances are skipped here as well as in getAll(). The
+  // snapshot path filters them, but these live events would otherwise
+  // still make one appear in the sidebar the moment it registers.
   instanceManager.on('instance:registered', (instance) => {
+    if (InstanceManager.isInternalInstance(instance)) return;
     broadcastToDashboards({
       type: 'instance:registered',
       instance: {
@@ -74,6 +80,7 @@ function setupWebSocket(server, instanceManager, getAuthState, pushManager, outb
   });
 
   instanceManager.on('instance:disconnected', (instance) => {
+    if (InstanceManager.isInternalInstance(instance)) return;
     broadcastToDashboards({
       type: 'instance:disconnected',
       instanceId: instance.id,

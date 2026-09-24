@@ -56,6 +56,12 @@ class Coordinator extends EventEmitter {
     this.goalStore = opts.goalStore || null;
     this.mindInstanceId = opts.mindInstanceId;
     this.policy = opts.policy || null;
+    // How many turns one arm may take inside a single task. 1 keeps the
+    // classic one shot; above 1 the mind may answer a question the arm
+    // asks and let it continue with its context instead of killing it.
+    this.maxArmTurns = (this.policy && this.policy.maxArmTurns > 0)
+      ? this.policy.maxArmTurns
+      : 2;
 
     this._goals = new Map();         // goalId -> Goal
     this._taskToAgent = new Map();   // agentId -> taskId (live runs only)
@@ -540,6 +546,15 @@ class Coordinator extends EventEmitter {
       name: displayName,
       source: sourceTag,
       timeoutMs: task.timeoutMs,
+      // Let an arm be answered in place rather than killed and replaced.
+      // The assessment below runs while the agent is still alive, so a
+      // question it can answer costs one more turn instead of a whole
+      // fresh arm that has to redo the work.
+      maxTurns: this.maxArmTurns,
+
+      onTurnEnd: function (t) {
+        return self._assessArmTurn(task, t);
+      },
 
       onSpawn: function (agentInstanceId) {
         task.agentId = agentInstanceId;
@@ -671,70 +686,88 @@ class Coordinator extends EventEmitter {
       durationMs: duration,
     });
 
+    // Act on the verdict the turn assessment already produced. It ran
+    // while the arm was alive, so it is available here synchronously,
+    // BEFORE dependents are dispatched below. That ordering is the
+    // whole point: a refusal must not reach dependents as their
+    // context and then be discovered afterwards.
+    var assessment = task.assessment;
+    if (assessment && assessment.verdict === 'failed') {
+      this._report('Assessment failed for ' + task.description + ': ' +
+        (assessment.summary || 'task did not produce a usable result'));
+      task.status = 'running'; // so the failure handler accepts it
+      this._failTask(
+        task.id,
+        'assessment: ' + (assessment.summary || 'task did not produce a usable result'),
+        task.output
+      );
+      return;
+    }
+
+    if (assessment && assessment.summary) {
+      task.result = { success: true, summary: assessment.summary };
+    }
+
     // Dispatch dependent tasks and check goal completion synchronously
-    // so the coordinator state is consistent before returning
+    // so the coordinator state is consistent before returning.
     this._checkGoalCompletion(task.goalId);
     this._dispatchReadyTasks(task.goalId);
-
-    // Evaluate asynchronously. Until v1.2.2 the evaluation result was
-    // recorded on the task but never acted on, which meant an arm that
-    // went idle with a refusal ("I can't do this because X") was
-    // treated as a successful completion and its dependents proceeded
-    // with the refusal text inlined as their predecessor context.
-    //
-    // Now: if the evaluation comes back failed AND no dependent has
-    // started yet, route through the normal failure path so the
-    // reasoner gets a chance to replan or — in interactive mode — the
-    // user gets a chance to retry/skip/abandon.
-    //
-    // The "no dependent has started yet" guard is intentional. If a
-    // dependent is already running (it consumed the refusal text and
-    // chose to push forward), retroactively failing this task would
-    // require cancelling the dependent and unwinding state, which is
-    // bigger surgery than v1.2.2 is willing to do. v1.3 may move
-    // evaluate to the synchronous critical path and gate dependents
-    // on it.
-    var self = this;
-    // Evaluate against the runner-captured output. This used to read
-    // the arm's conversation back out of the world model, which the
-    // runner had already torn down, so `conversation.length > 0` was
-    // never true and this whole block never ran. Every arm that exited
-    // cleanly was recorded as a success no matter what it said.
-    var producedText = (task.output || '').trim();
-    if (producedText) {
-      this.reasoner.evaluate(task.description, producedText).then(function (evaluation) {
-        task.result = evaluation;
-        // Act only on an explicit false. A null verdict means the
-        // reasoner's reply could not be parsed, which is not evidence
-        // of failure.
-        if (evaluation && evaluation.success === false && self._noDependentsStarted(task)) {
-          self._report('Evaluation failed for ' + task.description + ': ' + (evaluation.summary || 'no summary'));
-          // Re-fail through the normal path. _failTask sees status not
-          // === 'running' (it's 'completed' now) so we explicitly
-          // re-set it to running so the failure handler accepts.
-          task.status = 'running';
-          self._failTask(task.id, 'evaluation: ' + (evaluation.summary || 'task did not produce a usable result'));
-        }
-      }).catch(function () {});
-    }
   }
 
   /**
-   * Returns true when no task that depends on `task` has yet started
-   * running. Used by the evaluate-failure path to decide whether
-   * re-failing the task is safe.
+   * Decide what an arm's output means, while it is still alive.
+   *
+   * Returning a string sends it back into the same session and the arm
+   * continues with its context intact. Returning null ends the run, and
+   * the verdict is stashed on the task so _completeTask can act on it
+   * synchronously.
+   *
+   * That last part is what closes the old race. Assessment used to run
+   * after completion, asynchronously, while _completeTask had already
+   * dispatched dependent tasks. A "this arm refused" verdict therefore
+   * arrived after the refusal text had been injected into dependents as
+   * their context, and the recovery was gated on _noDependentsStarted,
+   * which by then was false for any task that had dependents at all.
+   *
+   * @returns {Promise<?string>} follow-up prompt, or null to end the run
    */
-  _noDependentsStarted(task) {
-    var goal = this._goals.get(task.goalId);
-    if (!goal || !goal.plan) return true;
-    var tasks = goal.plan.tasks;
-    for (var i = 0; i < tasks.length; i++) {
-      var t = tasks[i];
-      if (t.dependsOn && t.dependsOn.indexOf(task.index) !== -1) {
-        if (t.status !== 'pending') return false;
-      }
+  async _assessArmTurn(task, turn) {
+    if (!this.reasoner || typeof this.reasoner.assessTurn !== 'function') {
+      return null;
     }
-    return true;
+    var goal = this._goals.get(task.goalId);
+    var assessment;
+    try {
+      assessment = await this.reasoner.assessTurn({
+        goalPrompt: goal ? goal.prompt : '',
+        taskDescription: task.description,
+        taskPrompt: task.prompt,
+        output: turn.output,
+        turn: turn.turn,
+        maxTurns: turn.maxTurns,
+      });
+    } catch (err) {
+      // A reasoner that is down must not discard work the arm has
+      // already done. Accept the turn and move on.
+      log.error('Turn assessment failed:', err && err.message);
+      return null;
+    }
+
+    task.assessment = assessment || null;
+
+    if (assessment && assessment.verdict === 'needs_input' && assessment.answer) {
+      task.followUps = (task.followUps || 0) + 1;
+      this._report('Answering ' + task.description + ':\n  ' +
+        (assessment.summary || 'arm asked for a detail'));
+      this._emitGoalEvent(task.goalId, 'task_answered', {
+        taskId: task.id,
+        question: (assessment.summary || '').slice(0, 500),
+        turn: turn.turn,
+      });
+      return assessment.answer;
+    }
+
+    return null;
   }
 
   /**

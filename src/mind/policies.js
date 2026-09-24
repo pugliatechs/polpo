@@ -7,6 +7,13 @@
  *   AUTONOMOUS: auto-approve all, auto-initiate goals, high parallelism
  */
 
+// maxArmTurns bounds how many turns ONE arm may take inside a single
+// task. 1 is the classic one shot: the arm answers once and is gone.
+// Above 1, the mind may answer a question the arm asks and let it
+// continue with its context, instead of killing it and dispatching a
+// fresh arm that has to redo the work. Each extra turn costs a
+// reasoner call, so conservative keeps the old behaviour.
+//
 // Autonomous-action knobs (used by Watcher):
 //   autoActOnStuck       — if true, watcher cancels a stuck task instead of
 //                          only alerting. The coordinator's normal failure path
@@ -21,6 +28,7 @@ var POLICIES = {
     autoInitiateGoals: false,
     autoActOnStuck: false,
     stuckActionMultiplier: 0,
+    maxArmTurns: 1,
     maxConcurrentTasks: 2,
     maxSpawnedAgents: 2,
     taskTimeoutMs: 300000, // 5 min
@@ -33,6 +41,7 @@ var POLICIES = {
     autoInitiateGoals: false,
     autoActOnStuck: true,
     stuckActionMultiplier: 2, // wait 2x stuckThreshold before acting
+    maxArmTurns: 2,
     maxConcurrentTasks: 4,
     maxSpawnedAgents: 4,
     taskTimeoutMs: 600000, // 10 min
@@ -45,6 +54,7 @@ var POLICIES = {
     autoInitiateGoals: true,
     autoActOnStuck: true,
     stuckActionMultiplier: 1, // act as soon as the stuck threshold trips
+    maxArmTurns: 3,
     maxConcurrentTasks: 8,
     maxSpawnedAgents: 6,
     taskTimeoutMs: 900000, // 15 min

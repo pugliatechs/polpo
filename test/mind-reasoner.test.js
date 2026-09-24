@@ -187,48 +187,101 @@ describe('Reasoner', () => {
     });
   });
 
-  describe('_parseEvaluation', () => {
+  describe('_parseAssessment', () => {
     const r = new Reasoner({ runner: createMockRunner() });
 
-    it('reads an explicit pass', () => {
-      assert.equal(r._parseEvaluation('{"success":true,"summary":"fine"}').success, true);
+    it('reads a done verdict', () => {
+      const a = r._parseAssessment('{"verdict":"done","summary":"shipped it"}', true);
+      assert.equal(a.verdict, 'done');
+      assert.equal(a.summary, 'shipped it');
     });
 
-    it('reads an explicit failure', () => {
-      assert.equal(r._parseEvaluation('{"success":false,"summary":"refused"}').success, false);
+    it('reads a failed verdict', () => {
+      assert.equal(r._parseAssessment('{"verdict":"failed","summary":"refused"}', true).verdict, 'failed');
     });
 
-    it('returns no verdict rather than a pass when the reply is garbage', () => {
-      // Previously this returned success:true, so an unreadable reply
-      // was recorded as a passing verdict and written to memory as one.
-      const ev = r._parseEvaluation('sorry, I got confused');
-      assert.equal(ev.success, null);
+    it('carries the answer on needs_input when a turn remains', () => {
+      const a = r._parseAssessment(
+        '{"verdict":"needs_input","summary":"asked which db","answer":"use postgres"}', true);
+      assert.equal(a.verdict, 'needs_input');
+      assert.equal(a.answer, 'use postgres');
     });
 
-    it('returns no verdict when the JSON omits success', () => {
-      assert.equal(r._parseEvaluation('{"summary":"hmm"}').success, null);
+    it('downgrades needs_input to failed when no turn is left', () => {
+      // Nothing can be done with an answer there is no turn to send.
+      const a = r._parseAssessment(
+        '{"verdict":"needs_input","summary":"asked which db","answer":"use postgres"}', false);
+      assert.equal(a.verdict, 'failed');
+      assert.equal(a.answer, null);
     });
 
-    it('does not treat a truthy non-boolean as a pass', () => {
-      assert.equal(r._parseEvaluation('{"success":"yes"}').success, null);
+    it('downgrades needs_input with no answer to failed', () => {
+      const a = r._parseAssessment('{"verdict":"needs_input","summary":"stuck"}', true);
+      assert.equal(a.verdict, 'failed');
+    });
+
+    it('treats a blank answer as no answer', () => {
+      const a = r._parseAssessment('{"verdict":"needs_input","answer":"   "}', true);
+      assert.equal(a.verdict, 'failed');
+    });
+
+    it('fails open to done when the reply is unparseable', () => {
+      // Manufacturing a failure would replan or escalate work that may
+      // well have succeeded. Absence of evidence is not evidence.
+      const a = r._parseAssessment('sorry, I got confused', true);
+      assert.equal(a.verdict, 'done');
+      assert.equal(a.answer, null);
+    });
+
+    it('fails open to done on an unknown verdict', () => {
+      assert.equal(r._parseAssessment('{"verdict":"sideways"}', true).verdict, 'done');
+    });
+
+    it('never returns an answer alongside done', () => {
+      const a = r._parseAssessment('{"verdict":"done","answer":"ignore me"}', true);
+      assert.equal(a.answer, null);
     });
   });
 
-  describe('evaluate', () => {
-    it('accepts the arm output text the coordinator now holds', async () => {
-      const runner = createMockRunner({ output: '{"success":false,"summary":"it refused"}' });
-      const ev = await new Reasoner({ runner }).evaluate('Do it', 'I cannot do that.');
-      assert.equal(ev.success, false);
-      assert.ok(runner.calls[0].prompt.includes('I cannot do that.'));
+  describe('assessTurn', () => {
+    it('sends the arm output and the goal for context', async () => {
+      const runner = createMockRunner({ output: '{"verdict":"done","summary":"ok"}' });
+      const a = await new Reasoner({ runner }).assessTurn({
+        goalPrompt: 'ship the migration',
+        taskDescription: 'migrate the db',
+        taskPrompt: 'do the migration',
+        output: 'I cannot pick a database.',
+        turn: 1,
+        maxTurns: 2,
+      });
+      assert.equal(a.verdict, 'done');
+      const prompt = runner.calls[0].prompt;
+      assert.ok(prompt.includes('ship the migration'));
+      assert.ok(prompt.includes('migrate the db'));
+      assert.ok(prompt.includes('I cannot pick a database.'));
     });
 
-    it('still accepts a legacy message array', async () => {
-      const runner = createMockRunner({ output: '{"success":true,"summary":"ok"}' });
-      const ev = await new Reasoner({ runner }).evaluate('Do it', [
-        { role: 'assistant', content: 'Done, shipped it.' },
-      ]);
-      assert.equal(ev.success, true);
-      assert.ok(runner.calls[0].prompt.includes('Done, shipped it.'));
+    it('tells the reasoner when it may answer', async () => {
+      const runner = createMockRunner({ output: '{"verdict":"done"}' });
+      await new Reasoner({ runner }).assessTurn({ taskDescription: 't', output: 'o', turn: 1, maxTurns: 2 });
+      assert.match(runner.calls[0].prompt, /You may answer it/);
+    });
+
+    it('tells the reasoner when it may not', async () => {
+      const runner = createMockRunner({ output: '{"verdict":"done"}' });
+      await new Reasoner({ runner }).assessTurn({ taskDescription: 't', output: 'o', turn: 2, maxTurns: 2 });
+      assert.match(runner.calls[0].prompt, /You may NOT answer it/);
+    });
+
+    it('returns the answer to send back to the arm', async () => {
+      const runner = createMockRunner({
+        output: '{"verdict":"needs_input","summary":"which db","answer":"use postgres"}',
+      });
+      const a = await new Reasoner({ runner }).assessTurn({
+        taskDescription: 't', output: 'which db?', turn: 1, maxTurns: 2,
+      });
+      assert.equal(a.verdict, 'needs_input');
+      assert.equal(a.answer, 'use postgres');
     });
   });
 

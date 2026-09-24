@@ -307,3 +307,190 @@ describe('OneShotAgentRunner: cleanup', () => {
     assert.equal(im.listenerCount('instance:approval'), 0);
   });
 });
+
+describe('OneShotAgentRunner: bounded in-session turns', () => {
+  let im, runner;
+
+  beforeEach(() => {
+    im = createMockIM();
+    runner = new OneShotAgentRunner({
+      instanceManager: im,
+      hubPort: 7890,
+      createAgent: (type, opts) => createFakeAgent(im, type, opts),
+      waitForSocket: async () => {},
+    });
+  });
+
+  afterEach(() => runner.destroy());
+
+  const tick = () => new Promise((r) => setImmediate(r));
+
+  // Drive one agent turn: busy, some text, then idle.
+  async function turn(id, text) {
+    im.updateStatus(id, 'busy');
+    if (text) im.addMessage(id, { role: 'assistant', content: text });
+    im.updateStatus(id, 'idle');
+    await tick();
+  }
+
+  function start(opts) {
+    let id = null;
+    const p = runner.run(Object.assign({
+      agentType: 'claude', cwd: '/tmp', prompt: 'do it',
+      name: 'Arm', source: 'mind:g1',
+      onSpawn: (agentInstanceId) => { id = agentInstanceId; },
+    }, opts));
+    return { promise: p, id: () => id };
+  }
+
+  it('ends after one turn by default, as before', async () => {
+    const run = start({});
+    await tick();
+    await turn(run.id(), 'all done');
+    const res = await run.promise;
+    assert.equal(res.status, 'completed');
+    assert.equal(res.output, 'all done');
+    assert.equal(res.turns, 1);
+  });
+
+  it('never consults onTurnEnd when maxTurns is 1', async () => {
+    let asked = 0;
+    const run = start({ onTurnEnd: () => { asked++; return 'answer'; } });
+    await tick();
+    await turn(run.id(), 'question?');
+    await run.promise;
+    assert.equal(asked, 0);
+  });
+
+  it('answers the agent in the same session instead of killing it', async () => {
+    // The point of the whole thing: an arm that asks for a detail keeps
+    // its context and continues, rather than being replaced by a fresh
+    // arm that has to redo the work it already did.
+    const seen = [];
+    const run = start({
+      maxTurns: 3,
+      onTurnEnd: (t) => {
+        seen.push(t.output);
+        return t.turn === 1 ? 'use postgres' : null;
+      },
+    });
+    await tick();
+    await turn(run.id(), 'Which database should I use?');
+    await turn(run.id(), 'Done, migrated to postgres.');
+
+    const res = await run.promise;
+    assert.equal(res.status, 'completed');
+    assert.equal(res.turns, 2);
+    assert.deepEqual(seen, ['Which database should I use?', 'Done, migrated to postgres.']);
+    // The follow-up went to the SAME agent instance.
+    const prompts = im._sent.filter((m) => m.message.type === 'prompt');
+    assert.equal(prompts.length, 2);
+    assert.equal(prompts[0].id, prompts[1].id);
+    assert.equal(prompts[1].message.text, 'use postgres');
+  });
+
+  it('gives each turn only its own output, and the run the whole thing', async () => {
+    const perTurn = [];
+    let full = null;
+    const run = start({
+      maxTurns: 2,
+      onTurnEnd: (t) => { perTurn.push(t.output); full = t.fullOutput; return 'go on'; },
+    });
+    await tick();
+    await turn(run.id(), 'first');
+    await turn(run.id(), 'second');
+    const res = await run.promise;
+    assert.deepEqual(perTurn, ['first']);
+    assert.equal(full, 'first');
+    assert.equal(res.output, 'first\nsecond');
+  });
+
+  it('stops at the turn budget even if the caller keeps answering', async () => {
+    let asked = 0;
+    const run = start({ maxTurns: 2, onTurnEnd: () => { asked++; return 'keep going'; } });
+    await tick();
+    await turn(run.id(), 'one');
+    await turn(run.id(), 'two');
+    const res = await run.promise;
+    assert.equal(res.turns, 2);
+    assert.equal(asked, 1, 'not consulted once the budget is spent');
+  });
+
+  it('ends the run when the caller declines to answer', async () => {
+    const run = start({ maxTurns: 5, onTurnEnd: () => null });
+    await tick();
+    await turn(run.id(), 'anything else?');
+    const res = await run.promise;
+    assert.equal(res.status, 'completed');
+    assert.equal(res.turns, 1);
+  });
+
+  it('treats a blank answer as declining', async () => {
+    const run = start({ maxTurns: 5, onTurnEnd: () => '   ' });
+    await tick();
+    await turn(run.id(), 'hm');
+    const res = await run.promise;
+    assert.equal(res.turns, 1);
+  });
+
+  it('does not fail the run when the caller throws while deciding', async () => {
+    const run = start({ maxTurns: 3, onTurnEnd: () => { throw new Error('reasoner down'); } });
+    await tick();
+    await turn(run.id(), 'partial work');
+    const res = await run.promise;
+    assert.equal(res.status, 'completed', 'the work already done still counts');
+    assert.equal(res.output, 'partial work');
+  });
+
+  it('accepts an async decision', async () => {
+    const run = start({
+      maxTurns: 2,
+      onTurnEnd: async (t) => {
+        await new Promise((r) => setTimeout(r, 10));
+        return t.turn === 1 ? 'answered late' : null;
+      },
+    });
+    await tick();
+    await turn(run.id(), 'q?');
+    await new Promise((r) => setTimeout(r, 30));
+    await turn(run.id(), 'ok');
+    const res = await run.promise;
+    assert.equal(res.turns, 2);
+  });
+
+  it('can be cancelled while the caller is still deciding', async () => {
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    const run = start({ maxTurns: 3, onTurnEnd: async () => { await gate; return 'too late'; } });
+    await tick();
+    await turn(run.id(), 'thinking');
+
+    runner.cancel(run.id());
+    release();
+    const res = await run.promise;
+    assert.equal(res.status, 'cancelled');
+    // The stale answer must not be delivered after cancellation.
+    const prompts = im._sent.filter((m) => m.message.type === 'prompt');
+    assert.equal(prompts.length, 1);
+  });
+
+  it('ignores a stray idle arriving before the follow-up turn starts', async () => {
+    // Between sending a follow-up and the agent going busy, an idle
+    // event must not be read as that turn already finishing.
+    let asked = 0;
+    const run = start({
+      maxTurns: 4,
+      onTurnEnd: () => { asked++; return asked === 1 ? 'continue' : null; },
+    });
+    await tick();
+    await turn(run.id(), 'first');
+
+    im.updateStatus(run.id(), 'idle');   // stray, agent not busy yet
+    await tick();
+    assert.equal(asked, 1, 'stray idle must not end a turn that never began');
+
+    await turn(run.id(), 'second');
+    const res = await run.promise;
+    assert.equal(res.turns, 2);
+  });
+});

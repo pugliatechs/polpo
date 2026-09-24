@@ -393,12 +393,56 @@ the world model: evaluation, re-planning, user escalation, and the task
 summaries written to long-term memory.
 
 This matters because reaching back was silently vacuous. Before v1.2.3 the
-evaluation step guarded on a world-model read that was always empty, so
-`reasoner.evaluate()` never ran at all: every arm that exited cleanly was
-recorded as a success no matter what it actually said, and every long-term
-memory entry carried the placeholder summary instead of a finding. The
-re-planner had the same problem and chose retry/split/abandon from an error
-string alone.
+evaluation step guarded on a world-model read that was always empty, so the
+evaluation never ran at all: every arm that exited cleanly was recorded as a
+success no matter what it actually said, and every long-term memory entry
+carried the placeholder summary instead of a finding. The re-planner had the
+same problem and chose retry/split/abandon from an error string alone.
+
+## Turn assessment, and answering a blocked arm
+
+An arm is dispatched as one task, but a task is no longer forced to be a
+single agent turn.
+
+When an arm goes idle, the runner does not kill it immediately. It hands the
+turn's output to the coordinator, which asks the reasoner what it means:
+
+| verdict | what happens |
+|---|---|
+| `done` | the run ends, the task completes, dependents are dispatched |
+| `needs_input` | the reasoner's `answer` is sent back into the **same session** and the arm continues with its context intact |
+| `failed` | the run ends and the task goes to the failure path (replan, then escalation) |
+
+`needs_input` is the point of the mechanism. An arm that stops to ask "which
+database should I migrate to?" used to be killed, and its replacement started
+from an empty context and had to redo everything. Now it is answered and
+carries on. The reasoner is instructed never to invent a fact, a credential,
+a path or a product decision: anything needing a human is `failed`, which
+reaches the user as an escalation carrying the arm's own question.
+
+`maxArmTurns` bounds this per policy (`conservative` 1, `balanced` 2,
+`autonomous` 3). At 1 the behaviour is the classic one shot. The run's
+`timeoutMs` still bounds the whole task across every turn, and each extra
+turn costs one reasoner call.
+
+Assessment happening here, while the agent is alive, is also what makes the
+verdict available **synchronously** at completion. That closes a race: the
+old post-hoc evaluation resolved after `_completeTask` had already dispatched
+dependent tasks, so a "this arm refused" verdict arrived once the refusal had
+already been injected into dependents as their context. The recovery was
+gated on a `_noDependentsStarted` check that was false for any task that had
+dependents at all.
+
+## The reasoner is not an arm
+
+Reasoning runs register a real instance like any other agent, tagged
+`source: 'mind-reasoner'`. That tag marks them internal, so they are excluded
+from `InstanceManager.getAll()` and from the dashboard's live instance events.
+They stay fully addressable by id, because the runner drives them that way.
+
+Without that, the reasoner appears in the sidebar as a session, counts toward
+`/health`, and worse, is offered to the planner as an idle arm it could assign
+work to.
 
 ## Reasoner configuration
 

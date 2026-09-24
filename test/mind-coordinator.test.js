@@ -114,6 +114,46 @@ function createMockRunner(im) {
     },
 
     // --- test helpers ---
+    /**
+     * Drive a turn to its end: hand `output` to the caller's onTurnEnd
+     * and act on what it returns, exactly as the real runner does.
+     * Returns the follow-up prompt if the caller sent one, else null.
+     */
+    async endTurn(agentInstanceId, output) {
+      const r = activeRuns.get(agentInstanceId);
+      if (!r) throw new Error('no run for ' + agentInstanceId);
+      r.output = (r.output ? r.output + '\n' : '') + (output || '');
+      r.turns = (r.turns || 0) + 1;
+      const maxTurns = r.opts.maxTurns || 1;
+      if (!r.opts.onTurnEnd || r.turns >= maxTurns) {
+        runner._finishRun(r, 'completed', r.output, null);
+        return null;
+      }
+      const followUp = await r.opts.onTurnEnd({
+        output: output || '',
+        fullOutput: r.output,
+        turn: r.turns,
+        maxTurns: maxTurns,
+        agentInstanceId: agentInstanceId,
+      });
+      if (typeof followUp !== 'string' || !followUp.trim()) {
+        runner._finishRun(r, 'completed', r.output, null);
+        return null;
+      }
+      r.followUps = (r.followUps || []).concat(followUp);
+      return followUp;
+    },
+    /** Drive the most-recent still-running arm through one full turn. */
+    async endNextTurn(output) {
+      const r = runner._lastActive();
+      if (!r) throw new Error('no active run');
+      return runner.endTurn(r.agentInstanceId, output);
+    },
+    followUpsFor(agentInstanceId) {
+      const r = allRuns.find((x) => x.agentInstanceId === agentInstanceId);
+      return (r && r.followUps) || [];
+    },
+
     /** Drive the most-recent still-running arm to a successful finish. */
     completeNextRun(output) {
       const r = runner._lastActive();
@@ -1070,66 +1110,135 @@ describe('Coordinator: the mind sees what its arms produced', () => {
     wm.destroy();
   });
 
-  function reasonerSpy(evaluation, replanAction) {
-    const seen = { evaluate: [], replan: [] };
+  function reasonerSpy(assessment, replanAction) {
+    const seen = { assess: [], replan: [] };
     return {
       seen,
       plan: async () => ({
         tasks: [{ description: 'Do the thing', agentType: 'claude', targetCwd: '/tmp', prompt: 'p', dependsOn: [] }],
       }),
       replan: async (opts) => { seen.replan.push(opts); return replanAction || { action: 'abandon', reason: 'x' }; },
-      evaluate: async (desc, output) => { seen.evaluate.push({ desc, output }); return evaluation || { success: true, summary: 'ok' }; },
+      assessTurn: async (opts) => {
+        seen.assess.push(opts);
+        return assessment || { verdict: 'done', summary: 'ok', answer: null };
+      },
       destroy: () => {},
     };
   }
 
   const settle = () => new Promise((r) => setTimeout(r, 30));
 
-  it('evaluates a completed task against the output the runner captured', async () => {
+  it('assesses the arm output the runner captured', async () => {
     const reasoner = reasonerSpy();
     coordinator = newCoord(im, wm, reasoner, runner, { mindInstanceId: MIND_ID });
     await coordinator.submitGoal('Goal');
-    runner.completeNextRun('I cannot do this, the credentials are missing.');
+    await runner.endNextTurn('I cannot do this, the credentials are missing.');
     await settle();
 
-    assert.equal(reasoner.seen.evaluate.length, 1);
-    assert.equal(reasoner.seen.evaluate[0].output, 'I cannot do this, the credentials are missing.');
+    assert.equal(reasoner.seen.assess.length, 1);
+    assert.equal(reasoner.seen.assess[0].output, 'I cannot do this, the credentials are missing.');
+    assert.equal(reasoner.seen.assess[0].taskDescription, 'Do the thing');
   });
 
-  it('skips evaluation when the arm produced nothing to judge', async () => {
-    const reasoner = reasonerSpy();
+  it('answers a blocked arm in the same session instead of killing it', async () => {
+    // The arm keeps everything it had already worked out.
+    const reasoner = reasonerSpy({
+      verdict: 'needs_input', summary: 'asked which database', answer: 'use postgres',
+    });
     coordinator = newCoord(im, wm, reasoner, runner, { mindInstanceId: MIND_ID });
     await coordinator.submitGoal('Goal');
-    runner.completeNextRun('   ');
+    const armId = runner._lastActive().agentInstanceId;
+
+    const followUp = await runner.endTurn(armId, 'Which database should I migrate to?');
     await settle();
 
-    assert.equal(reasoner.seen.evaluate.length, 0);
+    assert.equal(followUp, 'use postgres');
+    assert.deepEqual(runner.followUpsFor(armId), ['use postgres']);
+    // Same arm, not a replacement.
+    assert.equal(reasoner.seen.replan.length, 0);
   });
 
-  it('re-fails a task the reasoner judges unsuccessful', async () => {
-    const reasoner = reasonerSpy({ success: false, summary: 'the arm refused' });
+  it('fails the task before dependents can consume a bad result', async () => {
+    // This is the race that used to be open: assessment ran after
+    // completion, asynchronously, while dependents had already been
+    // dispatched with the refusal text as their context.
+    const reasoner = {
+      plan: async () => ({
+        tasks: [
+          { description: 'research', agentType: 'claude', targetCwd: '/tmp', prompt: 'r', dependsOn: [] },
+          { description: 'build on it', agentType: 'claude', targetCwd: '/tmp', prompt: 'b', dependsOn: [0] },
+        ],
+      }),
+      replan: async () => ({ action: 'abandon', reason: 'cannot recover' }),
+      assessTurn: async () => ({ verdict: 'failed', summary: 'the arm refused', answer: null }),
+      destroy: () => {},
+    };
     coordinator = newCoord(im, wm, reasoner, runner, { mindInstanceId: MIND_ID });
     await coordinator.submitGoal('Goal');
-    runner.completeNextRun('I will not do that.');
+
+    const before = runner.promptsSent().length;
+    await runner.endNextTurn('I will not do that.');
     await settle();
 
-    assert.equal(reasoner.seen.replan.length, 1);
-    assert.match(reasoner.seen.replan[0].failureReason, /the arm refused/);
+    const dependentStarted = runner.promptsSent().length > before;
+    assert.equal(dependentStarted, false, 'the dependent must never have been dispatched');
   });
 
-  it('leaves a task completed when the evaluation has no verdict', async () => {
-    // success:null means the reasoner's reply could not be parsed. That
-    // is not evidence of failure and must not trigger a replan.
-    const reasoner = reasonerSpy({ success: null, summary: 'Could not parse evaluation' });
+  it('dispatches dependents normally when the assessment is fine', async () => {
+    const reasoner = {
+      plan: async () => ({
+        tasks: [
+          { description: 'research', agentType: 'claude', targetCwd: '/tmp', prompt: 'r', dependsOn: [] },
+          { description: 'build on it', agentType: 'claude', targetCwd: '/tmp', prompt: 'b', dependsOn: [0] },
+        ],
+      }),
+      replan: async () => ({ action: 'abandon', reason: 'x' }),
+      assessTurn: async () => ({ verdict: 'done', summary: 'found the answer', answer: null }),
+      destroy: () => {},
+    };
+    coordinator = newCoord(im, wm, reasoner, runner, { mindInstanceId: MIND_ID });
+    await coordinator.submitGoal('Goal');
+    await runner.endNextTurn('Postgres 16 is what they use.');
+    await settle();
+
+    const prompts = runner.promptsSent();
+    assert.ok(prompts.some((p) => p.includes('Postgres 16')), 'dependent got the predecessor output');
+  });
+
+  it('still completes when the reasoner cannot assess', async () => {
+    // A reasoner that is down must not discard the arm's work.
+    const reasoner = {
+      plan: async () => ({
+        tasks: [{ description: 'Do the thing', agentType: 'claude', targetCwd: '/tmp', prompt: 'p', dependsOn: [] }],
+      }),
+      replan: async () => ({ action: 'abandon', reason: 'x' }),
+      assessTurn: async () => { throw new Error('reasoner down'); },
+      destroy: () => {},
+    };
     coordinator = newCoord(im, wm, reasoner, runner, { mindInstanceId: MIND_ID });
     await coordinator.submitGoal('Goal');
     const task = coordinator.getActiveGoals()[0].plan.tasks[0];
-    runner.completeNextRun('Shipped it.');
+    await runner.endNextTurn('work done anyway');
     await settle();
 
-    assert.equal(reasoner.seen.replan.length, 0);
     assert.equal(task.status, 'completed');
-    assert.equal(task.result.success, null);
+    assert.equal(task.output, 'work done anyway');
+  });
+
+  it('works with a reasoner that has no assessTurn at all', async () => {
+    const reasoner = {
+      plan: async () => ({
+        tasks: [{ description: 'Do the thing', agentType: 'claude', targetCwd: '/tmp', prompt: 'p', dependsOn: [] }],
+      }),
+      replan: async () => ({ action: 'abandon', reason: 'x' }),
+      destroy: () => {},
+    };
+    coordinator = newCoord(im, wm, reasoner, runner, { mindInstanceId: MIND_ID });
+    await coordinator.submitGoal('Goal');
+    const task = coordinator.getActiveGoals()[0].plan.tasks[0];
+    await runner.endNextTurn('done');
+    await settle();
+    assert.equal(task.status, 'completed');
   });
 
   it('hands the replanner what the arm said before it failed', async () => {
