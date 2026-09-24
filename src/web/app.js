@@ -5006,23 +5006,36 @@
   var $btnProfileAbout = document.getElementById('btn-profile-about');
   var $profileAboutModal = document.getElementById('profile-about-modal');
   var $btnCloseProfileAbout = document.getElementById('btn-close-profile-about');
+  // Toggling `hidden` alone is not enough to show a modal. `.hidden`
+  // only undoes `display: none`; it is `.visible` that supplies the
+  // backdrop, clears the sheet's `translateY(100%)` and restores
+  // `pointer-events`. Without it the dialog rendered translated off the
+  // bottom of the viewport with no backdrop, and because the overlay
+  // kept `pointer-events: none` (which descendants inherit) neither the
+  // close button nor the backdrop could be clicked.
+  function openProfileAbout() {
+    $profileAboutModal.classList.remove('hidden');
+    requestAnimationFrame(function () { $profileAboutModal.classList.add('visible'); });
+  }
+
+  function closeProfileAbout() {
+    $profileAboutModal.classList.remove('visible');
+    // Matches the 0.3s transform transition so the sheet animates out
+    // instead of vanishing.
+    setTimeout(function () { $profileAboutModal.classList.add('hidden'); }, 300);
+  }
+
   if ($btnProfileAbout && $profileAboutModal) {
-    $btnProfileAbout.addEventListener('click', function () {
-      $profileAboutModal.classList.remove('hidden');
-    });
+    $btnProfileAbout.addEventListener('click', openProfileAbout);
   }
   if ($btnCloseProfileAbout && $profileAboutModal) {
-    $btnCloseProfileAbout.addEventListener('click', function () {
-      $profileAboutModal.classList.add('hidden');
-    });
+    $btnCloseProfileAbout.addEventListener('click', closeProfileAbout);
   }
   if ($profileAboutModal) {
     // Close when the operator taps the backdrop, matching the pattern
     // used by the other modals in the dashboard.
     $profileAboutModal.addEventListener('click', function (e) {
-      if (e.target === $profileAboutModal) {
-        $profileAboutModal.classList.add('hidden');
-      }
+      if (e.target === $profileAboutModal) closeProfileAbout();
     });
   }
 
