@@ -2,3 +2,8 @@ node_modules/
 .env
 *.log
 .DS_Store
+
+# Output written by Alien Mind arms that run with this repo as their
+# working directory. It is the user's research, not polpo source.
+research/
+docs/research/
