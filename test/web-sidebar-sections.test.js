@@ -18,6 +18,7 @@ const js = fs.readFileSync(path.join(WEB, 'app.js'), 'utf8');
 
 const SECTIONS = [
   ['mind-section', 'Distributed Mind'],
+  ['gateway-section', 'Gateway Sessions'],
   ['active-section', 'Active Sessions'],
   ['sessions-section', 'Recent Sessions'],
 ];
@@ -57,6 +58,40 @@ describe('sidebar sections', () => {
   it('the three sections appear in order down the sidebar', () => {
     const positions = SECTIONS.map(([id]) => html.indexOf(`id="${id}"`));
     const sorted = [...positions].sort((a, b) => a - b);
-    assert.deepEqual(positions, sorted, 'mind, then active, then recent');
+    assert.deepEqual(positions, sorted, 'mind, gateway, active, then recent');
+  });
+
+  it('groups gateway tasks by their origin tag', () => {
+    assert.match(js, /function gatewayClientOf\(inst\)/);
+    const i = js.indexOf('function gatewayClientOf(inst)');
+    const body = js.slice(i, i + 300);
+    assert.match(body, /indexOf\('gateway:'\) !== 0/);
+  });
+
+  it('actually routes gateway tasks into their own group', () => {
+    // The split must test the origin tag and fill the gateway group,
+    // otherwise the section exists but stays empty forever.
+    assert.match(js, /else if \(gatewayClientOf\(inst\)\) \{\s*gatewayGroup\.push\(inst\);/);
+  });
+
+  it('gateway-section is toggled by how many gateway tasks there are', () => {
+    const i = js.indexOf("getElementById('gateway-section')");
+    assert.ok(i !== -1);
+    const near = js.slice(i, i + 400);
+    assert.match(near, /gatewayGroup\.length > 0/);
+    assert.match(near, /classList\.remove\('hidden'\)/);
+  });
+
+  it('wires clicks and pins on gateway cards too', () => {
+    assert.match(js, /#gateway-list \.instance-card/);
+    assert.match(js, /#gateway-list \.btn-pin/);
+  });
+
+  it('escapes the client label in both its text and its title', () => {
+    const i = js.indexOf('class="client-badge"');
+    assert.ok(i !== -1, 'gateway cards show their client');
+    const near = js.slice(i, i + 220);
+    assert.match(near, /escapeAttr\(gatewayClient\)/);
+    assert.match(near, /escapeHtml\(gatewayClient\)/);
   });
 });

@@ -919,6 +919,16 @@
   }
 
   // ---- Render: Instance card HTML ----
+  /**
+   * The external client behind a gateway task, from its 'gateway:<client>'
+   * origin tag, or null for anything else.
+   */
+  function gatewayClientOf(inst) {
+    var src = inst && typeof inst.source === 'string' ? inst.source : '';
+    if (src.indexOf('gateway:') !== 0) return null;
+    return src.slice('gateway:'.length) || 'unknown';
+  }
+
   function renderInstanceCard(inst) {
     var badgeClass = 'badge badge-' + inst.status;
     var cardClass = 'instance-card ' + inst.status;
@@ -936,8 +946,11 @@
       : inst.name
         ? truncate(inst.name, 60)
         : null;
-    var safeId = escapeHtml(inst.id);
+    // Only ever used inside attributes, so it needs the attribute
+    // escaper; escapeHtml leaves quotes intact.
+    var safeId = escapeAttr(inst.id);
     var safeAgentType = VALID_AGENT_TYPES.indexOf(inst.agentType) !== -1 ? inst.agentType : 'claude';
+    var gatewayClient = gatewayClientOf(inst);
     return (
       '<div class="' + cardClass + '" data-id="' + safeId + '">' +
         '<div class="card-top">' +
@@ -950,6 +963,10 @@
         '<div class="card-meta">' +
           '<span>' + escapeHtml(inst.project || '') + '</span>' +
           '<span class="agent-badge agent-' + safeAgentType + '">' + agentLabel(safeAgentType) + '</span>' +
+          (gatewayClient
+            ? '<span class="client-badge" title="Submitted by ' + escapeAttr(gatewayClient) + ' via the gateway">' +
+                escapeHtml(gatewayClient) + '</span>'
+            : '') +
         '</div>' +
         approvalHtml +
       '</div>'
@@ -1038,6 +1055,9 @@
     // ('Arm: ', 'Mind arm: ') is kept as a fallback for any non-runner
     // path that might still set the display name without the source tag.
     var mindGroup = [];
+    // Tasks external systems submitted through /v1/tasks. Arms spawned for
+    // a gateway GOAL are tagged 'mind:' and stay with the mind above.
+    var gatewayGroup = [];
     var regular = [];
     for (var m = 0; m < arr.length; m++) {
       var inst = arr[m];
@@ -1047,6 +1067,8 @@
         || (inst.name && (inst.name.indexOf('Mind arm: ') === 0 || inst.name.indexOf('Arm: ') === 0));
       if (isMindArm) {
         mindGroup.push(inst);
+      } else if (gatewayClientOf(inst)) {
+        gatewayGroup.push(inst);
       } else {
         regular.push(inst);
       }
@@ -1069,6 +1091,14 @@
       $mindList.innerHTML = '';
     }
 
+    var $gatewaySection = document.getElementById('gateway-section');
+    var $gatewayList = document.getElementById('gateway-list');
+    if ($gatewaySection && $gatewayList) {
+      if (gatewayGroup.length > 0) $gatewaySection.classList.remove('hidden');
+      else $gatewaySection.classList.add('hidden');
+      $gatewayList.innerHTML = gatewayGroup.map(renderInstanceCard).join('');
+    }
+
     // Live instances the mind does not own. This block used to render
     // with no header at all, wedged between Distributed Mind and Recent
     // Sessions, so there was nothing to tell the reader that these are
@@ -1080,13 +1110,13 @@
     }
     $instanceList.innerHTML = regular.map(renderInstanceCard).join('');
 
-    // Attach click handlers to ALL cards (mind section + regular)
-    var allCards = document.querySelectorAll('#mind-list .instance-card, #instance-list .instance-card');
+    // Attach click handlers to ALL cards (mind, gateway and regular)
+    var allCards = document.querySelectorAll('#mind-list .instance-card, #gateway-list .instance-card, #instance-list .instance-card');
     for (var i = 0; i < allCards.length; i++) {
       allCards[i].addEventListener('click', onCardClick);
     }
     // Attach pin handlers
-    var pins = document.querySelectorAll('#mind-list .btn-pin, #instance-list .btn-pin');
+    var pins = document.querySelectorAll('#mind-list .btn-pin, #gateway-list .btn-pin, #instance-list .btn-pin');
     for (var i = 0; i < pins.length; i++) {
       pins[i].addEventListener('click', function (e) {
         e.stopPropagation();
