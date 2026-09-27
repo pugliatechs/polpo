@@ -28,8 +28,13 @@ const { makeLogger } = require('../util/logger');
 const log = makeLogger('gateway');
 
 const VALID_AGENT_TYPES = new Set(['claude', 'codex', 'gemini', 'opencode', 'pi', 'goose']);
-const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;       // 5 min
-const MAX_TIMEOUT_MS_DEFAULT = 30 * 60 * 1000;  // 30 min
+// A task that sends no timeoutMs gets DEFAULT_TIMEOUT_MS; any requested value
+// is capped at MAX_TIMEOUT_MS_DEFAULT. Both are overridable per host
+// (POLPO_GATEWAY_DEFAULT_TIMEOUT_MS / POLPO_GATEWAY_MAX_TIMEOUT_MS). Five
+// minutes was too short for real delegated work (security sweeps, job
+// scans), and the old 30 min cap silently cut callers that asked for 40.
+const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;      // 30 min
+const MAX_TIMEOUT_MS_DEFAULT = 60 * 60 * 1000;  // 60 min
 const TASK_TTL_MS = 5 * 60 * 1000;              // keep completed tasks for 5 min
 
 class GatewayTaskManager extends EventEmitter {
@@ -40,6 +45,7 @@ class GatewayTaskManager extends EventEmitter {
    * @param {string} [opts.hubToken] - Polpo auth token the agent uses to register
    * @param {number} [opts.maxConcurrent=4]
    * @param {number} [opts.maxTimeoutMs] - upper bound on per-task timeout
+   * @param {number} [opts.defaultTimeoutMs] - timeout for tasks that send none
    * @param {boolean} [opts.autoApprove=true] - bypass permissions for gateway agents
    */
   constructor(opts) {
@@ -52,6 +58,7 @@ class GatewayTaskManager extends EventEmitter {
     this.hubToken = opts.hubToken || null;
     this.maxConcurrent = opts.maxConcurrent || 4;
     this.maxTimeoutMs = opts.maxTimeoutMs || MAX_TIMEOUT_MS_DEFAULT;
+    this.defaultTimeoutMs = opts.defaultTimeoutMs || DEFAULT_TIMEOUT_MS;
     this.autoApprove = opts.autoApprove !== false;
     // Optional stores for bidirectional file transfer. Both omitted by
     // default so legacy text-only tasks work unchanged.
@@ -84,7 +91,7 @@ class GatewayTaskManager extends EventEmitter {
    * @returns {Promise<{ taskId: string }>}
    */
   async createTask(input, ctx) {
-    const args = validateInput(input, this.maxTimeoutMs);
+    const args = validateInput(input, this.maxTimeoutMs, this.defaultTimeoutMs);
     const requesterFingerprint = ctx && ctx.tokenFingerprint
       ? String(ctx.tokenFingerprint).slice(0, 64)
       : null;
@@ -628,7 +635,20 @@ function buildArtifactsDirective(dir) {
   ].join('\n');
 }
 
-function validateInput(input, maxTimeoutMs) {
+/**
+ * The timeout a task actually runs with: the requested value when it is a
+ * positive number, otherwise the host default; always capped at the max (a
+ * default configured above the max is capped too).
+ */
+function resolveTaskTimeout(requested, limits) {
+  const maxTimeoutMs = limits.maxTimeoutMs;
+  const wanted = (requested && Number.isFinite(requested) && requested > 0)
+    ? requested
+    : limits.defaultTimeoutMs;
+  return Math.min(wanted, maxTimeoutMs);
+}
+
+function validateInput(input, maxTimeoutMs, defaultTimeoutMs) {
   if (!input || typeof input !== 'object') {
     const err = new Error('invalid_body');
     err.code = 'invalid_body';
@@ -766,9 +786,10 @@ function validateInput(input, maxTimeoutMs) {
     throw err;
   }
 
-  const resolvedTimeout = (timeoutMs && Number.isFinite(timeoutMs) && timeoutMs > 0)
-    ? Math.min(timeoutMs, maxTimeoutMs)
-    : DEFAULT_TIMEOUT_MS;
+  const resolvedTimeout = resolveTaskTimeout(timeoutMs, {
+    maxTimeoutMs,
+    defaultTimeoutMs: defaultTimeoutMs || DEFAULT_TIMEOUT_MS,
+  });
 
   return {
     agentType,
@@ -791,4 +812,5 @@ module.exports = {
   DEFAULT_TIMEOUT_MS,
   MAX_TIMEOUT_MS_DEFAULT,
   TASK_TTL_MS,
+  resolveTaskTimeout,
 };

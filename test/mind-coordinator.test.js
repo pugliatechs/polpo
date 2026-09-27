@@ -1787,3 +1787,53 @@ describe('Coordinator: carrying on from a finished goal', () => {
     assert.equal(coordinator.getGoalResult(null).id, goalId, 'defaults to the latest');
   });
 });
+
+describe('Coordinator: per-task timeout for arms', () => {
+  let im, wm, runner;
+  const MIND_ID = 'mind-001';
+  const plan = { tasks: [{ description: 'sweep', prompt: 'do it' }] };
+
+  beforeEach(() => {
+    im = createMockIM();
+    im.register({ id: MIND_ID, name: 'Alien Mind', agentType: 'mind' });
+    wm = new WorldModel(im, MIND_ID);
+    runner = createMockRunner(im);
+  });
+
+  afterEach(() => {
+    delete process.env.POLPO_MIND_TASK_TIMEOUT_MS;
+    runner.destroy();
+    wm.destroy();
+  });
+
+  it("uses the policy's taskTimeoutMs (it was ignored for a fixed 5 min)", () => {
+    const { POLICIES } = require('../src/mind/policies');
+    const balanced = POLICIES.balanced;
+    const c = newCoord(im, wm, createMockReasoner(), runner, { policy: balanced });
+    assert.equal(c._buildTaskPlan('goal-p1', plan).tasks[0].timeoutMs, balanced.taskTimeoutMs);
+    assert.equal(balanced.taskTimeoutMs, 30 * 60 * 1000);
+    c.destroy();
+
+    process.env.POLPO_MIND_TASK_TIMEOUT_MS = String(50 * 60 * 1000);
+    const envWins = newCoord(im, wm, createMockReasoner(), runner, { policy: balanced });
+    assert.equal(envWins._buildTaskPlan('goal-p2', plan).tasks[0].timeoutMs, 50 * 60 * 1000);
+    envWins.destroy();
+  });
+
+  it('defaults each planned task to 30 min without a policy (was a fixed 5 min)', () => {
+    const c = newCoord(im, wm, createMockReasoner(), runner);
+    assert.equal(c._buildTaskPlan('goal-t1', plan).tasks[0].timeoutMs, 30 * 60 * 1000);
+    c.destroy();
+  });
+
+  it('takes the option first, then POLPO_MIND_TASK_TIMEOUT_MS', () => {
+    process.env.POLPO_MIND_TASK_TIMEOUT_MS = String(20 * 60 * 1000);
+    const fromEnv = newCoord(im, wm, createMockReasoner(), runner);
+    assert.equal(fromEnv._buildTaskPlan('goal-t2', plan).tasks[0].timeoutMs, 20 * 60 * 1000);
+    fromEnv.destroy();
+
+    const fromOpt = newCoord(im, wm, createMockReasoner(), runner, { taskTimeoutMs: 45 * 60 * 1000 });
+    assert.equal(fromOpt._buildTaskPlan('goal-t3', plan).tasks[0].timeoutMs, 45 * 60 * 1000);
+    fromOpt.destroy();
+  });
+});

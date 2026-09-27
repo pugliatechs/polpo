@@ -39,7 +39,8 @@
 const { EventEmitter } = require('events');
 const { createAgent } = require('./agent-factory');
 
-const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;       // 5 min — same as gateway
+// Fallback only: the gateway and the mind always pass their own timeoutMs.
+const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;      // 30 min, same as the gateway default
 const WS_READY_TIMEOUT_MS = 5000;
 
 class OneShotAgentRunner extends EventEmitter {
@@ -86,7 +87,7 @@ class OneShotAgentRunner extends EventEmitter {
    * @param {string} opts.name            instance display name ("Gateway: openclaw")
    * @param {string} opts.source          origin tag ("gateway:openclaw", "mind:goal-42")
    * @param {string} [opts.project]       project label; defaults to basename(cwd)
-   * @param {number} [opts.timeoutMs]     per-run deadline (default 5 min),
+   * @param {number} [opts.timeoutMs]     per-run deadline (default 30 min),
    *   measured across the whole run including any follow-up turns
    * @param {number} [opts.maxTurns]      how many agent turns this run may
    *   take (default 1, the classic one-shot). Values above 1 only have an

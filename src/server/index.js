@@ -302,6 +302,7 @@ function createServer(options = {}) {
       hubToken: authState.enabled ? authState.token : null,
       maxConcurrent: options.gateway.maxConcurrent || parseInt(process.env.POLPO_GATEWAY_MAX_CONCURRENT, 10) || 4,
       maxTimeoutMs: options.gateway.maxTimeoutMs || parseInt(process.env.POLPO_GATEWAY_MAX_TIMEOUT_MS, 10) || undefined,
+      defaultTimeoutMs: options.gateway.defaultTimeoutMs || parseInt(process.env.POLPO_GATEWAY_DEFAULT_TIMEOUT_MS, 10) || undefined,
       uploadStore,
       artifactStore,
     });

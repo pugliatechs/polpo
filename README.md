@@ -755,9 +755,11 @@ Connect to `ws://<host>:<port>?role=agent&instanceId=<id>` as an agent.
 | `POLPO_TIMEOUT` | `300000` | Approval timeout in ms (default 5 min) |
 | `POLPO_MIND` | `0` | Set to `1` to enable the Alien Mind (experimental) |
 | `POLPO_MIND_POLICY` | `balanced` | Mind autonomy level: `conservative` \| `balanced` \| `autonomous` |
+| `POLPO_MIND_TASK_TIMEOUT_MS` | from the policy | Deadline for each task a goal runs (policy default: 15 / 30 / 45 min) |
 | `POLPO_GATEWAY_KEY` | persisted file | Override the gateway API key |
 | `POLPO_GATEWAY_MAX_CONCURRENT` | `4` | Max in-flight gateway tasks |
-| `POLPO_GATEWAY_MAX_TIMEOUT_MS` | `1800000` | Hard cap on per-task timeout (30 min) |
+| `POLPO_GATEWAY_DEFAULT_TIMEOUT_MS` | `1800000` | Timeout for a task that sends no `timeoutMs` (30 min) |
+| `POLPO_GATEWAY_MAX_TIMEOUT_MS` | `3600000` | Hard cap on per-task timeout (60 min) |
 | `POLPO_GATEWAY_MAX_UPLOAD_SIZE` | `26214400` | Per-upload byte cap (25 MB decoded) |
 
 ## Testing

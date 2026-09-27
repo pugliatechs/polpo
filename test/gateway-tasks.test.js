@@ -202,6 +202,52 @@ describe('GatewayTaskManager: validation', () => {
     const snap = tm.getTask(taskId);
     assert.ok(snap);
     assert.ok(snap.status === 'starting' || snap.status === 'running');
+    assert.equal(tm._tasks.get(taskId).timeoutMs, 1000);
+  });
+
+  it('gives a task that sends no timeout the 30 min default, and allows 40 min under the 60 min cap', async () => {
+    const { taskId: implicit } = await tm.createTask({ agentType: 'claude', cwd: '/tmp', prompt: 'x' });
+    assert.equal(tm._tasks.get(implicit).timeoutMs, 30 * 60 * 1000);
+    const { taskId: long } = await tm.createTask({
+      agentType: 'claude', cwd: '/tmp', prompt: 'x', timeoutMs: 40 * 60 * 1000,
+    });
+    // job scans ask for 40 min; the old 30 min cap cut them short silently
+    assert.equal(tm._tasks.get(long).timeoutMs, 40 * 60 * 1000);
+  });
+
+  it('uses the host-configured default for tasks that send no timeout', async () => {
+    tm.destroy();
+    tm = new GatewayTaskManager({
+      instanceManager: im, hubPort: 7890,
+      defaultTimeoutMs: 45 * 60 * 1000,
+      createAgent: (type, opts) => createFakeAgent(im, type, opts),
+      waitForSocket: async () => {},
+    });
+    const { taskId } = await tm.createTask({ agentType: 'claude', cwd: '/tmp', prompt: 'x' });
+    assert.equal(tm._tasks.get(taskId).timeoutMs, 45 * 60 * 1000);
+  });
+});
+
+describe('resolveTaskTimeout', () => {
+  const { resolveTaskTimeout } = require('../src/server/gateway-tasks');
+  const limits = { defaultTimeoutMs: 30 * 60 * 1000, maxTimeoutMs: 60 * 60 * 1000 };
+
+  it('uses the default when no valid timeout is requested', () => {
+    for (const bad of [undefined, null, 0, -5, NaN, Infinity]) {
+      assert.equal(resolveTaskTimeout(bad, limits), 30 * 60 * 1000);
+    }
+  });
+
+  it('keeps a requested timeout under the cap and clamps one above it', () => {
+    assert.equal(resolveTaskTimeout(120000, limits), 120000);
+    assert.equal(resolveTaskTimeout(3 * 60 * 60 * 1000, limits), 60 * 60 * 1000);
+  });
+
+  it('never lets a configured default exceed the cap', () => {
+    assert.equal(
+      resolveTaskTimeout(undefined, { defaultTimeoutMs: 90 * 60 * 1000, maxTimeoutMs: 60 * 60 * 1000 }),
+      60 * 60 * 1000
+    );
   });
 });
 

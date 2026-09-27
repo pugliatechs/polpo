@@ -31,7 +31,7 @@ var POLICIES = {
     maxArmTurns: 1,
     maxConcurrentTasks: 2,
     maxSpawnedAgents: 2,
-    taskTimeoutMs: 300000, // 5 min
+    taskTimeoutMs: 15 * 60 * 1000, // 15 min
     stuckThresholdMs: 10 * 60 * 1000, // 10 min
     watcherIntervalMs: 30000, // 30s
   },
@@ -44,7 +44,7 @@ var POLICIES = {
     maxArmTurns: 2,
     maxConcurrentTasks: 4,
     maxSpawnedAgents: 4,
-    taskTimeoutMs: 600000, // 10 min
+    taskTimeoutMs: 30 * 60 * 1000, // 30 min
     stuckThresholdMs: 15 * 60 * 1000, // 15 min
     watcherIntervalMs: 30000,
   },
@@ -57,7 +57,7 @@ var POLICIES = {
     maxArmTurns: 3,
     maxConcurrentTasks: 8,
     maxSpawnedAgents: 6,
-    taskTimeoutMs: 900000, // 15 min
+    taskTimeoutMs: 45 * 60 * 1000, // 45 min
     stuckThresholdMs: 20 * 60 * 1000, // 20 min
     watcherIntervalMs: 30000,
   },

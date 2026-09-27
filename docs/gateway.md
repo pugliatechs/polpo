@@ -107,7 +107,7 @@ Create a one-shot task. The body:
 | `agentType` | yes | `claude` \| `codex` \| `gemini` \| `opencode` \| `pi` \| `goose` |
 | `cwd` | yes | Absolute path that must exist on the host. Validated before the agent is spawned. |
 | `prompt` | yes | ≤ 50 000 chars |
-| `timeoutMs` | no | Default 5 min, hard-capped at `POLPO_GATEWAY_MAX_TIMEOUT_MS` (default 30 min) |
+| `timeoutMs` | no | Default `POLPO_GATEWAY_DEFAULT_TIMEOUT_MS` (30 min), hard-capped at `POLPO_GATEWAY_MAX_TIMEOUT_MS` (60 min) |
 | `client` | no | Free-form label, also overrideable via `X-Polpo-Client` header. Becomes `source: 'gateway:<client>'` on the spawned instance and shows up in the dashboard. |
 | `model` | no | Opaque string the gateway forwards to the spawned agent. Format is agent-specific (see table below). When omitted, the agent uses whatever its CLI defaults to on the host. |
 | `attachments` | no | Up to 20 entries. Each must reference an `uploadId` created earlier by the same caller. |
@@ -608,7 +608,8 @@ The full reference for the response shape, scoring heuristics, and privacy model
 |---------|---------|--------|
 | `POLPO_GATEWAY_KEY` | persisted to `~/.config/polpo/gateway.json` | Override the API key |
 | `POLPO_GATEWAY_MAX_CONCURRENT` | 4 | Concurrent in-flight tasks |
-| `POLPO_GATEWAY_MAX_TIMEOUT_MS` | 30 × 60 × 1000 | Hard cap on per-task `timeoutMs` |
+| `POLPO_GATEWAY_DEFAULT_TIMEOUT_MS` | 30 × 60 × 1000 | Timeout for a task that sends no `timeoutMs` |
+| `POLPO_GATEWAY_MAX_TIMEOUT_MS` | 60 × 60 × 1000 | Hard cap on per-task `timeoutMs` (a larger request is clamped) |
 | `POLPO_GATEWAY_MAX_UPLOAD_SIZE` | 25 × 1024 × 1024 | Per-upload byte cap (decoded) |
 
 ## File Layout (server-side)

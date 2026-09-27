@@ -308,7 +308,7 @@ The store is then cleared, so a clean shutdown after this report is well-defined
 
 ## Failure Handling
 
-- **Task timeout**: 5–15 minutes per task depending on policy, enforced by the runner. Timed-out tasks go through the re-plan flow.
+- **Task timeout**: 15–45 minutes per task depending on policy (`POLPO_MIND_TASK_TIMEOUT_MS` overrides it), enforced by the runner. Timed-out tasks go through the re-plan flow.
 - **Spawn failure**: if the runner can't bring the agent up (bad cwd, WS handshake timeout, etc.), the run resolves with `status: 'failed'` and the coordinator routes that into the re-plan flow.
 - **Approval requested**: the runner fails closed with `approval_required` (no human in the loop), then re-plan runs.
 - **Dependency failure**: if a task abandons, all transitively-dependent tasks cascade-fail.
@@ -361,9 +361,11 @@ Three autonomy levels control the mind's behavior:
 
 | Policy | Auto-approve spawned | Max concurrent tasks | Task timeout | Stuck threshold | Auto-act on stuck | Action multiplier |
 |--------|---------------------|----------------------|--------------|-----------------|-------------------|-------------------|
-| `conservative`        | No  | 2 | 5 min  | 10 min | No  | — |
-| `balanced` (default)  | Yes | 4 | 10 min | 15 min | Yes | 2× (act at 30 min) |
-| `autonomous`          | Yes | 8 | 15 min | 20 min | Yes | 1× (act at 20 min) |
+| `conservative`        | No  | 2 | 15 min | 10 min | No  | — |
+| `balanced` (default)  | Yes | 4 | 30 min | 15 min | Yes | 2× (act at 30 min) |
+| `autonomous`          | Yes | 8 | 45 min | 20 min | Yes | 1× (act at 20 min) |
+
+The stuck threshold counts time since an arm's **last activity**, not its total run time, so an arm that keeps working is never cut off by it before its task timeout.
 
 The `maxSpawnedAgents` field in earlier versions was a pool ceiling; with one-shot dispatch every task spawns a fresh agent so the meaningful cap is `maxConcurrentTasks`. The runner enforces concurrency at the call site.
 

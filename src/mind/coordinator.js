@@ -82,6 +82,13 @@ class Coordinator extends EventEmitter {
     this.finishedGoalTtlMs = positiveInt(opts.finishedGoalTtlMs)
       || positiveInt(process.env.POLPO_MIND_GOAL_TTL_MS)
       || 60 * 60 * 1000;
+    // Deadline for each task an arm runs. It used to be a fixed 5 min that
+    // ignored the policy's taskTimeoutMs and cut real work (sweeps, scans,
+    // multi-file changes) off mid-run.
+    this.taskTimeoutMs = positiveInt(opts.taskTimeoutMs)
+      || positiveInt(process.env.POLPO_MIND_TASK_TIMEOUT_MS)
+      || positiveInt(this.policy && this.policy.taskTimeoutMs)
+      || 30 * 60 * 1000;
 
     this._goals = new Map();         // goalId -> Goal
     this._taskToAgent = new Map();   // agentId -> taskId (live runs only)
@@ -408,6 +415,7 @@ class Coordinator extends EventEmitter {
    * Build internal task objects from the reasoner's plan.
    */
   _buildTaskPlan(goalId, plan) {
+    var taskTimeoutMs = this.taskTimeoutMs;
     var tasks = (plan.tasks || []).map(function (t, idx) {
       return {
         id: 'task-' + uuidv4().slice(0, 8),
@@ -422,7 +430,7 @@ class Coordinator extends EventEmitter {
         agentId: null,
         result: null,
         output: null, // Last assistant text from the arm (captured on completion)
-        timeoutMs: 300000, // 5 min default
+        timeoutMs: taskTimeoutMs,
         startedAt: null,
         completedAt: null,
         replanCount: 0, // Number of times this task has been re-planned

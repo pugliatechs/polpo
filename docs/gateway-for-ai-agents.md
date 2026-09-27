@@ -109,7 +109,7 @@ Request body:
 | `agentType` | yes | `claude` \| `codex` \| `gemini` \| `opencode` \| `pi` \| `goose` |
 | `cwd` | yes | Absolute path that **must exist on the host**. Don't invent paths — discover them via `/v1/sessions`. |
 | `prompt` | yes | ≤ 50 000 chars. Be specific and self-sufficient — see Section 8. |
-| `timeoutMs` | no | Default 5 min, max 30 min. |
+| `timeoutMs` | no | Default 30 min, max 60 min (host-configurable). A larger value is clamped to the max, not rejected. |
 | `client` | no | Free label; also overrideable via `X-Polpo-Client` header. |
 | `model` | no | Opaque string passed to the agent. Format is agent-specific (see below). Omit to use the host's CLI default. |
 | `attachments` | no | ≤ 20 entries, each referencing an `uploadId` you created earlier. |
@@ -573,7 +573,7 @@ Ask a goal   POST /v1/goals/:id/ask          body: {question}  → {answer}
 
 Bounds       q:           2..200 chars
              limit:       1..(50 sessions / 100 messages / 200 catalogue)
-             timeoutMs:   <= 30 min (default 5 min)
+             timeoutMs:   <= 60 min (default 30 min)
              upload size: <= 25 MB decoded
              attachments: <= 20 per task
              :id pattern: [A-Za-z0-9._-]{1,200}
