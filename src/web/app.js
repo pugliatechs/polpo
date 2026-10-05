@@ -603,7 +603,13 @@
 
     ws.onopen = function () {
       setConnectionState('connected');
+      var isReconnect = wasConnected;
       wasConnected = true;
+      // Server broadcasts like tunnel:changed only reach tabs that are
+      // connected at that moment. A rotation that happened while this
+      // tab was away (laptop asleep, network blip) used to leave the old
+      // tunnel QR on screen until a full reload, so re-sync it here.
+      if (isReconnect) loadQrCodes();
       reconnectDelay = 1000;
       isReconnecting = false;
       markAlive = startHeartbeatCheck();
