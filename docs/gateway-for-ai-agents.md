@@ -37,6 +37,10 @@ Failure modes you must handle:
 - `429 search_in_progress` — another search is already running on this host; wait ~1 s and retry
 - `503 *_not_supported` — the feature isn't enabled on this host; pick a different path
 
+If the base URL you were given ends in `.trycloudflare.com`, the host is reachable through a Cloudflare quick tunnel. Two consequences:
+- Cloudflare does not support Server-Sent Events over quick tunnels, so the `/stream` endpoints can stall or be cut off. Poll `GET /v1/tasks/:id` or `GET /v1/goals/:id` every few seconds instead.
+- The hostname changes whenever the tunnel is restarted. If a URL that worked starts failing DNS resolution or refusing connections, it has most likely been replaced. Ask the operator for the new one rather than retrying the old one.
+
 ---
 
 ## 2. Endpoint catalogue (decide which to call)

@@ -350,6 +350,19 @@ async function runServer() {
         tunnelLog.warn('Retrying in the background; the URL and QR code will be printed here when it comes up. The server is reachable on LAN meanwhile.');
       });
 
+      // The tunnel died, or was found connected to nothing. Stop handing
+      // out its URL right away: until now the QR code and /api/qr-codes
+      // kept advertising a dead hostname for as long as the restart took,
+      // or indefinitely when the death went unnoticed.
+      supervisor.on('down', () => {
+        tunnel = null;
+        tunnelLog.warn('Tunnel down; restarting it. The tunnel QR code is hidden until a new URL is up.');
+        if (typeof server.setTunnelInfo === 'function') server.setTunnelInfo(null);
+        if (typeof server.broadcastToDashboards === 'function') {
+          server.broadcastToDashboards({ type: 'tunnel:down' });
+        }
+      });
+
       supervisor.on('gave-up', () => {
         // The supervisor has already logged why, with the last error.
         tunnel = null;

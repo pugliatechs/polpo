@@ -276,6 +276,10 @@ A tunnel that fails to start is retried in the background with backoff, and the 
 
 A timeout reaching `api.trycloudflare.com` like this one usually means something on the network path is blocking it, such as a VPN. After ten attempts within an hour polpo stops retrying and names the last error; restart it once the network is fixed.
 
+A cloudflared tunnel is also restarted when its process is still running but the tunnel is no longer connected. Cloudflare can drop a quick tunnel at any time: when it does, cloudflared keeps running and retrying while the hostname stops resolving, so watching the process alone is not enough. polpo asks cloudflared every minute how many live connections it has, and after three minutes with none it replaces the tunnel, announces the new URL, and stops showing the old QR code in the meantime (`POLPO_TUNNEL_HEALTH_INTERVAL_MS`, `POLPO_TUNNEL_UNHEALTHY_AFTER_MS`).
+
+Quick tunnels are meant for testing. Cloudflare gives them no uptime guarantee, caps them at 200 in-flight requests, and does not support Server-Sent Events over them, which affects the gateway's `/stream` endpoints. For an always-on setup, especially one serving external agents through the gateway, use a named Cloudflare tunnel or another provider.
+
 ## Remote Sessions (Full Control)
 
 The `session` command spawns a CLI process with JSON streaming and gives your phone full bidirectional control. Use `--agent` to select the agent type.

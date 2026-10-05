@@ -837,10 +837,13 @@
         break;
 
       case 'tunnel:down':
-        // Supervisor gave up. Hide the stale QR rather than leaving a
-        // code that resolves to a dead URL.
+        // The tunnel is down (restarting, or given up). Hide the stale
+        // tunnel QR rather than leaving a code that resolves to a dead
+        // URL, then reload: the server has already dropped the tunnel,
+        // so whatever comes back (the authenticator QR) is still valid.
         var qrSection = document.getElementById('qr-codes-section');
         if (qrSection) qrSection.classList.add('hidden');
+        loadQrCodes();
         break;
 
       case 'outbox_update':

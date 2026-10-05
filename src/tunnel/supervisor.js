@@ -47,6 +47,11 @@ const INITIAL_BACKOFF_MS = 1000;
 const MAX_BACKOFF_MS = 60000;
 const STABLE_AFTER_MS = 60000;        // survive this long => reset backoff
 const MAX_ROTATIONS_PER_HOUR = 10;
+// Health watchdog, for providers that can report whether the tunnel is
+// connected (cloudflared). A tunnel with no live connection for this
+// long is treated as dead even though its process is still running.
+const HEALTH_INTERVAL_MS = 60 * 1000;
+const UNHEALTHY_AFTER_MS = 3 * 60 * 1000;
 const ROTATION_WINDOW_MS = 60 * 60 * 1000;
 
 class TunnelSupervisor extends EventEmitter {
@@ -60,6 +65,10 @@ class TunnelSupervisor extends EventEmitter {
    * @param {number} [opts.stableAfterMs]
    * @param {function} [opts.now] - injectable clock for tests
    * @param {function} [opts.setTimeoutFn] - injectable timer for tests
+   * @param {number} [opts.healthIntervalMs] - how often to ask a provider
+   *   whether its tunnel is connected (env POLPO_TUNNEL_HEALTH_INTERVAL_MS)
+   * @param {number} [opts.unhealthyAfterMs] - how long without a live
+   *   connection before restarting (env POLPO_TUNNEL_UNHEALTHY_AFTER_MS)
    */
   constructor(opts) {
     super();
@@ -75,6 +84,12 @@ class TunnelSupervisor extends EventEmitter {
     this._now = opts.now || Date.now;
     this._setTimeout = opts.setTimeoutFn || setTimeout;
     this.log = opts.logger || makeLogger('tunnel-supervisor');
+    this._healthInterval = positiveInt(opts.healthIntervalMs)
+      || positiveInt(process.env.POLPO_TUNNEL_HEALTH_INTERVAL_MS)
+      || HEALTH_INTERVAL_MS;
+    this._unhealthyAfter = positiveInt(opts.unhealthyAfterMs)
+      || positiveInt(process.env.POLPO_TUNNEL_UNHEALTHY_AFTER_MS)
+      || UNHEALTHY_AFTER_MS;
 
     this._handle = null;          // current provider handle
     this._url = null;
@@ -85,6 +100,8 @@ class TunnelSupervisor extends EventEmitter {
     this._retryTimer = null;
     this._gaveUp = false;
     this._lastError = null;       // why the most recent attempt failed
+    this._healthTimer = null;
+    this._unhealthySince = null;  // first check that found no live connection
   }
 
   get url() {
@@ -137,6 +154,10 @@ class TunnelSupervisor extends EventEmitter {
       clearTimeout(this._retryTimer);
       this._retryTimer = null;
     }
+    if (this._healthTimer) {
+      clearTimeout(this._healthTimer);
+      this._healthTimer = null;
+    }
     if (this._handle && typeof this._handle.close === 'function') {
       try { this._handle.close(); } catch {}
     }
@@ -162,7 +183,65 @@ class TunnelSupervisor extends EventEmitter {
         '(URL: ' + handle.url + ')'
       );
     }
+    this._watchHealth(handle);
     this.emit('url', { url: this._url, supervised: this.supervised });
+  }
+
+  /**
+   * Restart a tunnel whose process is alive but which has lost its
+   * connection to the provider.
+   *
+   * The exit watch alone missed this. Cloudflare dropped a quick tunnel
+   * after 11 days; cloudflared kept running and retrying (2049 rejected
+   * re-registrations) while the hostname stopped resolving, and polpo
+   * went on advertising the dead URL because no process ever exited.
+   *
+   * Only an explicit "no live connections" counts against the tunnel.
+   * A check that cannot get an answer is ignored, so a slow metrics
+   * endpoint never causes a restart by itself.
+   */
+  _watchHealth(handle) {
+    if (!handle || typeof handle.health !== 'function') return;
+    this._unhealthySince = null;
+
+    const tick = () => {
+      this._healthTimer = null;
+      if (this._stopping || handle !== this._handle) return;
+      Promise.resolve()
+        .then(() => handle.health())
+        .catch(() => null)
+        .then((state) => {
+          if (this._stopping || handle !== this._handle) return;
+          if (state && state.readyConnections === 0) {
+            if (this._unhealthySince === null) this._unhealthySince = this._now();
+            const downFor = this._now() - this._unhealthySince;
+            if (downFor >= this._unhealthyAfter) {
+              this._restartUnhealthy(handle, downFor);
+              return;
+            }
+          } else if (state && state.readyConnections > 0) {
+            this._unhealthySince = null;
+          }
+          this._healthTimer = this._setTimeout(tick, this._healthInterval);
+        });
+    };
+    this._healthTimer = this._setTimeout(tick, this._healthInterval);
+  }
+
+  _restartUnhealthy(handle, downForMs) {
+    this.log.warn(
+      'tunnel has had no live connection for ' + Math.round(downForMs / 1000) +
+      's although its process is running (URL: ' + handle.url + '); restarting it'
+    );
+    this.emit('unhealthy', { url: handle.url, downForMs });
+    if (typeof handle.onExit === 'function' && typeof handle.close === 'function') {
+      // Killing the process lands in the normal death path, which
+      // restarts with backoff and announces the new URL.
+      try { handle.close(); } catch {}
+    } else {
+      try { if (typeof handle.close === 'function') handle.close(); } catch {}
+      this._onProviderExit();
+    }
   }
 
   _onProviderExit() {
@@ -245,6 +324,15 @@ class TunnelSupervisor extends EventEmitter {
 }
 
 /**
+ * Coerce to a positive integer, or null, so a malformed env var falls
+ * through to the default.
+ */
+function positiveInt(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+}
+
+/**
  * ': message' for the give-up line, kept on one line and short.
  */
 function errorSuffix(message) {
@@ -253,6 +341,8 @@ function errorSuffix(message) {
 
 module.exports = {
   TunnelSupervisor,
+  HEALTH_INTERVAL_MS,
+  UNHEALTHY_AFTER_MS,
   INITIAL_BACKOFF_MS,
   MAX_BACKOFF_MS,
   STABLE_AFTER_MS,

@@ -126,3 +126,94 @@ describe('providers report why they failed to start', () => {
     );
   });
 });
+
+describe('cloudflared health check', () => {
+  const http = require('http');
+  const { checkReady } = require('../src/tunnel/cloudflared');
+
+  // A stand-in for cloudflared's metrics server.
+  function metricsServer(status, body) {
+    return new Promise((resolve) => {
+      const srv = http.createServer((req, res) => {
+        srv.hits = (srv.hits || 0) + 1;
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(body);
+      });
+      srv.listen(0, '127.0.0.1', () => resolve(srv));
+    });
+  }
+  const addr = (srv) => '127.0.0.1:' + srv.address().port;
+
+  it('reads a connected tunnel', async () => {
+    const srv = await metricsServer(200, '{"status":200,"readyConnections":2}');
+    try { assert.deepEqual(await checkReady(addr(srv)), { readyConnections: 2 }); }
+    finally { srv.close(); }
+  });
+
+  it('reads a disconnected tunnel from the 503 cloudflared returns', async () => {
+    const srv = await metricsServer(503, '{"status":503,"readyConnections":0}');
+    try { assert.deepEqual(await checkReady(addr(srv)), { readyConnections: 0 }); }
+    finally { srv.close(); }
+  });
+
+  it('reports unknown, not disconnected, for anything it cannot read', async () => {
+    for (const body of ['not json', '{}', '{"readyConnections":-1}', '{"readyConnections":"1"}']) {
+      const srv = await metricsServer(200, body);
+      try { assert.equal(await checkReady(addr(srv)), null, body); }
+      finally { srv.close(); }
+    }
+    assert.equal(await checkReady('127.0.0.1:1'), null, 'nothing listening');
+    assert.equal(await checkReady(null), null, 'no address known');
+  });
+
+  describe('through the real provider', () => {
+    let binDir;
+    const savedPath = process.env.PATH;
+    before(() => {
+      binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'polpo-fake-cf-'));
+      process.env.PATH = binDir + path.delimiter + savedPath;
+    });
+    after(() => {
+      process.env.PATH = savedPath;
+      fs.rmSync(binDir, { recursive: true, force: true });
+    });
+
+    function fakeCloudflared(metricsLine) {
+      fs.writeFileSync(path.join(binDir, 'cloudflared'), [
+        '#!/bin/sh',
+        `echo '${metricsLine}' >&2`,
+        `echo 'INF |  Your quick Tunnel has been created! Visit it at (it may take some time to be reachable):  |' >&2`,
+        `echo 'INF |  https://fake-health-check.trycloudflare.com  |' >&2`,
+        'exec sleep 30',
+      ].join('\n') + '\n', { mode: 0o755 });
+    }
+
+    it('finds the metrics server from cloudflared\'s own output', async () => {
+      const srv = await metricsServer(503, '{"readyConnections":0}');
+      fakeCloudflared('2026-10-05T20:57:58Z INF Starting metrics server on ' + addr(srv) + '/metrics');
+      const { start } = require('../src/tunnel/cloudflared');
+      const handle = await start(1);
+      try {
+        assert.equal(handle.url, 'https://fake-health-check.trycloudflare.com');
+        assert.deepEqual(await handle.health(), { readyConnections: 0 });
+      } finally {
+        handle.close();
+        srv.close();
+      }
+    });
+
+    it('never queries a metrics address that is not loopback', async () => {
+      const srv = await metricsServer(200, '{"readyConnections":1}');
+      fakeCloudflared('INF Starting metrics server on 10.20.30.40:' + srv.address().port + '/metrics');
+      const { start } = require('../src/tunnel/cloudflared');
+      const handle = await start(1);
+      try {
+        assert.equal(await handle.health(), null);
+        assert.equal(srv.hits || 0, 0);
+      } finally {
+        handle.close();
+        srv.close();
+      }
+    });
+  });
+});

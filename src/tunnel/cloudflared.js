@@ -1,4 +1,5 @@
 const { spawn, execFileSync } = require('child_process');
+const http = require('http');
 const { createOutputTail } = require('./output-tail');
 
 const name = 'cloudflared';
@@ -19,6 +20,47 @@ const QUICK_TUNNEL_URL = /https:\/\/[a-z0-9]+(?:-[a-z0-9]+)+\.trycloudflare\.com
 // the success line. If cloudflared ever changes this wording, the
 // tightened regex above still keeps us correct on its own.
 const READY_MARKER = /your quick tunnel has been created/i;
+
+// cloudflared announces its local metrics server at startup, e.g.
+// "INF Starting metrics server on 127.0.0.1:20241/metrics". Its /ready
+// endpoint reports how many live connections the tunnel has to
+// Cloudflare's edge.
+const METRICS_LINE = /Starting metrics server on ((?:127\.0\.0\.1|localhost|\[::1\]):\d{2,5})/;
+
+/**
+ * Ask cloudflared whether the tunnel is actually connected.
+ *
+ * The process staying alive proves nothing: when Cloudflare drops a quick
+ * tunnel, cloudflared keeps running and retrying forever while the
+ * hostname no longer resolves. Seen after 11 days, with 2049 rejected
+ * re-registrations and polpo still advertising the dead URL.
+ *
+ * Only ever queries a loopback address parsed from cloudflared's own
+ * output.
+ *
+ * @param {?string} addr - host:port of the metrics server
+ * @returns {Promise<?{readyConnections: number}>} null when unknown
+ */
+function checkReady(addr) {
+  if (!addr) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const req = http.get('http://' + addr + '/ready', { timeout: 3000 }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { if (body.length < 4096) body += c; });
+      res.on('end', () => {
+        try {
+          const n = JSON.parse(body).readyConnections;
+          resolve(Number.isInteger(n) && n >= 0 ? { readyConnections: n } : null);
+        } catch {
+          resolve(null);
+        }
+      });
+    });
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+    req.on('error', () => resolve(null));
+  });
+}
 
 function extractTunnelUrl(text, opts) {
   const requireMarker = !!(opts && opts.requireMarker);
@@ -44,6 +86,7 @@ function start(port) {
 
     let resolved = false;
     let markerSeen = false;
+    let metricsAddr = null;
     // What cloudflared said, so a startup failure can report why.
     const tail = createOutputTail();
 
@@ -58,6 +101,10 @@ function start(port) {
     function onData(data) {
       const line = data.toString();
       if (!resolved) tail.push(line);
+      if (!metricsAddr) {
+        const m = line.match(METRICS_LINE);
+        if (m) metricsAddr = m[1];
+      }
       if (!markerSeen && READY_MARKER.test(line)) {
         markerSeen = true;
       }
@@ -79,6 +126,9 @@ function start(port) {
           // silently dead and the dashboard keeps advertising a URL
           // that 404s.
           onExit: (cb) => child.once('exit', cb),
+          // Whether the tunnel is connected, as opposed to merely running.
+          // Consumed by TunnelSupervisor's health watchdog.
+          health: () => checkReady(metricsAddr),
         });
       }
     }
@@ -118,6 +168,7 @@ module.exports = {
   isAvailable,
   start,
   // Exported for tests:
+  checkReady,
   extractTunnelUrl,
   QUICK_TUNNEL_URL,
   READY_MARKER,

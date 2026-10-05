@@ -461,3 +461,138 @@ describe('TunnelSupervisor: a tunnel that fails at startup', () => {
     assert.deepEqual(urls, []);
   });
 });
+
+describe('TunnelSupervisor: health watchdog', () => {
+  // A quick tunnel can lose its connection while cloudflared keeps
+  // running and retrying. Seen after 11 days: 2049 rejected
+  // re-registrations, an NXDOMAIN hostname, and polpo still advertising
+  // it because no process ever exited.
+
+  /** Provider whose tunnels report a controllable connection count. */
+  function healthProvider() {
+    const handles = [];
+    let n = 0;
+    const startTunnel = async () => {
+      n++;
+      let exitCb = null;
+      const handle = {
+        url: 'https://tunnel-number-' + n + '.trycloudflare.com',
+        connections: 1,
+        healthCalls: 0,
+        closed: false,
+        health() { this.healthCalls++; return Promise.resolve(this.connections === null ? null : { readyConnections: this.connections }); },
+        onExit(cb) { exitCb = cb; },
+        // Like the real provider: closing kills the process, which exits.
+        close() { this.closed = true; if (exitCb) { const cb = exitCb; exitCb = null; cb(0); } },
+      };
+      handles.push(handle);
+      return handle;
+    };
+    return { startTunnel, handles };
+  }
+
+  function sup(provider, time, extra) {
+    return newSupervisor(provider, time, Object.assign({
+      healthIntervalMs: 60000,
+      unhealthyAfterMs: 180000,
+    }, extra || {}));
+  }
+
+  it('restarts a tunnel that stays disconnected, although its process is alive', async () => {
+    const time = createFakeTime();
+    const provider = healthProvider();
+    const s = sup(provider, time);
+    const urls = [];
+    let unhealthy = null;
+    s.on('url', (e) => urls.push(e.url));
+    s.on('unhealthy', (e) => { unhealthy = e; });
+
+    await s.start();
+    provider.handles[0].connections = 0;
+    for (let i = 0; i < 4; i++) await time.advance(60000);   // 0 found, then 3 min later
+    await time.advance(1000);                                 // backoff before the restart
+
+    assert.ok(unhealthy, 'should report the dead tunnel');
+    assert.equal(provider.handles[0].closed, true, 'the zombie process is killed');
+    assert.deepEqual(urls, ['https://tunnel-number-1.trycloudflare.com', 'https://tunnel-number-2.trycloudflare.com']);
+  });
+
+  it('leaves a connected tunnel alone', async () => {
+    const time = createFakeTime();
+    const provider = healthProvider();
+    const s = sup(provider, time);
+    await s.start();
+    for (let i = 0; i < 10; i++) await time.advance(60000);
+    assert.equal(provider.handles.length, 1);
+    assert.ok(provider.handles[0].healthCalls >= 9, 'it keeps checking');
+  });
+
+  it('never restarts on a check that cannot get an answer', async () => {
+    const time = createFakeTime();
+    const provider = healthProvider();
+    const s = sup(provider, time);
+    await s.start();
+    provider.handles[0].connections = null;   // metrics endpoint unreachable
+    for (let i = 0; i < 10; i++) await time.advance(60000);
+    assert.equal(provider.handles.length, 1);
+    assert.equal(provider.handles[0].closed, false);
+  });
+
+  it('never restarts when the check throws', async () => {
+    const time = createFakeTime();
+    const provider = healthProvider();
+    const s = sup(provider, time);
+    await s.start();
+    provider.handles[0].health = () => { throw new Error('boom'); };
+    for (let i = 0; i < 10; i++) await time.advance(60000);
+    assert.equal(provider.handles.length, 1);
+  });
+
+  it('forgives a brief disconnection', async () => {
+    const time = createFakeTime();
+    const provider = healthProvider();
+    const s = sup(provider, time);
+    await s.start();
+    const h = provider.handles[0];
+    h.connections = 0; await time.advance(60000); await time.advance(60000);
+    h.connections = 1; await time.advance(60000);
+    h.connections = 0; await time.advance(60000); await time.advance(60000);
+    assert.equal(provider.handles.length, 1, 'the clock restarts after a reconnect');
+  });
+
+  it('stops checking once stopped', async () => {
+    const time = createFakeTime();
+    const provider = healthProvider();
+    const s = sup(provider, time);
+    await s.start();
+    await time.advance(60000);
+    const calls = provider.handles[0].healthCalls;
+    s.stop();
+    for (let i = 0; i < 5; i++) await time.advance(60000);
+    assert.equal(provider.handles[0].healthCalls, calls);
+  });
+
+  it('checks only the current tunnel after a restart', async () => {
+    const time = createFakeTime();
+    const provider = healthProvider();
+    const s = sup(provider, time);
+    await s.start();
+    provider.handles[0].connections = 0;
+    for (let i = 0; i < 4; i++) await time.advance(60000);
+    await time.advance(1000);
+    const oldCalls = provider.handles[0].healthCalls;
+    for (let i = 0; i < 3; i++) await time.advance(60000);
+    assert.equal(provider.handles[0].healthCalls, oldCalls, 'the dead handle is no longer polled');
+    assert.ok(provider.handles[1].healthCalls > 0);
+  });
+
+  it('falls back to defaults on malformed settings', () => {
+    const { HEALTH_INTERVAL_MS, UNHEALTHY_AFTER_MS } = require('../src/tunnel/supervisor');
+    const s = new TunnelSupervisor({
+      startTunnel: async () => ({}), logger: quietLogger,
+      healthIntervalMs: 'often', unhealthyAfterMs: -5,
+    });
+    assert.equal(s._healthInterval, HEALTH_INTERVAL_MS);
+    assert.equal(s._unhealthyAfter, UNHEALTHY_AFTER_MS);
+  });
+});
