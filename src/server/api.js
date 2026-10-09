@@ -6,6 +6,7 @@ const os = require('os');
 const { execFile } = require('child_process');
 const { scanSessions, loadHistory, resolveSessionCwd } = require('./sessions');
 const { createAgent } = require('../agent/agent-factory');
+const { SessionController } = require('./session-control');
 const {
   UPLOAD_DIR,
   DASHBOARD_MAX_UPLOAD_SIZE,
@@ -21,35 +22,23 @@ const log = makeLogger('api');
 const skillsLog = makeLogger('api:skills');
 
 const MAX_UPLOAD_SIZE = DASHBOARD_MAX_UPLOAD_SIZE; // back-compat local alias
-const GEMINI_TMP_DIR = path.join(os.homedir(), '.gemini', 'tmp');
 
 /**
  * Resolve a Gemini filename-derived session ID to the real UUID
  * from the JSON file, since `gemini --resume` expects a UUID.
  */
-function resolveGeminiSessionId(sessionId, transcriptPath) {
-  // If we have the transcript path, read it directly
-  if (transcriptPath && transcriptPath.endsWith('.json')) {
-    try {
-      const data = JSON.parse(fs.readFileSync(transcriptPath, 'utf8'));
-      if (data.sessionId) return data.sessionId;
-    } catch {}
+/**
+ * HTTP status for a session-control refusal.
+ */
+function controlStatus(code) {
+  switch (code) {
+    case 'instance_not_found': return 404;
+    case 'session_busy':
+    case 'session_resumed_elsewhere': return 409;
+    case 'no_session': return 400;
+    case 'agent_not_connected': return 502;
+    default: return 500;
   }
-
-  // Search Gemini tmp directories for the session file
-  try {
-    const slugDirs = fs.readdirSync(GEMINI_TMP_DIR, { withFileTypes: true })
-      .filter(d => d.isDirectory()).map(d => d.name);
-    for (const slug of slugDirs) {
-      const candidate = path.join(GEMINI_TMP_DIR, slug, 'chats', `session-${sessionId}.json`);
-      if (fs.existsSync(candidate)) {
-        const data = JSON.parse(fs.readFileSync(candidate, 'utf8'));
-        if (data.sessionId) return data.sessionId;
-      }
-    }
-  } catch {}
-
-  return sessionId; // fallback to original
 }
 
 // Session IDs can be UUIDs, Codex rollout IDs, or Gemini filename-derived IDs
@@ -105,11 +94,17 @@ function parseSkillsSearchOutput(stdout) {
 // is unchanged — see src/server/normalize-timestamp.js.
 const { normalizeTimestamp } = require('./normalize-timestamp');
 
-function createApiRouter(instanceManager, getAuthState, pushManager, outboxManager, getTunnelInfo) {
+function createApiRouter(instanceManager, getAuthState, pushManager, outboxManager, getTunnelInfo, sessionController) {
   const router = express.Router();
 
   // Track spawned wrapped agents so we can clean them up
-  const wrappedAgents = new Map();
+  // Takeover, resume and prompting go through the session controller, so
+  // the dashboard, the dashboard WebSocket and the gateway apply the same
+  // one-writer rule. index.js passes the shared instance; tests that
+  // build a router on its own get a private one.
+  const controller = sessionController || new SessionController({
+    instanceManager, outboxManager, getAuthState, createAgent,
+  });
 
   // Pending permission decisions: instanceId -> { resolve, timeout }
   // Used by the MCP permission server long-poll endpoint.
@@ -340,82 +335,17 @@ function createApiRouter(instanceManager, getAuthState, pushManager, outboxManag
     if (!isValidSessionId(sessionId)) {
       return res.status(400).json({ error: 'Invalid sessionId' });
     }
-    const { name, cwd, agentType } = req.body;
-
-    // Don't spawn duplicates — but verify the existing agent is still alive
-    if (wrappedAgents.has(sessionId)) {
-      const existing = wrappedAgents.get(sessionId);
-      const existingInst = instanceManager.get(existing.instanceId);
-      const wsAlive = existing.ws && existing.ws.readyState === 1;
-      if (existingInst && wsAlive) {
-        return res.json({ instanceId: existing.instanceId, alreadyRunning: true });
-      }
-      if (existing.instanceId) instanceManager.unregister(existing.instanceId);
-      wrappedAgents.delete(sessionId);
-      if (existing.ws) try { existing.ws.close(); } catch {}
-    }
-
-    // Resolve the directory to resume FROM.
-    //
-    // The cwd recorded in the session's own transcript wins. Agents
-    // locate a transcript by hashing the cwd into a project slug, so
-    // resuming from any other directory simply does not find it. The
-    // client-supplied cwd is a fallback for the SQLite-backed stores
-    // this cannot read, and for a project that has since moved.
-    //
-    // The old process.cwd() default was the failure this fixes: a
-    // resume with no usable cwd launched the agent inside polpo's own
-    // directory, where it reported that no conversation was found.
-    const isUsableDir = (p) => {
-      if (!p || typeof p !== 'string' || !path.isAbsolute(p)) return false;
-      try {
-        return fs.statSync(p).isDirectory();
-      } catch {
-        return false;
-      }
-    };
-
-    let resolvedCwd = null;
+    const { name, cwd, agentType } = req.body || {};
     try {
-      const recordedCwd = await resolveSessionCwd(sessionId);
-      if (isUsableDir(recordedCwd)) resolvedCwd = recordedCwd;
-    } catch {
-      // Unreadable store; fall through to the client-supplied cwd.
-    }
-    if (!resolvedCwd && isUsableDir(cwd)) resolvedCwd = cwd;
-    if (!resolvedCwd) resolvedCwd = process.cwd();
-
-    // Pass auth token so the spawned agent can register with the hub
-    const authState = typeof getAuthState === 'function' ? getAuthState() : null;
-    const authToken = authState && authState.enabled ? authState.token : undefined;
-
-    try {
-      const resumeId = agentType === 'gemini'
-        ? resolveGeminiSessionId(sessionId)
-        : sessionId;
-
-      const agent = createAgent(agentType || 'claude', {
-        name: name || `Resumed (${sessionId.slice(0, 8)})`,
-        cwd: resolvedCwd,
-        resumeSessionId: resumeId,
+      const out = await controller.resume(sessionId, {
+        name, cwd, agentType,
+        heldBy: 'dashboard',
         serverUrl: `ws://127.0.0.1:${req.socket.localPort}`,
-        token: authToken,
       });
-
-      await agent.start();
-      wrappedAgents.set(sessionId, agent);
-
-      // Set sessionId on the instance immediately so the dashboard can dedup
-      instanceManager.setSessionInfo(agent.instanceId, resumeId, null);
-
-      // Clean up when agent disconnects
-      const cleanup = () => {
-        wrappedAgents.delete(sessionId);
-        instanceManager.unregister(agent.instanceId);
-      };
-      if (agent.ws) agent.ws.on('close', cleanup);
-
-      res.json({ instanceId: agent.instanceId });
+      if (!out.ok) return res.status(controlStatus(out.error)).json({ error: out.message, code: out.error });
+      const body = { instanceId: out.instanceId };
+      if (out.alreadyRunning) body.alreadyRunning = true;
+      res.json(body);
     } catch (err) {
       log.error('error:', err);
       res.status(500).json({ error: 'Internal server error' });
@@ -457,12 +387,7 @@ function createApiRouter(instanceManager, getAuthState, pushManager, outboxManag
 
       await agent.start();
 
-      wrappedAgents.set(agent.instanceId, agent);
-      const cleanup = () => {
-        wrappedAgents.delete(agent.instanceId);
-        instanceManager.unregister(agent.instanceId);
-      };
-      if (agent.ws) agent.ws.on('close', cleanup);
+      controller.track(agent.instanceId, agent);
 
       res.json({ instanceId: agent.instanceId });
     } catch (err) {
@@ -515,23 +440,11 @@ function createApiRouter(instanceManager, getAuthState, pushManager, outboxManag
 
   // Send a prompt to an instance
   router.post('/instances/:id/prompt', (req, res) => {
-    const { text } = req.body;
+    const { text } = req.body || {};
     if (!text) return res.status(400).json({ error: 'text is required' });
-
-    const sent = instanceManager.sendToAgent(req.params.id, {
-      type: 'prompt',
-      text,
-    });
-    if (sent) {
-      instanceManager.addMessage(req.params.id, {
-        role: 'user',
-        content: text,
-        source: 'mobile',
-      });
-      res.json({ ok: true });
-    } else {
-      res.status(502).json({ error: 'Agent not connected' });
-    }
+    const out = controller.sendPrompt(req.params.id, text, { source: 'mobile', requireDelivery: true });
+    if (!out.ok) return res.status(controlStatus(out.error)).json({ error: out.message, code: out.error });
+    res.json({ ok: true, queued: out.queued });
   });
 
   // ----- Outbox (agent → phone file transfer) -----
@@ -803,70 +716,19 @@ function createApiRouter(instanceManager, getAuthState, pushManager, outboxManag
 
   // Take over a hook bridge instance (spawn WrappedAgent to enable prompts)
   router.post('/instances/:id/takeover', async (req, res) => {
-    const id = req.params.id;
-    const inst = instanceManager.get(id);
-    if (!inst) return res.status(404).json({ error: 'Instance not found' });
-    if (!inst.sessionId) return res.status(400).json({ error: 'Instance has no sessionId' });
-
-    // Don't spawn duplicates — but verify the existing agent is still alive
-    if (wrappedAgents.has(inst.sessionId)) {
-      const existing = wrappedAgents.get(inst.sessionId);
-      const existingInst = instanceManager.get(existing.instanceId);
-      const wsAlive = existing.ws && existing.ws.readyState === 1; // WebSocket.OPEN
-      if (existingInst && wsAlive) {
-        return res.json({ instanceId: existing.instanceId, alreadyRunning: true });
-      }
-      // Stale entry — clean up instance and proceed with fresh takeover
-      if (existing.instanceId) instanceManager.unregister(existing.instanceId);
-      wrappedAgents.delete(inst.sessionId);
-      if (existing.ws) try { existing.ws.close(); } catch {}
-    }
-
-    const authState = typeof getAuthState === 'function' ? getAuthState() : null;
-    const authToken = authState && authState.enabled ? authState.token : undefined;
-
     try {
-      const resumeId = inst.agentType === 'gemini'
-        ? resolveGeminiSessionId(inst.sessionId, inst.transcriptPath)
-        : inst.sessionId;
-
-      const agent = createAgent(inst.agentType || 'claude', {
-        name: `Takeover (${inst.name})`,
-        cwd: inst.cwd,
-        resumeSessionId: resumeId,
+      const out = await controller.takeover(req.params.id, {
+        heldBy: 'dashboard',
         serverUrl: `ws://127.0.0.1:${req.socket.localPort}`,
-        token: authToken,
       });
-
-      await agent.start();
-      wrappedAgents.set(inst.sessionId, agent);
-
-      // Copy session metadata and conversation history to the new takeover instance
-      const newInst = instanceManager.get(agent.instanceId);
-      if (newInst) {
-        newInst.sessionId = inst.sessionId;
-        newInst.transcriptPath = inst.transcriptPath;
-        if (inst.conversation && inst.conversation.length > 0) {
-          newInst.conversation = [...inst.conversation];
-        }
-      }
-
-      // Remove the old auto-discovered instance (replaced by the takeover)
-      instanceManager.unregister(id);
-
-      const cleanup = () => {
-        wrappedAgents.delete(inst.sessionId);
-        instanceManager.unregister(agent.instanceId);
-      };
-      if (agent.ws) agent.ws.on('close', cleanup);
-
+      if (!out.ok) return res.status(controlStatus(out.error)).json({ error: out.message, code: out.error });
       res.json({
-        instanceId: agent.instanceId,
+        instanceId: out.instanceId,
         warning: 'Session taken over. You can now send prompts from your phone.',
       });
     } catch (err) {
-      log.error('takeover failed:', err);
-      res.status(500).json({ error: 'Takeover failed. Check server logs for details.' });
+      log.error('error:', err);
+      res.status(500).json({ error: 'Internal server error' });
     }
   });
 

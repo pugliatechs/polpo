@@ -271,6 +271,14 @@ class WrappedAgent {
       this._log(`Claude process exited (code ${code})`);
       this.claude = null;
       this.busy = false;
+      // Released on purpose because someone else picked the session up:
+      // no "[session ended]" line, and the agent stays connected so the
+      // next takeover can resume the session from its transcript.
+      if (this._releasing) {
+        this._releasing = false;
+        this._sendToHub({ type: 'status', status: 'idle' });
+        return;
+      }
       this._sendToHub({ type: 'status', status: 'idle' });
       this._sendToHub({
         type: 'output',
@@ -595,6 +603,20 @@ class WrappedAgent {
   /**
    * Stop the agent.
    */
+  /**
+   * Stop the claude process but keep this agent connected.
+   *
+   * Used when the session was picked up again elsewhere (VSCode after a
+   * window reload): the running process holds a stale copy of the
+   * conversation in memory. The next prompt spawns claude with --resume,
+   * which reads the transcript as it is now.
+   */
+  releaseProcess() {
+    if (!this.claude) return;
+    this._releasing = true;
+    this.claude.kill('SIGTERM');
+  }
+
   stop() {
     if (this.stopping) return;
     this.stopping = true;

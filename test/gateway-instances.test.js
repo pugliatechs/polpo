@@ -76,6 +76,7 @@ describe('Gateway /v1/instances', () => {
     assert.equal(byId['phone-1'].origin, 'polpo');
     assert.equal(byId['phone-1'].canReceivePrompts, true);
     assert.equal(byId['gw-1'].origin, 'gateway');
+    assert.equal(byId['vscode-1'].heldBy, null, 'nobody holds a session polpo only watches');
   });
 
   it("never lists polpo's own machinery", async () => {
@@ -145,6 +146,166 @@ describe('Gateway /v1/instances', () => {
       for (let i = 0; i < 205; i++) im.addMessage('phone-1', { role: 'assistant', content: 'm' + i });
       const { body } = await get(h, '/v1/instances/phone-1/conversation?since=1');
       assert.equal(body.gap, true);
+    });
+  });
+});
+
+describe('Gateway: driving live sessions', () => {
+  const EventEmitter = require('events');
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const { SessionController } = require('../src/server/session-control');
+
+  let im, h, tmp, transcript, agents;
+
+  function agentFactory(type, opts) {
+    const id = 'agent-' + (agents.length + 1);
+    const ws = new EventEmitter();
+    ws.readyState = 1;
+    ws.close = () => { ws.readyState = 3; ws.emit('close'); };
+    const agent = {
+      instanceId: id, ws, opts, released: 0,
+      async start() {
+        im.register({ id, name: opts.name, cwd: opts.cwd, agentType: type });
+        im.setAgentSocket(id, { readyState: 1, send: () => {} });
+      },
+      releaseProcess() { this.released++; },
+    };
+    agents.push(agent);
+    return agent;
+  }
+
+  function startWith(sessionControl) {
+    const app = express();
+    app.use('/v1', createGatewayRouter({
+      taskManager: stubTaskManager(), getKey: () => KEY, instanceManager: im, sessionControl,
+    }));
+    return new Promise((resolve) => {
+      const server = app.listen(0, '127.0.0.1', () => resolve({ server, url: 'http://127.0.0.1:' + server.address().port }));
+    });
+  }
+
+  async function post(path, body) {
+    const r = await fetch(h.url + path, {
+      method: 'POST',
+      headers: { ...AUTH, 'Content-Type': 'application/json', 'X-Polpo-Client': 'openclaw' },
+      body: JSON.stringify(body || {}),
+    });
+    let parsed = null;
+    try { parsed = await r.json(); } catch {}
+    return { status: r.status, body: parsed };
+  }
+
+  beforeEach(() => {
+    im = new InstanceManager();
+    agents = [];
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'polpo-gw-sc-'));
+    transcript = path.join(tmp, 'sess-1.jsonl');
+    fs.writeFileSync(transcript, JSON.stringify({ type: 'assistant', uuid: 'v1', entrypoint: 'claude-vscode', message: { stop_reason: 'end_turn' } }) + '\n');
+    im.register({ id: 'vscode-1', name: 'fix auth', type: 'vscode', agentType: 'claude', sessionId: 'sess-1',
+      transcriptPath: transcript, cwd: tmp, canReceivePrompts: false });
+    im.updateStatus('vscode-1', 'idle');
+    im.register({ id: 'gw-1', name: 'Gateway: openclaw', source: 'gateway:openclaw' });
+    im.register({ id: 'mind-1', name: 'Alien Mind', agentType: 'mind' });
+  });
+
+  afterEach(async () => {
+    await new Promise((r) => h.server.close(r));
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('is off unless the host opted in', async () => {
+    h = await startWith(null);
+    assert.equal((await post('/v1/instances/vscode-1/takeover')).status, 503);
+    assert.equal((await post('/v1/instances/vscode-1/prompt', { text: 'hi' })).status, 503);
+    assert.equal((await post('/v1/sessions/sess-1/resume')).status, 503);
+  });
+
+  describe('when enabled', () => {
+    let ctl;
+    beforeEach(async () => {
+      ctl = new SessionController({ instanceManager: im, createAgent: agentFactory, sessions: {} });
+      h = await startWith(ctl);
+    });
+
+    it('will not take over a busy session, but it can still be read', async () => {
+      im.updateStatus('vscode-1', 'busy');
+      fs.appendFileSync(transcript, JSON.stringify({ type: 'user', uuid: 'v2', entrypoint: 'claude-vscode',
+        timestamp: new Date().toISOString(), message: {} }) + '\n');
+      const r = await post('/v1/instances/vscode-1/takeover');
+      assert.equal(r.status, 409);
+      assert.equal(r.body.error, 'session_busy');
+      assert.equal((await get(h, '/v1/instances/vscode-1/conversation')).status, 200);
+    });
+
+    it('asks for a takeover before prompting a watched session', async () => {
+      const r = await post('/v1/instances/vscode-1/prompt', { text: 'run the tests' });
+      assert.equal(r.status, 409);
+      assert.equal(r.body.error, 'takeover_required');
+    });
+
+    it('takes over an idle session and drives it, attributed to the caller', async () => {
+      const t = await post('/v1/instances/vscode-1/takeover');
+      assert.equal(t.status, 200);
+      assert.equal(t.body.instance.heldBy, 'gateway:openclaw', 'the caller can see it holds the session');
+      const id = t.body.instanceId;
+      assert.equal(im.get(id).heldBy, 'gateway:openclaw');
+
+      const p = await post('/v1/instances/' + id + '/prompt', { text: 'run the tests' });
+      assert.equal(p.status, 200);
+      assert.equal(p.body.ok, true);
+      const last = im.get(id).conversation.slice(-1)[0];
+      assert.equal(last.content, 'run the tests');
+      assert.equal(last.source, 'gateway:openclaw');
+    });
+
+    it('is told when the session was picked up again in VSCode', async () => {
+      const id = (await post('/v1/instances/vscode-1/takeover')).body.instanceId;
+      fs.appendFileSync(transcript, JSON.stringify({ type: 'user', uuid: 'v2', entrypoint: 'claude-vscode', message: {} }) + '\n');
+      const r = await post('/v1/instances/' + id + '/prompt', { text: 'run the tests' });
+      assert.equal(r.status, 409);
+      assert.equal(r.body.error, 'session_resumed_elsewhere');
+      assert.equal(r.body.writer, 'claude-vscode');
+      assert.equal(im.get(id).canReceivePrompts, false);
+    });
+
+    it('refuses to drive the mind or a gateway task', async () => {
+      for (const id of ['mind-1', 'gw-1']) {
+        const r = await post('/v1/instances/' + id + '/prompt', { text: 'x' });
+        assert.equal(r.status, 400);
+        assert.equal(r.body.error, 'not_a_coding_session');
+      }
+    });
+
+    it('rejects an empty or oversized prompt', async () => {
+      const id = (await post('/v1/instances/vscode-1/takeover')).body.instanceId;
+      for (const text of ['', '   ', 'x'.repeat(50001)]) {
+        assert.equal((await post('/v1/instances/' + id + '/prompt', { text })).status, 400);
+      }
+    });
+
+    it('resumes a session from the catalogue', async () => {
+      const r = await post('/v1/sessions/sess-9/resume', { cwd: tmp });
+      assert.equal(r.status, 200);
+      assert.equal(agents[0].opts.resumeSessionId, 'sess-9');
+      assert.equal(im.get(r.body.instanceId).heldBy, 'gateway:openclaw');
+    });
+
+    it('validates resume input', async () => {
+      assert.equal((await post('/v1/sessions/' + encodeURIComponent('../x') + '/resume')).status, 400);
+      assert.equal((await post('/v1/sessions/sess-9/resume', { agentType: 'rm' })).status, 400);
+    });
+
+    it('aborts a turn only on a session polpo drives', async () => {
+      assert.equal((await post('/v1/instances/vscode-1/abort')).status, 409);
+      const id = (await post('/v1/instances/vscode-1/takeover')).body.instanceId;
+      assert.equal((await post('/v1/instances/' + id + '/abort')).status, 200);
+    });
+
+    it('requires the bearer token', async () => {
+      const r = await fetch(h.url + '/v1/instances/vscode-1/takeover', { method: 'POST' });
+      assert.equal(r.status, 401);
     });
   });
 });

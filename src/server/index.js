@@ -4,6 +4,7 @@ const path = require('path');
 const InstanceManager = require('./instances');
 const { createApiRouter } = require('./api');
 const { setupWebSocket } = require('./websocket');
+const { SessionController } = require('./session-control');
 const {
   AuthState,
   createAuthMiddleware,
@@ -244,7 +245,14 @@ function createServer(options = {}) {
   // getTunnelInfo is a closure-friendly bridge — the api router can be
   // built before bin/polpo.js has wired the tunnel up; the closure
   // resolves the latest value at request time.
-  app.use('/api', createApiRouter(instanceManager, getAuthState, pushManager, outboxManager, () => tunnelInfo));
+  // One session controller for every entry point (dashboard API, the
+  // dashboard WebSocket, the gateway), so a takeover made from the phone
+  // is respected by a prompt sent through the gateway and vice versa.
+  const sessionController = new SessionController({
+    instanceManager, outboxManager, getAuthState, hubPort: port,
+  });
+
+  app.use('/api', createApiRouter(instanceManager, getAuthState, pushManager, outboxManager, () => tunnelInfo, sessionController));
 
   // Alien Mind handle — declared up here so the gateway router (mounted
   // below) can wire /v1/goals to its coordinator. The mind itself is
@@ -312,6 +320,9 @@ function createServer(options = {}) {
       uploadStore,
       instanceManager,
       mind: mind ? { coordinator: mind.coordinator } : null,
+      // Driving live sessions from the gateway is opt-in: it reaches into
+      // the sessions you are working in, not just ones the gateway made.
+      sessionControl: process.env.POLPO_GATEWAY_SESSION_CONTROL === '1' ? sessionController : null,
     }));
     gatewayState = { keyInfo, taskManager, uploadStore, artifactStore };
   }
@@ -323,7 +334,7 @@ function createServer(options = {}) {
   });
 
   // WebSocket
-  const wss = setupWebSocket(server, instanceManager, getAuthState, pushManager, outboxManager);
+  const wss = setupWebSocket(server, instanceManager, getAuthState, pushManager, outboxManager, sessionController);
 
   // Alien Mind meta-agent (opt-in: POLPO_MIND=1). When --gateway is on
   // it was already created above. This block is the dashboard-only path.

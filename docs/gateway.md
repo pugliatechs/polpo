@@ -31,7 +31,7 @@ curl -s -H "Authorization: Bearer $KEY" http://localhost:7890/v1/health
 | Auth | Token + optional PIN/TOTP + session cookies | Long-lived Bearer key only |
 | Stability | May change between releases | Stable API contract under `/v1` |
 | Approvals | Phone-based | Fail closed (`approval_required`) |
-| Sessions | Long-lived, multi-turn | One-shot tasks, no follow-ups |
+| Sessions | Long-lived, multi-turn | One-shot tasks; continuing a live session is opt-in (`POLPO_GATEWAY_SESSION_CONTROL=1`) |
 | Visibility | Dashboard shows the conversation | Dashboard shows the gateway-spawned arm (`source: 'gateway:<client>'`), can be observed live |
 
 Both surfaces share the same `InstanceManager`. A gateway-spawned arm registers normally so you can watch it from your phone while it works, abort it manually if needed, or even let the Alien Mind coordinate it.
@@ -72,6 +72,7 @@ Per-bearer-token buckets (sha256-hashed) for the file-transfer routes:
 |-------|-----|
 | `POST /v1/uploads` | 60/min per token |
 | `GET /v1/tasks/:id/artifacts*` | 60/min per token |
+| `POST /v1/instances/:id/*`, `POST /v1/sessions/:id/resume` | 30/min per token |
 
 Exceeded → `429 rate_limited` with `Retry-After` header. Buckets refill after the window.
 
@@ -412,8 +413,128 @@ curl -sf -H "Authorization: Bearer $KEY" \
 # 3. Now either:
 #    (a) summarise locally and reply to the user, or
 #    (b) POST /v1/tasks on that host with the relevant cwd to spin up
-#        a fresh one-shot agent that has the context (resumeable
-#        sessions live in the dashboard surface, not /v1).
+#        a fresh one-shot agent that has the context, or
+#    (c) continue that very session, if the host allows it (see
+#        "Live Sessions" below).
+```
+
+## Live Sessions (`/v1/instances`)
+
+The session routes above read history. The instance routes follow the sessions that are running right now (the ones the dashboard lists): the coding sessions open in VSCode or a terminal that polpo discovered, the ones started from the dashboard, and gateway tasks. Mind instances are not listed.
+
+Reading is always available. Driving a session (taking it over and sending it prompts) is opt-in, see [Driving a session](#driving-a-session).
+
+### `GET /v1/instances`
+
+```
+→ {
+    instances: [{
+      instanceId,
+      sessionId,            // null until the agent reports it
+      agentType,
+      origin,               // "discovered" | "polpo" | "gateway" | "mind" | "mind-arm"
+      source,               // "gateway:<client>", "mind:<goalId-tail>" or null
+      project, cwd,
+      status,               // "idle" | "busy" | "waiting" | ...
+      canReceivePrompts,    // false: polpo is only watching this session
+      heldBy,               // "dashboard", "gateway:<client>" or null
+      pendingApproval,      // { toolName, input, ... } or null; input capped at 2000 chars
+      firstPrompt,          // truncated to 200 chars
+      lastActivity,
+      lastSeq               // seq of the newest message polpo holds
+    }]
+  }
+```
+
+Sorted by `lastActivity`, newest first. `origin: "discovered"` is a session polpo found running outside itself (VSCode, a terminal).
+
+### `GET /v1/instances/:id`
+
+One instance, same shape as a list entry. Errors: 400 `invalid_instance_id` (`^[A-Za-z0-9-]{1,64}$`), 404 `instance_not_found`.
+
+### `GET /v1/instances/:id/conversation`
+
+Messages newer than `since`, for following a session by polling. Polling works over Cloudflare quick tunnels, where Server-Sent Events do not.
+
+```
+?since=<seq, default 0>
+&limit=<1..200, default 50>
+→ {
+    instanceId,
+    status,
+    messages: [{ seq, role, contentType, content, timestamp,
+                 truncated?, source?, toolUseId?, isError?, attachments? }],
+    lastSeq,              // pass back as ?since= on the next poll
+    hasMore,              // more messages after this page
+    gap                   // true: you fell more than 200 messages behind
+  }
+```
+
+Each message's `content` is capped at 20,000 characters (`truncated: true` when cut). polpo keeps the last 200 messages per instance; if `gap` is true, read the rest from `GET /v1/sessions/:id`.
+
+The instance routes share the catalogue rate limit (60/min per token).
+
+### Driving a session
+
+With `POLPO_GATEWAY_SESSION_CONTROL=1` set on the host, a caller can continue a coding session: the same session id, the same history, so the work shows up in VSCode once you reload its tab. Without it, every route in this section returns `503 session_control_not_enabled`. It is off by default because it reaches into the sessions you are working in.
+
+A session has one writer at a time. The rule is the same for the dashboard, the phone and the gateway:
+
+- **Busy: read only.** While the agent is working on a turn, a session can be read but not taken over (`409 session_busy`).
+- **Idle: take it over and continue.** Once the turn has ended, `takeover` makes polpo the writer, and prompts go to it.
+- **Picked up elsewhere: handed back.** If someone writes to the session again in VSCode or a terminal, polpo stops driving it and goes back to watching. The next prompt is refused with `409 session_resumed_elsewhere`, and the dashboard shows the same notice. Take it over again once it is idle.
+
+polpo decides whether a Claude session is idle from its transcript: the last turn ended normally, or nothing has been written to it for `POLPO_SESSION_STALE_MS` (10 minutes by default). Lower it and a long-running tool call can be taken for idle; raise it and a session that crashed mid-turn stays "busy" for longer.
+
+Mind instances, mind arms and gateway tasks have their own lifecycles and cannot be driven (`400 not_a_coding_session`).
+
+#### `POST /v1/instances/:id/takeover`
+
+```
+→ { instanceId, instance }   // instance: the shape of GET /v1/instances/:id
+```
+
+The `instanceId` returned can differ from the one you passed: a discovered session is replaced by one polpo drives. Use the returned id from then on. `instance.heldBy` is `gateway:<client>`, from the `X-Polpo-Client` header.
+
+Errors: 409 `session_busy` (with `status`), 400 `no_session`, 400 `not_a_coding_session`, 404 `instance_not_found`.
+
+#### `POST /v1/instances/:id/prompt`
+
+```
+{ "text": "<1..50000 chars>" }
+→ { ok: true, queued, lastSeq }
+```
+
+`lastSeq` is the seq before the prompt; poll `/conversation?since=<lastSeq>` to read the reply.
+
+Errors: 400 `invalid_text`, 409 `takeover_required` (polpo is only watching; take it over first), 409 `session_resumed_elsewhere` (with `writer`, e.g. `claude-vscode`), 502 `agent_not_connected`.
+
+#### `POST /v1/instances/:id/abort`
+
+Stops the turn in progress. `→ { ok: true }`. Errors: 409 `takeover_required`, 502 `agent_not_connected`.
+
+#### `POST /v1/sessions/:id/resume`
+
+Continues a session from the catalogue, including one that is not running right now.
+
+```
+{ "agentType": "claude", "cwd": "/optional/fallback" }
+→ { instanceId, alreadyRunning }
+```
+
+`agentType` defaults to `claude`. The working directory recorded in the session wins over `cwd`. Errors: 400 `invalid_session_id`, 400 `invalid_agent_type`, 409 `session_busy`.
+
+The control routes share a rate limit of 30/min per token. Approvals are not forwarded to the caller: if the agent asks for one, it shows up in `pendingApproval` and on the dashboard, where you answer it.
+
+```bash
+KEY=$POLPO_GATEWAY_KEY; H="Authorization: Bearer $KEY"; C="X-Polpo-Client: my-pa"
+
+# Pick the session, take it over once it is idle, prompt it, read the reply
+ID=$(curl -s -H "$H" localhost:7890/v1/instances | jq -r '.instances[] | select(.project=="api") | .instanceId' | head -1)
+ID=$(curl -s -X POST -H "$H" -H "$C" localhost:7890/v1/instances/$ID/takeover | jq -r .instanceId)
+SEQ=$(curl -s -X POST -H "$H" -H "$C" -H 'Content-Type: application/json' \
+  -d '{"text":"run the tests and fix what fails"}' localhost:7890/v1/instances/$ID/prompt | jq .lastSeq)
+curl -s -H "$H" "localhost:7890/v1/instances/$ID/conversation?since=$SEQ"
 ```
 
 ## Alien Mind Goals (`/v1/goals`) — experimental
@@ -599,6 +720,7 @@ The full reference for the response shape, scoring heuristics, and privacy model
 - **Path traversal**: filename regex + `..`/separator/NUL pre-rejection + `path.resolve` prefix check at every fs touchpoint. `lstat` (not `stat`) used for symlink defense.
 - **Content sniffing**: `nosniff` + `attachment` on downloads. Inline allowed only for the same image whitelist the dashboard uses. SVG and HTML always force-attach (they can carry script).
 - **Approval handling**: gateway tasks have no human in the loop, so any approval request from the agent fails the task immediately with `approval_required`. Callers must write self-sufficient prompts (e.g. set up permissions on the host beforehand).
+- **Driving live sessions is opt-in**: `POLPO_GATEWAY_SESSION_CONTROL=1` turns it on. Even then a busy session is read only, a session is never forked, and polpo hands it back as soon as someone writes to it again in VSCode or a terminal.
 - **No filenames in logs**: caller-controlled strings stay out of logs; uploads are recorded by size and sha256 for forensics.
 - **No new dependencies**: pure Node 22, no multipart parsers, no third-party crypto.
 
@@ -611,6 +733,8 @@ The full reference for the response shape, scoring heuristics, and privacy model
 | `POLPO_GATEWAY_DEFAULT_TIMEOUT_MS` | 30 × 60 × 1000 | Timeout for a task that sends no `timeoutMs` |
 | `POLPO_GATEWAY_MAX_TIMEOUT_MS` | 60 × 60 × 1000 | Hard cap on per-task `timeoutMs` (a larger request is clamped) |
 | `POLPO_GATEWAY_MAX_UPLOAD_SIZE` | 25 × 1024 × 1024 | Per-upload byte cap (decoded) |
+| `POLPO_GATEWAY_SESSION_CONTROL` | off | `1` lets callers take over and continue live coding sessions |
+| `POLPO_SESSION_STALE_MS` | 10 × 60 × 1000 | A Claude session with no transcript activity for this long counts as idle |
 
 ## File Layout (server-side)
 

@@ -102,6 +102,7 @@ class InstanceManager extends EventEmitter {
         autoApprove: inst.autoApprove,
         sessionId: inst.sessionId,
         canReceivePrompts: inst.canReceivePrompts,
+        heldBy: inst.heldBy || null,
         firstPrompt: inst.firstPrompt,
         agentType: inst.agentType,
         source: inst.source,
@@ -153,6 +154,29 @@ class InstanceManager extends EventEmitter {
     }
   }
 
+  /**
+   * Change who may drive an instance.
+   *
+   * `canReceivePrompts` false puts it in watch-only mode: the dashboard
+   * shows the takeover banner instead of the prompt box. `heldBy` names
+   * who took it over ('dashboard', 'gateway:<client>'), or null.
+   */
+  setControl(id, control) {
+    const instance = this.instances.get(id);
+    if (!instance || !control) return;
+    if (typeof control.canReceivePrompts === 'boolean') {
+      instance.canReceivePrompts = control.canReceivePrompts;
+    }
+    if (control.heldBy !== undefined) {
+      instance.heldBy = typeof control.heldBy === 'string' ? control.heldBy : null;
+    }
+    this.emit('instance:control', {
+      id,
+      canReceivePrompts: instance.canReceivePrompts !== false,
+      heldBy: instance.heldBy || null,
+    });
+  }
+
   getConversation(id, limit = 50) {
     const instance = this.instances.get(id);
     if (!instance) return [];
@@ -194,9 +218,12 @@ class InstanceManager extends EventEmitter {
     const instance = this.instances.get(id);
     if (instance) {
       instance.sessionId = sessionId;
-      instance.transcriptPath = transcriptPath;
+      // Keep a path we already know. polpo's claude agent reports its
+      // session without one, which used to wipe the path a takeover had
+      // carried over and left the session unwatched.
+      if (transcriptPath) instance.transcriptPath = transcriptPath;
       instance.lastActivity = Date.now();
-      this.emit('instance:session_info', { id, sessionId, transcriptPath });
+      this.emit('instance:session_info', { id, sessionId, transcriptPath: instance.transcriptPath || transcriptPath });
     }
   }
 

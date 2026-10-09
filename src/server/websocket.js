@@ -12,8 +12,13 @@ const { OpencodeScanner } = require('./opencode-scanner');
 const { PiScanner } = require('./pi-scanner');
 const { PiJsonlAdapter } = require('./pi-jsonl-adapter');
 const { GooseScanner } = require('./goose-scanner');
+const { SessionController, transcriptActivity, readTranscriptTail } = require('./session-control');
 
-function setupWebSocket(server, instanceManager, getAuthState, pushManager, outboxManager) {
+function setupWebSocket(server, instanceManager, getAuthState, pushManager, outboxManager, sessionController) {
+  // Prompts from the dashboard go through the same controller as the
+  // HTTP API and the gateway; index.js passes the shared instance.
+  const controller = sessionController || new SessionController({ instanceManager, outboxManager, getAuthState });
+
   const wss = new WebSocket.Server({ server });
 
   // Track mobile/browser clients
@@ -144,6 +149,14 @@ function setupWebSocket(server, instanceManager, getAuthState, pushManager, outb
     broadcastToDashboards({ type: 'instance:autoApprove', ...data });
   });
 
+  // Who may drive a session changed: taken over, or handed back after
+  // someone picked it up again in VSCode or a terminal.
+  instanceManager.on('instance:control', (data) => {
+    const inst = instanceManager.get(data.id);
+    if (inst && InstanceManager.isInternalInstance(inst)) return;
+    broadcastToDashboards({ type: 'instance:control', ...data });
+  });
+
   instanceManager.on('instance:session_info', (data) => {
     broadcastToDashboards({ type: 'instance:session_info', ...data });
 
@@ -233,7 +246,12 @@ function setupWebSocket(server, instanceManager, getAuthState, pushManager, outb
     });
 
     sessionToInstance.set(sessionId, instance.id);
-    instanceManager.updateStatus(instance.id, 'busy');
+    // Start from what the transcript says. Assuming 'busy' left a session
+    // found just after its last turn showing busy until you typed again,
+    // since the watcher only sees what is written after it starts, and
+    // a busy session cannot be taken over.
+    const activity = transcriptActivity(readTranscriptTail(transcriptPath));
+    instanceManager.updateStatus(instance.id, activity.state === 'idle' ? 'idle' : 'busy');
 
     // Start watching the JSONL file
     startWatcherForInstance(instance.id, transcriptPath, 'claude');
@@ -479,7 +497,7 @@ function setupWebSocket(server, instanceManager, getAuthState, pushManager, outb
             }
             return;
           }
-          handleDashboardMessage(msg, instanceManager, outboxManager);
+          handleDashboardMessage(msg, instanceManager, controller, broadcastToDashboards);
         } catch (e) {
           // ignore malformed messages
         }
@@ -534,36 +552,33 @@ function setupWebSocket(server, instanceManager, getAuthState, pushManager, outb
   return wss;
 }
 
-function handleDashboardMessage(msg, instanceManager, outboxManager) {
+function handleDashboardMessage(msg, instanceManager, controller, broadcastToDashboards) {
   switch (msg.type) {
     case 'send_prompt': {
-      // Send a user prompt to a specific Claude Code instance.
-      // When the session has outbox enabled, prepend the
-      // <polpo:outbox> directive so the agent knows where to drop any
-      // files the user should be able to download later. The original
-      // user text is what we mirror into the conversation log; the
-      // directive is internal plumbing that the dashboard shouldn't show.
+      // Send a user prompt to an instance. The controller prepends the
+      // outbox directive when the session has one, mirrors the original
+      // text into the conversation, and refuses a prompt into a session
+      // that was picked up again elsewhere since polpo took it over.
       //
       // `clientMsgId`, when present, is a UUID the dashboard generated
-      // for its optimistic local render. We round-trip it back through
-      // `addMessage` so the dashboard can match the broadcast against
-      // its pending bubble and reconcile (vs. rendering a duplicate).
+      // for its optimistic local render. It is round-tripped through the
+      // logged message so the dashboard can reconcile its pending bubble,
+      // and echoed on a refusal so it can mark that bubble failed at once.
       const { instanceId, text, attachments, clientMsgId } = msg;
-      const promptText = outboxManager
-        ? outboxManager.injectDirective(instanceId, text)
-        : text;
-      instanceManager.sendToAgent(instanceId, {
-        type: 'prompt',
-        text: promptText,
-        attachments: attachments || [],
-      });
-      instanceManager.addMessage(instanceId, {
-        role: 'user',
-        content: text,
+      const out = controller.sendPrompt(instanceId, text, {
         source: 'mobile',
         attachments: attachments || [],
-        clientMsgId: typeof clientMsgId === 'string' ? clientMsgId : undefined,
+        clientMsgId,
       });
+      if (!out.ok && typeof broadcastToDashboards === 'function') {
+        broadcastToDashboards({
+          type: 'prompt_refused',
+          instanceId,
+          clientMsgId: typeof clientMsgId === 'string' ? clientMsgId : null,
+          error: out.error,
+          message: out.message,
+        });
+      }
       break;
     }
     case 'approve': {

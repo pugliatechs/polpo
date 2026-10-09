@@ -552,6 +552,8 @@ GET    /v1/tasks/:id/artifacts/:name     host → caller (sealed, signed-attachm
 
 Gateway-spawned agents register in the dashboard with `source: 'gateway:<client>'`, so you can watch what the remote caller is doing from your phone and intervene if needed.
 
+The gateway can also follow the sessions running right now (`GET /v1/instances`, `GET /v1/instances/:id/conversation`), for example so a personal assistant on Telegram can tell you what your coding agent is doing. With `POLPO_GATEWAY_SESSION_CONTROL=1` it can also take over an idle session and continue it, under the same one-writer rule as the dashboard (see [Phone Takeover](#phone-takeover)).
+
 Security: separate Bearer key, per-token rate limits, path-traversal defense at every fs touchpoint, sealed-artifact pattern that defeats TOCTOU, fail-closed approvals (no human-in-the-loop confirmation), and no new dependencies. Full reference: [docs/gateway.md](docs/gateway.md). Building an AI agent that calls the gateway? See [docs/gateway-for-ai-agents.md](docs/gateway-for-ai-agents.md) — a compact, agent-oriented guide.
 
 ## Terminal Sync (Hooks)
@@ -579,6 +581,8 @@ Auto-discovered and hook instances are **read-only** — they mirror conversatio
 <p align="center">
   <img src="assets/codex-takeover.jpg" alt="Codex session with Take Over button" width="300">
 </p>
+
+A session has one writer at a time. While the agent is busy, polpo only lets you read the session; once the turn has ended you can take it over. If you then pick the session up again in VS Code or a terminal, polpo notices the new entries in the transcript, stops driving it, and tells you so on the dashboard. Take it over again once it is idle. For Claude, "idle" comes from the transcript: the last turn ended, or nothing has been written for 10 minutes (`POLPO_SESSION_STALE_MS`).
 
 When you return to your terminal, run `claude --continue` (Claude) or start a new session (Codex/Gemini) to reload the conversation. In VS Code, reload the window (`Ctrl+Shift+P` → "Reload Window") to pick up messages sent from Polpo — the VS Code extension caches conversations in memory and only re-reads session files on reload.
 

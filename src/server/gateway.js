@@ -64,6 +64,25 @@ function createGatewayRouter(opts) {
   const taskManager = opts.taskManager;
   const uploadStore = opts.uploadStore || null;
   const instanceManager = opts.instanceManager || null;
+  // SessionController, present only when POLPO_GATEWAY_SESSION_CONTROL=1.
+  const sessionControlCtl = opts.sessionControl || null;
+
+  /**
+   * Who is calling, by the same ladder as /v1/tasks: explicit client
+   * (X-Polpo-Client header over the body field), then the User-Agent's
+   * first token, then a pseudonym of the bearer token.
+   */
+  function clientLabelFor(req, body) {
+    const clientHeader = req.headers['x-polpo-client'];
+    const uaHeader = req.headers['user-agent'];
+    return resolveClientLabel({
+      client: (typeof clientHeader === 'string' && clientHeader.trim())
+        ? clientHeader.trim()
+        : (body && typeof body.client === 'string' ? body.client : undefined),
+      userAgent: typeof uaHeader === 'string' ? uaHeader.slice(0, 200) : null,
+      requesterFingerprint: tokenFingerprint(extractBearerToken(req)),
+    });
+  }
   const mind = opts.mind || null;
 
   // Default JSON parser used by /tasks, /health, etc.
@@ -416,6 +435,145 @@ function createGatewayRouter(opts) {
     const since = clampNonNegativeInt(req.query && req.query.since, 0, Number.MAX_SAFE_INTEGER);
     const limit = clampPositiveInt(req.query && req.query.limit, 50, sessionControl.MAX_CONVERSATION_LIMIT);
     res.json(sessionControl.conversationSince(inst, since, limit));
+  });
+
+  // ---- Driving live sessions (opt-in) ----
+  //
+  // Lets an external agent continue a coding session, under the same
+  // one-writer rule as the dashboard: a busy session can only be read; an
+  // idle one can be taken over and continued; and a session polpo drives
+  // is handed back the moment someone picks it up again in VSCode or a
+  // terminal. Off unless the host sets POLPO_GATEWAY_SESSION_CONTROL=1,
+  // because it reaches into the sessions you are working in.
+
+  const controlLimiter = createPerTokenRateLimit({ windowMs: 60_000, max: 30 });
+  const MAX_PROMPT_CHARS = 50_000;
+  // Instances that are not coding sessions a caller may drive: the mind
+  // has its own chat, its arms and gateway tasks their own lifecycles.
+  const NOT_DRIVABLE = new Set(['mind', 'mind-arm', 'gateway']);
+
+  function controlStatus(code) {
+    switch (code) {
+      case 'instance_not_found': return 404;
+      case 'session_busy':
+      case 'session_resumed_elsewhere': return 409;
+      case 'no_session': return 400;
+      case 'agent_not_connected': return 502;
+      default: return 500;
+    }
+  }
+
+  function sendControlFailure(res, out) {
+    const body = { error: out.error, message: out.message };
+    if (out.status) body.status = out.status;
+    if (out.writer) body.writer = out.writer;
+    return res.status(controlStatus(out.error)).json(body);
+  }
+
+  /** Common checks; returns the instance, or null after responding. */
+  function drivableInstance(req, res) {
+    if (!sessionControlCtl) {
+      res.status(503).json({ error: 'session_control_not_enabled' });
+      return null;
+    }
+    if (!sessionControl.INSTANCE_ID_RE.test(req.params.id)) {
+      res.status(400).json({ error: 'invalid_instance_id' });
+      return null;
+    }
+    const inst = findInstance(req.params.id);
+    if (!inst) {
+      res.status(404).json({ error: 'instance_not_found' });
+      return null;
+    }
+    if (NOT_DRIVABLE.has(sessionControl.originOf(inst))) {
+      res.status(400).json({ error: 'not_a_coding_session', origin: sessionControl.originOf(inst) });
+      return null;
+    }
+    return inst;
+  }
+
+  // POST /v1/instances/:id/takeover: start driving an idle session.
+  router.post('/instances/:id/takeover', controlLimiter, smallJson, async (req, res) => {
+    const inst = drivableInstance(req, res);
+    if (!inst) return;
+    try {
+      const out = await sessionControlCtl.takeover(inst.id, {
+        heldBy: 'gateway:' + clientLabelFor(req, req.body),
+        serverUrl: 'ws://127.0.0.1:' + req.socket.localPort,
+      });
+      if (!out.ok) return sendControlFailure(res, out);
+      const after = findInstance(out.instanceId);
+      res.json({ instanceId: out.instanceId, instance: after ? sessionControl.describeInstance(after) : null });
+    } catch (err) {
+      log.error('/v1/instances/:id/takeover failed:', err && err.message);
+      res.status(500).json({ error: 'takeover_failed' });
+    }
+  });
+
+  // POST /v1/instances/:id/prompt { text }: send a prompt into a session
+  // polpo drives. Follow the reply with GET /conversation?since=.
+  router.post('/instances/:id/prompt', controlLimiter, smallJson, (req, res) => {
+    const inst = drivableInstance(req, res);
+    if (!inst) return;
+    const body = req.body || {};
+    const text = typeof body.text === 'string' ? body.text : '';
+    if (!text.trim() || text.length > MAX_PROMPT_CHARS) {
+      return res.status(400).json({ error: 'invalid_text' });
+    }
+    if (inst.canReceivePrompts === false) {
+      return res.status(409).json({
+        error: 'takeover_required',
+        message: 'polpo is only watching this session. Take it over first, once it is idle.',
+        status: inst.status || null,
+      });
+    }
+    const out = sessionControlCtl.sendPrompt(inst.id, text, {
+      source: 'gateway:' + clientLabelFor(req, body),
+      requireDelivery: true,
+    });
+    if (!out.ok) return sendControlFailure(res, out);
+    const lastSeq = sessionControl.describeInstance(findInstance(inst.id) || inst).lastSeq;
+    res.json({ ok: true, queued: out.queued, lastSeq });
+  });
+
+  // POST /v1/instances/:id/abort: stop the turn in progress.
+  router.post('/instances/:id/abort', controlLimiter, (req, res) => {
+    const inst = drivableInstance(req, res);
+    if (!inst) return;
+    if (inst.canReceivePrompts === false) {
+      return res.status(409).json({ error: 'takeover_required' });
+    }
+    const sent = instanceManager.sendToAgent(inst.id, { type: 'abort' });
+    if (!sent) return res.status(502).json({ error: 'agent_not_connected' });
+    instanceManager.updateStatus(inst.id, 'idle');
+    res.json({ ok: true });
+  });
+
+  // POST /v1/sessions/:id/resume: continue a session from the catalogue,
+  // including one that is not live right now.
+  router.post('/sessions/:id/resume', controlLimiter, smallJson, async (req, res) => {
+    if (!sessionControlCtl) return res.status(503).json({ error: 'session_control_not_enabled' });
+    if (!convSearch.isValidSessionId(req.params.id)) {
+      return res.status(400).json({ error: 'invalid_session_id' });
+    }
+    const body = req.body || {};
+    const agentType = body.agentType === undefined ? 'claude' : body.agentType;
+    if (!['claude', 'codex', 'gemini', 'opencode', 'pi', 'goose'].includes(agentType)) {
+      return res.status(400).json({ error: 'invalid_agent_type' });
+    }
+    try {
+      const out = await sessionControlCtl.resume(req.params.id, {
+        agentType,
+        cwd: typeof body.cwd === 'string' ? body.cwd : undefined,
+        heldBy: 'gateway:' + clientLabelFor(req, body),
+        serverUrl: 'ws://127.0.0.1:' + req.socket.localPort,
+      });
+      if (!out.ok) return sendControlFailure(res, out);
+      res.json({ instanceId: out.instanceId, alreadyRunning: !!out.alreadyRunning });
+    } catch (err) {
+      log.error('/v1/sessions/:id/resume failed:', err && err.message);
+      res.status(500).json({ error: 'resume_failed' });
+    }
   });
 
   // GET /v1/search — merged disk + memory hits (chronological).
@@ -837,13 +995,7 @@ function createGatewayRouter(opts) {
     // body), then the User-Agent's first token, then a pseudonym of the
     // bearer token. It used to be validated here and then dropped, so a
     // goal never said which system had submitted it.
-    const clientHeader = req.headers['x-polpo-client'];
-    const uaHeader = req.headers['user-agent'];
-    const client = resolveClientLabel({
-      client: (typeof clientHeader === 'string' && clientHeader.trim()) ? clientHeader.trim() : body.client,
-      userAgent: typeof uaHeader === 'string' ? uaHeader.slice(0, 200) : null,
-      requesterFingerprint: tokenFingerprint(extractBearerToken(req)),
-    });
+    const client = clientLabelFor(req, body);
 
     try {
       // Gateway-submitted goals MUST auto-dispatch. There is no human

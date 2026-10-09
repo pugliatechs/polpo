@@ -825,6 +825,41 @@
         if (activeInstanceId === msg.id) renderDetail();
         break;
 
+      case 'instance:control':
+        // Taken over, or handed back because the session was picked up
+        // again in VSCode or a terminal. canReceivePrompts decides
+        // between the prompt box and the takeover banner.
+        if (instances.has(msg.id)) {
+          var ctl = instances.get(msg.id);
+          ctl.canReceivePrompts = msg.canReceivePrompts;
+          ctl.heldBy = msg.heldBy || null;
+        }
+        renderList();
+        if (activeInstanceId === msg.id) renderDetail();
+        break;
+
+      case 'prompt_refused':
+        // The server would not deliver a prompt (the session was picked
+        // up elsewhere since polpo took it). Mark the optimistic bubble
+        // failed now rather than after the confirmation timeout; the
+        // explanation arrives as a notice in the conversation.
+        if (msg.clientMsgId) {
+          clearOptimisticTimeout(msg.clientMsgId);
+          var rinst = instances.get(msg.instanceId);
+          if (rinst && rinst.conversation) {
+            for (var ri = rinst.conversation.length - 1; ri >= 0; ri--) {
+              var rm = rinst.conversation[ri];
+              if (rm && rm.clientMsgId === msg.clientMsgId) {
+                rm._pending = false;
+                rm._failed = true;
+                break;
+              }
+            }
+          }
+          markBubbleFailed(msg.clientMsgId);
+        }
+        break;
+
       case 'instance:session_info':
         if (instances.has(msg.id)) {
           instances.get(msg.id).sessionId = msg.sessionId;
@@ -960,6 +995,10 @@
     var safeId = escapeAttr(inst.id);
     var safeAgentType = VALID_AGENT_TYPES.indexOf(inst.agentType) !== -1 ? inst.agentType : 'claude';
     var gatewayClient = gatewayClientOf(inst);
+    // A session an external agent took over through the gateway.
+    if (!gatewayClient && typeof inst.heldBy === 'string' && inst.heldBy.indexOf('gateway:') === 0) {
+      gatewayClient = inst.heldBy.slice('gateway:'.length) || 'unknown';
+    }
     return (
       '<div class="' + cardClass + '" data-id="' + safeId + '">' +
         '<div class="card-top">' +
@@ -1369,12 +1408,13 @@
       $takeoverBanner.classList.remove('hidden');
       $inputArea.classList.add('hidden');
       // Show different UI based on whether agent is busy
-      if (inst.status === 'busy') {
-        $takeoverHint.textContent = 'This session is busy in your terminal. Abort the current task first, or wait for it to finish.';
+      if (inst.status === 'busy' || inst.status === 'waiting') {
+        // One writer at a time: whoever is driving it must finish first.
+        $takeoverHint.textContent = 'The agent is working on this session right now. Wait until it is idle, then take it over.';
         $takeoverActions.classList.add('hidden');
         $takeoverBusyActions.classList.remove('hidden');
       } else {
-        $takeoverHint.textContent = 'This session is running in your terminal. To send prompts from here, take over.';
+        $takeoverHint.textContent = 'This session is open outside polpo (VSCode or a terminal) and polpo is only watching it. To send prompts from here, take it over.';
         $takeoverActions.classList.remove('hidden');
         $takeoverBusyActions.classList.add('hidden');
       }

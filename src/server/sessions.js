@@ -1384,6 +1384,8 @@ module.exports = {
   loadHistory,
   resolveSessionCwd,
   readSessionCwd,
+  // Locates a transcript by session id; used to check who last wrote it.
+  findSessionFile,
   // Exported for unit tests: takes an absolute path to a JSONL file
   // and returns the parsed history array. The public `loadHistory`
   // resolves a sessionId to the right file via CLAUDE_DIR — for tests

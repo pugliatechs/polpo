@@ -57,6 +57,9 @@ If the base URL you were given ends in `.trycloudflare.com`, the host is reachab
 | Find individual message hits (low-level) | `GET /v1/search?q=...` |
 | List every session on this host | `GET /v1/sessions` |
 | Read one session's history | `GET /v1/sessions/:id` |
+| See which coding sessions are running right now | `GET /v1/instances` |
+| Follow a running session's new messages | `GET /v1/instances/:id/conversation?since=<seq>` |
+| Continue a running session (host must have `POLPO_GATEWAY_SESSION_CONTROL=1`) | `POST /v1/instances/:id/takeover`, then `POST /v1/instances/:id/prompt` |
 | Abort a runaway task you started | `DELETE /v1/tasks/:id` |
 | Delegate a multi-step *goal* (mind plans + fans out across arms) | `POST /v1/goals` → SSE on `/v1/goals/:id/stream` *(experimental, host must have `POLPO_MIND=1`)* |
 | List active goals / inspect / cancel | `GET /v1/goals`, `GET /v1/goals/:id`, `DELETE /v1/goals/:id` |
@@ -347,6 +350,42 @@ or ?offset=<int>&limit=<1..500>
 
 ---
 
+## 6a. Live sessions and continuing one (`/v1/instances`)
+
+`/v1/sessions` reads history. `/v1/instances` follows the sessions running right now, including the ones the operator has open in VSCode or a terminal (`origin: "discovered"`).
+
+```
+GET /v1/instances
+→ { instances: [{ instanceId, sessionId, agentType, origin, source, project, cwd,
+                  status, canReceivePrompts, heldBy, pendingApproval,
+                  firstPrompt, lastActivity, lastSeq }] }
+
+GET /v1/instances/:id                          → one entry
+GET /v1/instances/:id/conversation?since=<seq>&limit=<1..200>
+→ { instanceId, status, messages: [{ seq, role, contentType, content, timestamp, ... }],
+    lastSeq, hasMore, gap }
+```
+
+To follow a session, poll `/conversation` with `since` set to the `lastSeq` you got last time. `gap: true` means you fell more than 200 messages behind; read the rest from `GET /v1/sessions/:id`.
+
+### Continuing a session: one writer at a time
+
+Only when the host sets `POLPO_GATEWAY_SESSION_CONTROL=1`. Otherwise these routes return `503 session_control_not_enabled`: tell the operator, and fall back to reading the session and starting a `POST /v1/tasks` with its context.
+
+The rules you must follow:
+
+1. **Busy means read only.** If `status` is `busy` or `waiting`, do not try to take it over. Report what the session is doing, and check again later. `takeover` on a busy session returns `409 session_busy`.
+2. **Idle means you may take it over.** `POST /v1/instances/:id/takeover` returns `{ instanceId, instance }`. **Use the returned `instanceId` from then on**; it can differ from the one you passed.
+3. **Prompt, then poll.** `POST /v1/instances/:id/prompt` with `{ "text": "..." }` returns `{ ok, queued, lastSeq }`. Poll `/conversation?since=<lastSeq>` until `status` is `idle` again.
+4. **Handed back means stop.** `409 session_resumed_elsewhere` (with `writer`, e.g. `claude-vscode`) means the operator picked the session up again at their desk. Do not take it over again on your own: they are working in it. Tell them, and wait for them to ask.
+5. **`409 takeover_required`** means polpo is only watching that session. Take it over first, and only if it is idle.
+
+It continues the same session, it does not fork it: when the operator reloads the VSCode tab, they see what you did. Approvals are not forwarded to you; if `pendingApproval` is set, tell the operator to answer it on their dashboard. `POST /v1/instances/:id/abort` stops the turn in progress. `POST /v1/sessions/:id/resume` with `{ "agentType": "claude" }` continues a session from the catalogue that is not running right now (same rules; `409 session_busy` if a live copy is busy).
+
+Mind instances, mind arms and gateway tasks cannot be driven (`400 not_a_coding_session`). Control routes: 30/min per token.
+
+---
+
 ## 6b. Delegating a goal to the Alien Mind (`/v1/goals`) — experimental
 
 🔒 **Auth: Bearer required.** Rate limit: 10/min per token.
@@ -551,6 +590,16 @@ Discovery    GET  /v1/sessions/search?q=...
              GET  /v1/sessions/:id?tail=N
              GET  /v1/search?q=...&include=disk|memory|all
 
+Live         GET  /v1/instances
+             GET  /v1/instances/:id/conversation?since=<seq>
+Drive        POST /v1/instances/:id/takeover    (idle only; use the returned id)
+(opt-in)     POST /v1/instances/:id/prompt      body: {text}
+             POST /v1/instances/:id/abort
+             POST /v1/sessions/:id/resume       body: {agentType?, cwd?}
+             503 session_control_not_enabled  → host has it off; read only
+             409 session_busy                 → wait, do not retry in a loop
+             409 session_resumed_elsewhere    → operator is back; stop
+
 Execute      POST /v1/uploads               body: {filename, mediaType, dataBase64}
              POST /v1/tasks                 body: {agentType, cwd, prompt,
                                                    attachments?, captureArtifacts?}
@@ -583,7 +632,8 @@ Bounds       q:           2..200 chars
              :id pattern: [A-Za-z0-9._-]{1,200}
 
 Rate limits  search:    30/min per token
-             catalogue: 60/min per token
+             catalogue: 60/min per token (also /v1/instances reads)
+             control:   30/min per token
              upload:    60/min per token
              goals:     10/min per token (mind fan-out is expensive)
              profile:   6/min per token (disk scan, 60s cache)
@@ -599,8 +649,8 @@ Lifetimes    upload TTL:   1 hour
 
 These are explicitly out of scope. Don't ask, don't try; you'll get 404 or 403:
 
-- ❌ **No `POST /v1/sessions/:id/resume`** — you cannot continue an existing session via the gateway. If you need that session's context, read it with `GET /v1/sessions/:id` and embed in a new `POST /v1/tasks` prompt.
-- ❌ **No write access to past sessions** — `/v1/sessions/:id` is read-only.
+- ❌ **No continuing a session unless the host allows it**: `POST /v1/sessions/:id/resume` and the `/v1/instances/:id/takeover|prompt|abort` routes need `POLPO_GATEWAY_SESSION_CONTROL=1` on the host. Without it, read the session with `GET /v1/sessions/:id` and embed what you need in a new `POST /v1/tasks` prompt.
+- ❌ **No editing history**: `/v1/sessions/:id` is read-only. Continuing a session appends to it; nothing rewrites what is there.
 - ❌ **No way to enumerate tokens or other gateway keys** — there's no introspection of the auth state.
 - ❌ **No host-level operations** — you cannot list processes, read arbitrary files, or execute shell commands directly. Your only execute path is `POST /v1/tasks`, and what runs there is bound by the spawned agent's permission posture.
 - ❌ **No cross-host coordination** — every host is independent. You're the orchestrator if you want fan-out.
