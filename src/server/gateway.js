@@ -38,6 +38,8 @@ const { scanSessions, loadHistory } = require('./sessions');
 const { analyzeProfile } = require('./profile-analyzer');
 const { makeLogger } = require('../util/logger');
 const { resolveClientLabel } = require('./gateway-tasks');
+const InstanceManager = require('./instances');
+const sessionControl = require('./session-control');
 const { capTail, goalFinalOutput } = require('../mind/goal-output');
 
 const log = makeLogger('gateway');
@@ -361,6 +363,60 @@ function createGatewayRouter(opts) {
       source: inst.source || null,
     };
   }
+
+  // ---- Live instances ----
+  //
+  // What is running on this machine right now: sessions polpo started,
+  // sessions it only watches (VSCode, a terminal), gateway tasks and the
+  // mind. Lets an external agent (a PA on Telegram, say) see what the
+  // coding agents are doing and follow a session as it progresses.
+  // Read-only: driving a session goes through the control endpoints.
+
+  /** A visible live instance by id, or null. Internal ones stay hidden. */
+  function findInstance(id) {
+    if (!instanceManager || !sessionControl.INSTANCE_ID_RE.test(String(id || ''))) return null;
+    const inst = instanceManager.get(id);
+    if (!inst || InstanceManager.isInternalInstance(inst)) return null;
+    return inst;
+  }
+
+  // GET /v1/instances: every live instance, newest activity first.
+  router.get('/instances', catalogueLimiter, (req, res) => {
+    if (!instanceManager) return res.status(503).json({ error: 'instances_not_supported' });
+    const list = (instanceManager.getAll() || [])
+      .map((summary) => findInstance(summary.id))
+      .filter(Boolean)
+      .map(sessionControl.describeInstance)
+      .sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0));
+    res.json({ instances: list });
+  });
+
+  // GET /v1/instances/:id: one live instance.
+  router.get('/instances/:id', catalogueLimiter, (req, res) => {
+    if (!instanceManager) return res.status(503).json({ error: 'instances_not_supported' });
+    if (!sessionControl.INSTANCE_ID_RE.test(req.params.id)) {
+      return res.status(400).json({ error: 'invalid_instance_id' });
+    }
+    const inst = findInstance(req.params.id);
+    if (!inst) return res.status(404).json({ error: 'instance_not_found' });
+    res.json(sessionControl.describeInstance(inst));
+  });
+
+  // GET /v1/instances/:id/conversation?since=<seq>&limit=<n>: messages
+  // newer than `since`. Poll with the returned lastSeq to follow a
+  // session; polling also works over Cloudflare quick tunnels, which do
+  // not support Server-Sent Events.
+  router.get('/instances/:id/conversation', catalogueLimiter, (req, res) => {
+    if (!instanceManager) return res.status(503).json({ error: 'instances_not_supported' });
+    if (!sessionControl.INSTANCE_ID_RE.test(req.params.id)) {
+      return res.status(400).json({ error: 'invalid_instance_id' });
+    }
+    const inst = findInstance(req.params.id);
+    if (!inst) return res.status(404).json({ error: 'instance_not_found' });
+    const since = clampNonNegativeInt(req.query && req.query.since, 0, Number.MAX_SAFE_INTEGER);
+    const limit = clampPositiveInt(req.query && req.query.limit, 50, sessionControl.MAX_CONVERSATION_LIMIT);
+    res.json(sessionControl.conversationSince(inst, since, limit));
+  });
 
   // GET /v1/search — merged disk + memory hits (chronological).
   router.get('/search', searchLimiter, async (req, res) => {
