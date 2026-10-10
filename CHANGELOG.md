@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.2.4](https://github.com/pugliatechs/polpo/compare/v1.2.3...v1.2.4) (2026-10-10)
+
+
+### Features
+
+* **gateway,mind:** longer, configurable task timeouts ([25b2b47](https://github.com/pugliatechs/polpo/commit/25b2b477f9decb55080469ed1a0e44e3f48624f1))
+* **gateway:** let external agents see live coding sessions and follow them ([3546764](https://github.com/pugliatechs/polpo/commit/3546764e805870d39f2b17b562abc1b1f899fe69))
+* **sessions:** one writer at a time, and let the gateway continue a session ([34a0261](https://github.com/pugliatechs/polpo/commit/34a02612178887950f5bc32afc2f3162d05b5e76))
+
+
+### Bug Fixes
+
+* **tunnel:** restart a tunnel that is running but no longer connected ([59cd0d8](https://github.com/pugliatechs/polpo/commit/59cd0d8b92b774502c1b2a2f703d807efcb6dc8f))
+* **web:** re-sync the tunnel QR after the dashboard reconnects ([fed8d3f](https://github.com/pugliatechs/polpo/commit/fed8d3fd4229bf27ae1fbffa0926832793c1d90e))
+
+
+### Miscellaneous Chores
+
+* release 1.2.4 ([a165126](https://github.com/pugliatechs/polpo/commit/a1651269d7e25a3ad9322089c92446ed894a9af1))
+
 ## [1.2.3](https://github.com/pugliatechs/polpo/compare/v1.2.2...v1.2.3) (2026-09-24)
 
 
