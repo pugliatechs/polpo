@@ -11,6 +11,7 @@ const {
   lastConversationalUuid,
   foreignWriterSince,
   writerLabel,
+  sessionPermissionMode,
 } = require('../src/server/session-control');
 
 /**
@@ -132,6 +133,25 @@ describe('transcriptActivity', () => {
   });
 });
 
+describe('sessionPermissionMode', () => {
+  const user = (writer, mode) => entry('u-' + writer + mode, writer, { type: 'user', permissionMode: mode });
+
+  it('takes the latest mode set outside polpo', () => {
+    assert.equal(sessionPermissionMode([user('claude-vscode', 'acceptEdits'), user('claude-vscode', 'auto')]), 'auto');
+  });
+
+  it('ignores the turns polpo drove', () => {
+    assert.equal(sessionPermissionMode([user('claude-vscode', 'auto'), user('sdk-cli', 'default')]), 'auto');
+  });
+
+  it('returns nothing for default, bypass, or no mode at all', () => {
+    assert.equal(sessionPermissionMode([user('cli', 'default')]), null);
+    assert.equal(sessionPermissionMode([user('cli', 'bypassPermissions')]), null);
+    assert.equal(sessionPermissionMode([entry('a', 'cli', { type: 'user' })]), null);
+    assert.equal(sessionPermissionMode([]), null);
+  });
+});
+
 describe('SessionController', () => {
   let im, agents, ctl, transcript;
 
@@ -148,6 +168,8 @@ describe('SessionController', () => {
         im.setAgentSocket(id, { readyState: 1, send: () => {} });
       },
       releaseProcess() { this.released++; },
+      modes: [],
+      setClaudePermissionMode(m) { this.modes.push(m); },
     };
     agents.push(agent);
     return agent;
@@ -243,7 +265,67 @@ describe('SessionController', () => {
       const events = [];
       im.on('instance:control', (e) => events.push(e));
       const out = await ctl.takeover('vscode-1', { heldBy: 'dashboard' });
-      assert.deepEqual(events.pop(), { id: out.instanceId, canReceivePrompts: true, heldBy: 'dashboard' });
+      assert.deepEqual(events.pop(),
+        { id: out.instanceId, canReceivePrompts: true, heldBy: 'dashboard', permissionMode: null });
+    });
+  });
+
+  // polpo used to continue every session in its own default mode, so a
+  // session you ran in auto mode at the desk asked the phone to approve
+  // even a git fetch, and the approvals expired with nobody there.
+  describe('permission mode', () => {
+    beforeEach(() => {
+      writeTranscript(transcript, [
+        entry('v0', 'claude-vscode', { type: 'user', permissionMode: 'auto' }),
+        entry('v1', 'claude-vscode', { message: { content: 'x', stop_reason: 'end_turn' } }),
+      ]);
+    });
+
+    it('carries over the mode the session had at the desk when asked to', async () => {
+      discovered('idle');
+      const out = await ctl.takeover('vscode-1', { heldBy: 'dashboard', inheritPermissionMode: true });
+      assert.equal(agents[0].opts.claudePermissionMode, 'auto');
+      assert.equal(im.get(out.instanceId).permissionMode, 'auto');
+    });
+
+    it('keeps polpo\'s default when not asked to', async () => {
+      discovered('idle');
+      const out = await ctl.takeover('vscode-1', { heldBy: 'gateway:openclaw' });
+      assert.equal(agents[0].opts.claudePermissionMode, undefined);
+      assert.equal(im.get(out.instanceId).permissionMode, null);
+    });
+
+    it('never carries over bypassPermissions', async () => {
+      writeTranscript(transcript, [
+        entry('v0', 'claude-vscode', { type: 'user', permissionMode: 'bypassPermissions' }),
+        entry('v1', 'claude-vscode', { message: { content: 'x', stop_reason: 'end_turn' } }),
+      ]);
+      discovered('idle');
+      await ctl.takeover('vscode-1', { inheritPermissionMode: true });
+      assert.equal(agents[0].opts.claudePermissionMode, undefined);
+    });
+
+    it('drops the mode when a holder without it retakes the session', async () => {
+      discovered('idle');
+      const id = (await ctl.takeover('vscode-1', { heldBy: 'dashboard', inheritPermissionMode: true })).instanceId;
+      im.get(id).transcriptPath = transcript;
+      append(transcript, entry('v2', 'claude-vscode', { message: { content: 'x', stop_reason: 'end_turn' } }));
+      ctl.sendPrompt(id, 'x');                       // handed back
+      assert.equal(im.get(id).permissionMode, null, 'cleared on handback');
+      const again = await ctl.takeover(id, { heldBy: 'gateway:openclaw' });
+      assert.equal(again.retaken, true);
+      assert.deepEqual(agents[0].modes, [null], 'the running agent is told');
+      assert.equal(im.get(id).permissionMode, null);
+    });
+
+    it('applies to a session resumed from the catalogue', async () => {
+      ctl = new SessionController({
+        instanceManager: im, createAgent: agentFactory, hubPort: 7890,
+        sessions: { findSessionFile: (id) => (id === 'sess-1' ? transcript : null) },
+      });
+      const out = await ctl.resume('sess-1', { cwd: tmp, inheritPermissionMode: true });
+      assert.equal(agents[0].opts.claudePermissionMode, 'auto');
+      assert.equal(im.get(out.instanceId).permissionMode, 'auto');
     });
   });
 

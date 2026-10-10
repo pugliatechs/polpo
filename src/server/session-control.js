@@ -17,6 +17,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { redact, redactSecrets } = require('./redact');
 
 // A single message can be large (a tool result, a whole file the agent
 // read). The conversation API caps each one so a poll stays small.
@@ -47,6 +48,11 @@ const GEMINI_TMP_DIR = path.join(os.homedir(), '.gemini', 'tmp');
 // writes an end_turn). The cost: one silent tool call running longer than
 // this would look idle. POLPO_SESSION_STALE_MS overrides it.
 const DEFAULT_STALE_MS = 10 * 60 * 1000;
+
+// Claude permission modes a takeover may carry over from the session.
+// Never bypassPermissions: it would also skip polpo's own approval
+// prompt. 'default' (or 'manual') needs no flag.
+const INHERITABLE_PERMISSION_MODES = new Set(['acceptEdits', 'auto', 'plan', 'dontAsk']);
 
 // Assistant stop reasons that end a turn.
 const TURN_ENDED = new Set(['end_turn', 'refusal', 'max_tokens', 'stop_sequence']);
@@ -86,11 +92,13 @@ function describeApproval(approval) {
   let input = null;
   if (approval.input !== undefined) {
     const raw = typeof approval.input === 'string' ? approval.input : JSON.stringify(approval.input);
-    input = capText(raw, MAX_APPROVAL_INPUT_CHARS).text;
+    // Redacted before capping, so a cap cannot split a secret into a
+    // fragment too short to recognise.
+    input = capText(redact(raw), MAX_APPROVAL_INPUT_CHARS).text;
   }
   return {
     tool: typeof approval.tool === 'string' ? approval.tool : null,
-    description: typeof approval.description === 'string' ? capText(approval.description, 1000).text : null,
+    description: typeof approval.description === 'string' ? capText(redact(approval.description), 1000).text : null,
     input: input,
   };
 }
@@ -116,15 +124,19 @@ function describeInstance(inst) {
     // Who took it over ('dashboard', 'gateway:<client>'), or null when
     // nobody holds it through polpo.
     heldBy: inst.heldBy || null,
+    // Claude's permission mode while polpo drives it ('auto', ...), or
+    // null when every approval goes to the dashboard.
+    permissionMode: inst.permissionMode || null,
     pendingApproval: describeApproval(inst.pendingApproval),
-    firstPrompt: inst.firstPrompt ? capText(inst.firstPrompt, 200).text : null,
+    firstPrompt: inst.firstPrompt ? capText(redact(inst.firstPrompt), 200).text : null,
     lastActivity: inst.lastActivity || null,
     lastSeq: last && typeof last.seq === 'number' ? last.seq : 0,
   };
 }
 
 function serializeMessage(m) {
-  const content = capText(typeof m.content === 'string' ? m.content : JSON.stringify(m.content), MAX_MESSAGE_CHARS);
+  const clean = redactSecrets(typeof m.content === 'string' ? m.content : JSON.stringify(m.content));
+  const content = capText(clean.text, MAX_MESSAGE_CHARS);
   const out = {
     seq: typeof m.seq === 'number' ? m.seq : null,
     role: m.role || null,
@@ -133,6 +145,7 @@ function serializeMessage(m) {
     timestamp: m.timestamp || null,
   };
   if (content.truncated) out.truncated = true;
+  if (clean.redacted) out.redacted = true;
   if (m.source) out.source = m.source;
   if (m.toolUseId) out.toolUseId = m.toolUseId;
   if (m.isError) out.isError = true;
@@ -239,6 +252,25 @@ function foreignWriterSince(entries, baselineUuid) {
     if (!isConversational(e)) continue;
     const writer = typeof e.entrypoint === 'string' ? e.entrypoint : null;
     if (writer && !POLPO_WRITERS.has(writer)) return { writer };
+  }
+  return null;
+}
+
+/**
+ * The permission mode the session was last used with outside polpo
+ * (VSCode, a terminal), as recorded on its prompts. Only a mode from
+ * INHERITABLE_PERMISSION_MODES is returned; anything else means polpo
+ * asks for every approval, as before.
+ *
+ * @returns {?string}
+ */
+function sessionPermissionMode(entries) {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i];
+    if (!e || e.type !== 'user' || e.isSidechain) continue;
+    if (POLPO_WRITERS.has(e.entrypoint)) continue;
+    if (typeof e.permissionMode !== 'string') continue;
+    return INHERITABLE_PERMISSION_MODES.has(e.permissionMode) ? e.permissionMode : null;
   }
   return null;
 }
@@ -406,6 +438,21 @@ class SessionController {
     return inst.status === 'busy';
   }
 
+  /**
+   * The permission mode to drive a session in: the one it was last used
+   * with outside polpo, when the caller may carry it over; otherwise none,
+   * and every approval goes to the dashboard.
+   */
+  _permissionModeFor(transcriptPath, inherit) {
+    if (!inherit || !transcriptPath) return null;
+    return sessionPermissionMode(readTranscriptTail(transcriptPath));
+  }
+
+  /** Point a running agent at a new permission mode, if it has one. */
+  _applyPermissionMode(agent, mode) {
+    if (agent && typeof agent.setClaudePermissionMode === 'function') agent.setClaudePermissionMode(mode);
+  }
+
   /** Whether the handback check applies: a Claude JSONL transcript. */
   _guarded(inst) {
     return !!inst && (!inst.agentType || inst.agentType === 'claude');
@@ -424,7 +471,7 @@ class SessionController {
   }
 
   /** Mark an instance as driven by polpo, recording the takeover point. */
-  _hold(instanceId, heldBy) {
+  _hold(instanceId, heldBy, permissionMode) {
     const inst = this.instanceManager.get(instanceId);
     if (!inst) return;
     let baselineUuid = null;
@@ -444,7 +491,11 @@ class SessionController {
       }
     }
     this.held.set(instanceId, { baselineUuid, heldBy: heldBy || 'polpo' });
-    this.instanceManager.setControl(instanceId, { canReceivePrompts: true, heldBy: heldBy || 'polpo' });
+    this.instanceManager.setControl(instanceId, {
+      canReceivePrompts: true,
+      heldBy: heldBy || 'polpo',
+      permissionMode: permissionMode || null,
+    });
   }
 
   /**
@@ -475,7 +526,7 @@ class SessionController {
     if (agent && typeof agent.releaseProcess === 'function') {
       try { agent.releaseProcess(); } catch {}
     }
-    this.instanceManager.setControl(instanceId, { canReceivePrompts: false, heldBy: null });
+    this.instanceManager.setControl(instanceId, { canReceivePrompts: false, heldBy: null, permissionMode: null });
     this.instanceManager.addMessage(instanceId, {
       role: 'system',
       content: 'This session was picked up again in ' + writerLabel(writer) +
@@ -545,6 +596,8 @@ class SessionController {
    * @param {object} [opts]
    * @param {string} [opts.heldBy] - 'dashboard' or 'gateway:<client>'
    * @param {string} [opts.serverUrl]
+   * @param {boolean} [opts.inheritPermissionMode] - continue in the
+   *   permission mode the session was last used with outside polpo
    * @returns {Promise<{ok: true, instanceId: string, retaken?: boolean} | {ok: false, error: string, message: string}>}
    */
   async takeover(instanceId, opts) {
@@ -557,6 +610,10 @@ class SessionController {
         { status: inst.status });
     }
 
+    const mode = this._guarded(inst)
+      ? this._permissionModeFor(this.transcriptPathFor(inst), o.inheritPermissionMode)
+      : null;
+
     // A session polpo already runs an agent for (taken over earlier and
     // handed back, or open twice): reclaim it rather than spawning another.
     const existing = this.agents.get(inst.sessionId);
@@ -566,7 +623,9 @@ class SessionController {
         // polpo already runs; keep the agent's instance.
         this.instanceManager.unregister(instanceId);
       }
-      this._hold(existing.instanceId, o.heldBy);
+      // The new holder may not be allowed the mode the last one had.
+      this._applyPermissionMode(existing, mode);
+      this._hold(existing.instanceId, o.heldBy, mode);
       return { ok: true, instanceId: existing.instanceId, retaken: true };
     }
     if (existing) this._forget(inst.sessionId, existing);
@@ -580,6 +639,7 @@ class SessionController {
       resumeSessionId: resumeId,
       serverUrl: this._serverUrl(o.serverUrl),
       token: this._authToken(),
+      claudePermissionMode: mode || undefined,
     });
     await agent.start();
     this.track(inst.sessionId, agent);
@@ -595,7 +655,7 @@ class SessionController {
       }
     }
     this.instanceManager.unregister(instanceId);
-    this._hold(agent.instanceId, o.heldBy);
+    this._hold(agent.instanceId, o.heldBy, mode);
     return { ok: true, instanceId: agent.instanceId };
   }
 
@@ -604,7 +664,8 @@ class SessionController {
    * can drive it. Refused while a live copy of it is busy elsewhere.
    *
    * @param {string} sessionId
-   * @param {object} [opts] - { name, cwd, agentType, heldBy, serverUrl }
+   * @param {object} [opts] - { name, cwd, agentType, heldBy, serverUrl,
+   *   inheritPermissionMode }
    */
   async resume(sessionId, opts) {
     const o = opts || {};
@@ -615,9 +676,20 @@ class SessionController {
         { status: live.status, instanceId: live.id });
     }
 
+    let mode = null;
+    if (!o.agentType || o.agentType === 'claude') {
+      const sessions = this._sessionsModule();
+      let p = null;
+      if (typeof sessions.findSessionFile === 'function') {
+        try { p = sessions.findSessionFile(sessionId) || null; } catch { p = null; }
+      }
+      mode = this._permissionModeFor(p, o.inheritPermissionMode);
+    }
+
     const existing = this.agents.get(sessionId);
     if (existing && this._agentAlive(existing)) {
-      this._hold(existing.instanceId, o.heldBy);
+      this._applyPermissionMode(existing, mode);
+      this._hold(existing.instanceId, o.heldBy, mode);
       return { ok: true, instanceId: existing.instanceId, alreadyRunning: true };
     }
     if (existing) this._forget(sessionId, existing);
@@ -644,12 +716,13 @@ class SessionController {
       resumeSessionId: resumeId,
       serverUrl: this._serverUrl(o.serverUrl),
       token: this._authToken(),
+      claudePermissionMode: mode || undefined,
     });
     await agent.start();
     this.track(sessionId, agent);
     // Set the session id right away so the dashboard can dedup.
     this.instanceManager.setSessionInfo(agent.instanceId, resumeId, null);
-    this._hold(agent.instanceId, o.heldBy);
+    this._hold(agent.instanceId, o.heldBy, mode);
     return { ok: true, instanceId: agent.instanceId };
   }
 
@@ -677,6 +750,8 @@ class SessionController {
 module.exports = {
   SessionController,
   transcriptActivity,
+  sessionPermissionMode,
+  INHERITABLE_PERMISSION_MODES,
   DEFAULT_STALE_MS,
   POLPO_WRITERS,
   readTranscriptTail,

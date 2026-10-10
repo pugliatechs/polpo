@@ -49,6 +49,11 @@ class WrappedAgent {
     this.resumeSessionId = options.resumeSessionId || null;
     this.model = options.model || null;
     this.permissionMode = options.permissionMode || 'default';
+    // Claude's own permission mode (--permission-mode), carried over from
+    // the session when polpo takes one over, so the session keeps the mode
+    // it had at the desk. Whatever that mode still asks about goes to
+    // polpo's approval prompt as usual.
+    this.claudePermissionMode = options.claudePermissionMode || null;
     this.claudeBinary = options.claudeBinary || 'claude';
 
     // Hub connection state
@@ -59,6 +64,9 @@ class WrappedAgent {
 
     // Claude process state
     this.claude = null;
+    // Processes stopped by releaseProcess(); their late output and exit
+    // are ignored.
+    this._released = new WeakSet();
     this.claudeSessionId = null;
     this.busy = false;
     this.outputBuffer = '';
@@ -223,6 +231,9 @@ class WrappedAgent {
       const mcpConfigPath = path.join(os.tmpdir(), `polpo-mcp-${this.instanceId}.json`);
       fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfigObj, null, 2), { mode: 0o600 });
       this._log(`MCP config written to ${mcpConfigPath}`);
+      if (this.claudePermissionMode) {
+        args.push('--permission-mode', this.claudePermissionMode);
+      }
       args.push('--permission-prompt-tool', 'mcp__polpo__polpo_approve');
       args.push('--mcp-config', mcpConfigPath);
     }
@@ -237,15 +248,17 @@ class WrappedAgent {
       env.PATH = nodeDir + ':' + (env.PATH || '');
     }
 
-    this.claude = spawn(this.claudeBinary, args, {
+    const proc = spawn(this.claudeBinary, args, {
       cwd: this.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       env,
     });
+    this.claude = proc;
 
     // Parse stdout as newline-delimited JSON
-    const rl = readline.createInterface({ input: this.claude.stdout });
+    const rl = readline.createInterface({ input: proc.stdout });
     rl.on('line', (line) => {
+      if (this._released.has(proc)) return;
       try {
         const msg = JSON.parse(line);
         this._handleClaudeMessage(msg);
@@ -260,25 +273,20 @@ class WrappedAgent {
     });
 
     // Capture stderr for debugging
-    const stderrRl = readline.createInterface({ input: this.claude.stderr });
+    const stderrRl = readline.createInterface({ input: proc.stderr });
     stderrRl.on('line', (line) => {
       if (line.trim()) {
         this._log(`[claude stderr] ${line}`);
       }
     });
 
-    this.claude.on('exit', (code) => {
+    proc.on('exit', (code) => {
       this._log(`Claude process exited (code ${code})`);
+      // Released on purpose: already detached, and a newer process may be
+      // running by now. No "[session ended]" line.
+      if (this._released.has(proc)) return;
       this.claude = null;
       this.busy = false;
-      // Released on purpose because someone else picked the session up:
-      // no "[session ended]" line, and the agent stays connected so the
-      // next takeover can resume the session from its transcript.
-      if (this._releasing) {
-        this._releasing = false;
-        this._sendToHub({ type: 'status', status: 'idle' });
-        return;
-      }
       this._sendToHub({ type: 'status', status: 'idle' });
       this._sendToHub({
         type: 'output',
@@ -293,7 +301,7 @@ class WrappedAgent {
       }
     });
 
-    this.claude.on('error', (err) => {
+    proc.on('error', (err) => {
       this._log(`Claude process error: ${err.message}`);
       this._sendToHub({
         type: 'output',
@@ -612,9 +620,27 @@ class WrappedAgent {
    * which reads the transcript as it is now.
    */
   releaseProcess() {
-    if (!this.claude) return;
-    this._releasing = true;
-    this.claude.kill('SIGTERM');
+    const proc = this.claude;
+    if (!proc) return;
+    // Detach first, so a prompt arriving before the process has exited
+    // starts a new one instead of writing into the old one.
+    this._released.add(proc);
+    this.claude = null;
+    this.busy = false;
+    this._sendToHub({ type: 'status', status: 'idle' });
+    proc.kill('SIGTERM');
+  }
+
+  /**
+   * Change Claude's permission mode for the next process. A running
+   * process keeps the mode it was started with, so it is released and
+   * the next prompt starts one in the new mode.
+   */
+  setClaudePermissionMode(mode) {
+    const next = mode || null;
+    if (next === this.claudePermissionMode) return;
+    this.claudePermissionMode = next;
+    this.releaseProcess();
   }
 
   stop() {

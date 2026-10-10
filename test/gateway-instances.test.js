@@ -176,11 +176,11 @@ describe('Gateway: driving live sessions', () => {
     return agent;
   }
 
-  function startWith(sessionControl) {
+  function startWith(sessionControl, extra) {
     const app = express();
-    app.use('/v1', createGatewayRouter({
+    app.use('/v1', createGatewayRouter(Object.assign({
       taskManager: stubTaskManager(), getKey: () => KEY, instanceManager: im, sessionControl,
-    }));
+    }, extra || {})));
     return new Promise((resolve) => {
       const server = app.listen(0, '127.0.0.1', () => resolve({ server, url: 'http://127.0.0.1:' + server.address().port }));
     });
@@ -307,5 +307,94 @@ describe('Gateway: driving live sessions', () => {
       const r = await fetch(h.url + '/v1/instances/vscode-1/takeover', { method: 'POST' });
       assert.equal(r.status, 401);
     });
+  });
+  describe('permission mode', () => {
+    // The session ran in auto mode at the desk.
+    beforeEach(() => {
+      fs.writeFileSync(transcript, [
+        { type: 'user', uuid: 'v0', entrypoint: 'claude-vscode', permissionMode: 'auto', message: {} },
+        { type: 'assistant', uuid: 'v1', entrypoint: 'claude-vscode', message: { stop_reason: 'end_turn' } },
+      ].map((e) => JSON.stringify(e)).join('\n') + '\n');
+    });
+
+    it('is not carried over to an external caller by default', async () => {
+      h = await startWith(new SessionController({ instanceManager: im, createAgent: agentFactory, sessions: {} }));
+      const r = await post('/v1/instances/vscode-1/takeover');
+      assert.equal(r.status, 200);
+      assert.equal(agents[0].opts.claudePermissionMode, undefined);
+      assert.equal(r.body.instance.permissionMode, null);
+    });
+
+    it('is carried over when the host allows it', async () => {
+      h = await startWith(new SessionController({ instanceManager: im, createAgent: agentFactory, sessions: {} }),
+        { inheritPermissionMode: true });
+      const r = await post('/v1/instances/vscode-1/takeover');
+      assert.equal(agents[0].opts.claudePermissionMode, 'auto');
+      assert.equal(r.body.instance.permissionMode, 'auto');
+    });
+  });
+});
+
+// Coding sessions are full of credentials. What the gateway returns goes
+// wherever the caller sends it (a chat app, a model provider), so the
+// common shapes of secret are removed on the way out.
+describe('Gateway: secrets in session content', () => {
+  // Built at runtime so no secret-shaped literal sits in the source.
+  const FAKE_KEY = ['fmpro', 'Ab3dEf9hIj2kLm8nOp1qRs7tUv4wXy6zAB0cD-eFgH5iJk='].join('_');
+  const COMMAND = "printf '%s' '" + FAKE_KEY + "' > /tmp/.key";
+  let im, h, saved;
+
+  beforeEach(async () => {
+    saved = process.env.POLPO_GATEWAY_REDACT;
+    delete process.env.POLPO_GATEWAY_REDACT;
+    im = new InstanceManager();
+    im.register({ id: 'sess-inst', name: 'runner check', project: 'fmpro', sessionId: 'sess-secret',
+      firstPrompt: 'use the key ' + FAKE_KEY });
+    im.addMessage('sess-inst', { role: 'assistant', content: 'Staging the key: ' + COMMAND });
+    im.addMessage('sess-inst', { role: 'assistant', contentType: 'tool_use', content: { command: COMMAND } });
+    im.setPendingApproval('sess-inst', { tool: 'Bash', description: 'Stage the prod key', input: { command: COMMAND } });
+    h = await start(im);
+  });
+
+  afterEach(async () => {
+    if (saved === undefined) delete process.env.POLPO_GATEWAY_REDACT;
+    else process.env.POLPO_GATEWAY_REDACT = saved;
+    await new Promise((r) => h.server.close(r));
+  });
+
+  it('removes them from a pending approval and the first prompt', async () => {
+    const { body } = await get(h, '/v1/instances/sess-inst');
+    assert.ok(!JSON.stringify(body).includes(FAKE_KEY));
+    assert.match(body.pendingApproval.input, /\[redacted\]/);
+    assert.match(body.firstPrompt, /\[redacted\]/);
+  });
+
+  it('removes them from the live conversation and says so', async () => {
+    const { body } = await get(h, '/v1/instances/sess-inst/conversation');
+    assert.ok(!JSON.stringify(body).includes(FAKE_KEY));
+    assert.ok(body.messages.every((m) => m.redacted === true));
+  });
+
+  it('removes them from session history and search', async () => {
+    const hist = await get(h, '/v1/sessions/sess-secret');
+    assert.equal(hist.status, 200);
+    assert.ok(!JSON.stringify(hist.body).includes(FAKE_KEY));
+    const search = await get(h, '/v1/search?q=staging+the+key&include=memory');
+    assert.equal(search.status, 200);
+    assert.ok(search.body.results.length >= 1, 'the message was found');
+    assert.ok(!JSON.stringify(search.body).includes(FAKE_KEY));
+  });
+
+  it('leaves ordinary text alone', async () => {
+    im.addMessage('sess-inst', { role: 'assistant', content: 'merged as 524280b, session 4b1f4bb6-14e6-49d8-89a7-411d362c78bf' });
+    const { body } = await get(h, '/v1/instances/sess-inst/conversation?since=2');
+    assert.equal(body.messages[0].content, 'merged as 524280b, session 4b1f4bb6-14e6-49d8-89a7-411d362c78bf');
+    assert.equal(body.messages[0].redacted, undefined);
+  });
+
+  it('can be turned off by the host', async () => {
+    process.env.POLPO_GATEWAY_REDACT = '0';
+    const { body } = await get(h, '/v1/instances/sess-inst');
+    assert.ok(body.pendingApproval.input.includes(FAKE_KEY));
   });
 });

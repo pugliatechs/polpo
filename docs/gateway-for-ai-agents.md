@@ -357,7 +357,7 @@ or ?offset=<int>&limit=<1..500>
 ```
 GET /v1/instances
 → { instances: [{ instanceId, sessionId, agentType, origin, source, project, cwd,
-                  status, canReceivePrompts, heldBy, pendingApproval,
+                  status, canReceivePrompts, heldBy, permissionMode, pendingApproval,
                   firstPrompt, lastActivity, lastSeq }] }
 
 GET /v1/instances/:id                          → one entry
@@ -380,7 +380,9 @@ The rules you must follow:
 4. **Handed back means stop.** `409 session_resumed_elsewhere` (with `writer`, e.g. `claude-vscode`) means the operator picked the session up again at their desk. Do not take it over again on your own: they are working in it. Tell them, and wait for them to ask.
 5. **`409 takeover_required`** means polpo is only watching that session. Take it over first, and only if it is idle.
 
-It continues the same session, it does not fork it: when the operator reloads the VSCode tab, they see what you did. Approvals are not forwarded to you; if `pendingApproval` is set, tell the operator to answer it on their dashboard. `POST /v1/instances/:id/abort` stops the turn in progress. `POST /v1/sessions/:id/resume` with `{ "agentType": "claude" }` continues a session from the catalogue that is not running right now (same rules; `409 session_busy` if a live copy is busy).
+It continues the same session, it does not fork it: when the operator reloads the VSCode tab, they see what you did. Approvals are not forwarded to you; if `pendingApproval` is set, tell the operator to answer it on their dashboard. An approval nobody answers expires after 5 minutes, and the agent is told it was denied. `permissionMode` says whether the session runs in its own mode (`auto`, say, which asks for few approvals) or `null` (every approval goes to the dashboard).
+
+**Secrets are filtered.** Session content you read through the gateway has keys, tokens and passwords replaced with `[redacted]` (`redacted: true` on the message). Never ask the agent to put a secret into a command or a reply so you can read it: it will be filtered, and it would end up in the transcript. `POST /v1/instances/:id/abort` stops the turn in progress. `POST /v1/sessions/:id/resume` with `{ "agentType": "claude" }` continues a session from the catalogue that is not running right now (same rules; `409 session_busy` if a live copy is busy).
 
 Mind instances, mind arms and gateway tasks cannot be driven (`400 not_a_coding_session`). Control routes: 30/min per token.
 

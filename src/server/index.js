@@ -323,6 +323,9 @@ function createServer(options = {}) {
       // Driving live sessions from the gateway is opt-in: it reaches into
       // the sessions you are working in, not just ones the gateway made.
       sessionControl: process.env.POLPO_GATEWAY_SESSION_CONTROL === '1' ? sessionController : null,
+      // A session the gateway drives keeps its desk permission mode only
+      // when asked to; otherwise every approval goes to the dashboard.
+      inheritPermissionMode: process.env.POLPO_GATEWAY_INHERIT_PERMISSION_MODE === '1',
     }));
     gatewayState = { keyInfo, taskManager, uploadStore, artifactStore };
   }

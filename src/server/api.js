@@ -341,6 +341,8 @@ function createApiRouter(instanceManager, getAuthState, pushManager, outboxManag
         name, cwd, agentType,
         heldBy: 'dashboard',
         serverUrl: `ws://127.0.0.1:${req.socket.localPort}`,
+        // You at the dashboard: keep the session's own permission mode.
+        inheritPermissionMode: true,
       });
       if (!out.ok) return res.status(controlStatus(out.error)).json({ error: out.message, code: out.error });
       const body = { instanceId: out.instanceId };
@@ -720,6 +722,8 @@ function createApiRouter(instanceManager, getAuthState, pushManager, outboxManag
       const out = await controller.takeover(req.params.id, {
         heldBy: 'dashboard',
         serverUrl: `ws://127.0.0.1:${req.socket.localPort}`,
+        // You at the dashboard: keep the session's own permission mode.
+        inheritPermissionMode: true,
       });
       if (!out.ok) return res.status(controlStatus(out.error)).json({ error: out.message, code: out.error });
       res.json({

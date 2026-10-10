@@ -833,6 +833,7 @@
           var ctl = instances.get(msg.id);
           ctl.canReceivePrompts = msg.canReceivePrompts;
           ctl.heldBy = msg.heldBy || null;
+          ctl.permissionMode = msg.permissionMode || null;
         }
         renderList();
         if (activeInstanceId === msg.id) renderDetail();

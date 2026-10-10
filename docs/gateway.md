@@ -438,6 +438,7 @@ Reading is always available. Driving a session (taking it over and sending it pr
       status,               // "idle" | "busy" | "waiting" | ...
       canReceivePrompts,    // false: polpo is only watching this session
       heldBy,               // "dashboard", "gateway:<client>" or null
+      permissionMode,       // Claude's mode while polpo drives it ("auto", ...) or null
       pendingApproval,      // { toolName, input, ... } or null; input capped at 2000 chars
       firstPrompt,          // truncated to 200 chars
       lastActivity,
@@ -463,14 +464,14 @@ Messages newer than `since`, for following a session by polling. Polling works o
     instanceId,
     status,
     messages: [{ seq, role, contentType, content, timestamp,
-                 truncated?, source?, toolUseId?, isError?, attachments? }],
+                 truncated?, redacted?, source?, toolUseId?, isError?, attachments? }],
     lastSeq,              // pass back as ?since= on the next poll
     hasMore,              // more messages after this page
     gap                   // true: you fell more than 200 messages behind
   }
 ```
 
-Each message's `content` is capped at 20,000 characters (`truncated: true` when cut). polpo keeps the last 200 messages per instance; if `gap` is true, read the rest from `GET /v1/sessions/:id`.
+Each message's `content` is capped at 20,000 characters (`truncated: true` when cut). Secrets are removed first (`redacted: true`), see [Secrets in session content](#secrets-in-session-content). polpo keeps the last 200 messages per instance; if `gap` is true, read the rest from `GET /v1/sessions/:id`.
 
 The instance routes share the catalogue rate limit (60/min per token).
 
@@ -487,6 +488,8 @@ A session has one writer at a time. The rule is the same for the dashboard, the 
 polpo decides whether a Claude session is idle from its transcript: the last turn ended normally, or nothing has been written to it for `POLPO_SESSION_STALE_MS` (10 minutes by default). Lower it and a long-running tool call can be taken for idle; raise it and a session that crashed mid-turn stays "busy" for longer.
 
 Mind instances, mind arms and gateway tasks have their own lifecycles and cannot be driven (`400 not_a_coding_session`).
+
+**Permission mode.** A Claude session records the permission mode it was used with (`auto`, `acceptEdits`, `plan`, ...). A takeover from the dashboard continues in that mode, so a session you ran in `auto` mode at the desk does not stop to ask the phone about every `git fetch`. A takeover through the gateway does not, unless the host also sets `POLPO_GATEWAY_INHERIT_PERMISSION_MODE=1`: otherwise the caller would get the same automatic approvals you have at your desk. Either way, whatever the mode still asks about goes to the dashboard, and `bypassPermissions` is never carried over. The mode in use is `permissionMode` on the instance.
 
 #### `POST /v1/instances/:id/takeover`
 
@@ -524,7 +527,13 @@ Continues a session from the catalogue, including one that is not running right 
 
 `agentType` defaults to `claude`. The working directory recorded in the session wins over `cwd`. Errors: 400 `invalid_session_id`, 400 `invalid_agent_type`, 409 `session_busy`.
 
-The control routes share a rate limit of 30/min per token. Approvals are not forwarded to the caller: if the agent asks for one, it shows up in `pendingApproval` and on the dashboard, where you answer it.
+The control routes share a rate limit of 30/min per token. Approvals are not forwarded to the caller: if the agent asks for one, it shows up in `pendingApproval` and on the dashboard, where you answer it. An approval nobody answers expires after 5 minutes and the agent is told it was denied.
+
+### Secrets in session content
+
+Coding sessions are full of credentials: an agent pastes an API key into a command, prints an env file, reads a config. Everything the gateway returns from a session can end up wherever the caller forwards it, a chat app or a model provider. So the session routes (`/v1/instances*`, `/v1/sessions*`, `/v1/search`) remove the common shapes of secret before answering: private key blocks, tokens with a well-known prefix (`ghp_`, `sk-`, `glpat-`, `AKIA`, ...), JWTs, `Authorization` header values, the value in `name=value` when the name says it is a secret, and long random-looking strings. Each is replaced with `[redacted]`.
+
+It is a filter, not a guarantee: a short password in plain prose gets through. References such as `$KEY` or `process.env.SECRET`, hashes, UUIDs and paths are left alone. The output of your own `/v1/tasks` and `/v1/goals` is not filtered. `POLPO_GATEWAY_REDACT=0` turns it off.
 
 ```bash
 KEY=$POLPO_GATEWAY_KEY; H="Authorization: Bearer $KEY"; C="X-Polpo-Client: my-pa"
@@ -720,7 +729,8 @@ The full reference for the response shape, scoring heuristics, and privacy model
 - **Path traversal**: filename regex + `..`/separator/NUL pre-rejection + `path.resolve` prefix check at every fs touchpoint. `lstat` (not `stat`) used for symlink defense.
 - **Content sniffing**: `nosniff` + `attachment` on downloads. Inline allowed only for the same image whitelist the dashboard uses. SVG and HTML always force-attach (they can carry script).
 - **Approval handling**: gateway tasks have no human in the loop, so any approval request from the agent fails the task immediately with `approval_required`. Callers must write self-sufficient prompts (e.g. set up permissions on the host beforehand).
-- **Driving live sessions is opt-in**: `POLPO_GATEWAY_SESSION_CONTROL=1` turns it on. Even then a busy session is read only, a session is never forked, and polpo hands it back as soon as someone writes to it again in VSCode or a terminal.
+- **Driving live sessions is opt-in**: `POLPO_GATEWAY_SESSION_CONTROL=1` turns it on. Even then a busy session is read only, a session is never forked, and polpo hands it back as soon as someone writes to it again in VSCode or a terminal. A caller gets the session's own permission mode only with `POLPO_GATEWAY_INHERIT_PERMISSION_MODE=1`.
+- **Secrets are filtered from session content**: see [Secrets in session content](#secrets-in-session-content).
 - **No filenames in logs**: caller-controlled strings stay out of logs; uploads are recorded by size and sha256 for forensics.
 - **No new dependencies**: pure Node 22, no multipart parsers, no third-party crypto.
 
@@ -734,6 +744,8 @@ The full reference for the response shape, scoring heuristics, and privacy model
 | `POLPO_GATEWAY_MAX_TIMEOUT_MS` | 60 × 60 × 1000 | Hard cap on per-task `timeoutMs` (a larger request is clamped) |
 | `POLPO_GATEWAY_MAX_UPLOAD_SIZE` | 25 × 1024 × 1024 | Per-upload byte cap (decoded) |
 | `POLPO_GATEWAY_SESSION_CONTROL` | off | `1` lets callers take over and continue live coding sessions |
+| `POLPO_GATEWAY_INHERIT_PERMISSION_MODE` | off | `1` lets a session taken over through the gateway keep its own permission mode (`auto`, ...) |
+| `POLPO_GATEWAY_REDACT` | on | `0` stops removing secrets from session content the gateway returns |
 | `POLPO_SESSION_STALE_MS` | 10 × 60 × 1000 | A Claude session with no transcript activity for this long counts as idle |
 
 ## File Layout (server-side)

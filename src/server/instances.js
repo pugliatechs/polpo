@@ -103,6 +103,7 @@ class InstanceManager extends EventEmitter {
         sessionId: inst.sessionId,
         canReceivePrompts: inst.canReceivePrompts,
         heldBy: inst.heldBy || null,
+        permissionMode: inst.permissionMode || null,
         firstPrompt: inst.firstPrompt,
         agentType: inst.agentType,
         source: inst.source,
@@ -170,10 +171,14 @@ class InstanceManager extends EventEmitter {
     if (control.heldBy !== undefined) {
       instance.heldBy = typeof control.heldBy === 'string' ? control.heldBy : null;
     }
+    if (control.permissionMode !== undefined) {
+      instance.permissionMode = typeof control.permissionMode === 'string' ? control.permissionMode : null;
+    }
     this.emit('instance:control', {
       id,
       canReceivePrompts: instance.canReceivePrompts !== false,
       heldBy: instance.heldBy || null,
+      permissionMode: instance.permissionMode || null,
     });
   }
 

@@ -35,6 +35,7 @@ const {
 } = require('./upload-constants');
 const convSearch = require('./conversation-search');
 const { scanSessions, loadHistory } = require('./sessions');
+const { redact, redactDeep } = require('./redact');
 const { analyzeProfile } = require('./profile-analyzer');
 const { makeLogger } = require('../util/logger');
 const { resolveClientLabel } = require('./gateway-tasks');
@@ -66,6 +67,10 @@ function createGatewayRouter(opts) {
   const instanceManager = opts.instanceManager || null;
   // SessionController, present only when POLPO_GATEWAY_SESSION_CONTROL=1.
   const sessionControlCtl = opts.sessionControl || null;
+  // Whether a session the gateway takes over keeps the permission mode it
+  // had at the desk ('auto', say). Off by default: the caller then gets
+  // the same automatic approvals you have at your desk.
+  const inheritPermissionMode = opts.inheritPermissionMode === true;
 
   /**
    * Who is calling, by the same ladder as /v1/tasks: explicit client
@@ -360,8 +365,11 @@ function createGatewayRouter(opts) {
 
   // Truncate a free-form string before it goes out on the wire so a
   // single huge firstPrompt can't blow up the response.
+  // Redacts secrets first: every string this truncates is session text
+  // on its way to the caller (first prompts).
   function truncate(str, max) {
     if (typeof str !== 'string') return null;
+    str = redact(str);
     if (str.length <= max) return str;
     return str.slice(0, max - 3) + '...';
   }
@@ -499,6 +507,7 @@ function createGatewayRouter(opts) {
     try {
       const out = await sessionControlCtl.takeover(inst.id, {
         heldBy: 'gateway:' + clientLabelFor(req, req.body),
+        inheritPermissionMode,
         serverUrl: 'ws://127.0.0.1:' + req.socket.localPort,
       });
       if (!out.ok) return sendControlFailure(res, out);
@@ -566,6 +575,7 @@ function createGatewayRouter(opts) {
         agentType,
         cwd: typeof body.cwd === 'string' ? body.cwd : undefined,
         heldBy: 'gateway:' + clientLabelFor(req, body),
+        inheritPermissionMode,
         serverUrl: 'ws://127.0.0.1:' + req.socket.localPort,
       });
       if (!out.ok) return sendControlFailure(res, out);
@@ -609,7 +619,7 @@ function createGatewayRouter(opts) {
         const tb = b.timestamp ? (typeof b.timestamp === 'number' ? b.timestamp : Date.parse(b.timestamp) || 0) : 0;
         return tb - ta;
       });
-      res.json({ results: hits.slice(0, limit), partial });
+      res.json({ results: hits.slice(0, limit).map(redactHit), partial });
     } catch (err) {
       log.error('/v1/search failed:', err && err.message);
       res.status(500).json({ error: 'search_failed' });
@@ -679,7 +689,7 @@ function createGatewayRouter(opts) {
           lastActivity: (live && live.lastActivity) || (meta && meta.lastActivity) || g.lastMatchTs || null,
           matchCount: g.matchCount,
           score: g.score,
-          topSnippets: g.topSnippets,
+          topSnippets: Array.isArray(g.topSnippets) ? g.topSnippets.map(redactHit) : g.topSnippets,
         };
       });
 
@@ -1196,6 +1206,22 @@ function writeSseEvent(res, type, data) {
 
 // Strip a message to the public field set so nothing internal leaks via
 // /v1/sessions/:id. Limits content size defensively too.
+/** A search hit with secrets removed from its snippet. */
+function redactHit(h) {
+  if (!h || typeof h !== 'object' || typeof h.snippet !== 'string') return h;
+  const snippet = redact(h.snippet);
+  if (snippet === h.snippet) return h;
+  const out = Object.assign({}, h, { snippet });
+  // Redaction can shift the match, or remove it when the match was part
+  // of the secret; keep matchIndex pointing at the matched text.
+  if (typeof h.matchIndex === 'number' && typeof h.matchLength === 'number') {
+    const at = snippet.indexOf(h.snippet.substr(h.matchIndex, h.matchLength));
+    out.matchIndex = at === -1 ? 0 : at;
+    if (at === -1) out.matchLength = 0;
+  }
+  return out;
+}
+
 function sanitizeMessage(m) {
   if (!m || typeof m !== 'object') return null;
   const out = {
@@ -1203,9 +1229,9 @@ function sanitizeMessage(m) {
     timestamp: m.timestamp || null,
   };
   if (typeof m.content === 'string') {
-    out.content = m.content;
+    out.content = redact(m.content);
   } else if (Array.isArray(m.content)) {
-    out.content = m.content;
+    out.content = redactDeep(m.content);
   } else if (m.content !== undefined) {
     out.content = null;
   }
