@@ -37,6 +37,28 @@ const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;      // 30 min
 const MAX_TIMEOUT_MS_DEFAULT = 60 * 60 * 1000;  // 60 min
 const TASK_TTL_MS = 5 * 60 * 1000;              // keep completed tasks for 5 min
 
+// What a gateway task may do with no human to approve anything. Nobody
+// answers an approval for a task, so whatever the agent asks about fails
+// the task with approval_required.
+//
+//   auto     Claude runs in its auto mode, which approves what it judges
+//            safe; Codex runs sandboxed (--full-auto). The default.
+//   default  every approval fails the task.
+//   bypass   no permission checks at all (--dangerously-skip-permissions).
+//            Anyone holding the gateway key can then run any command as
+//            the user polpo runs as.
+//
+// OpenCode, Pi and Goose take no mode from polpo; their own settings apply.
+const TASK_PERMISSION_MODES = new Set(['auto', 'default', 'bypass']);
+const DEFAULT_TASK_PERMISSION_MODE = 'auto';
+
+function resolveTaskPermissionMode(opts) {
+  if (TASK_PERMISSION_MODES.has(opts.permissionMode)) return opts.permissionMode;
+  if (opts.autoApprove === true) return 'bypass';
+  if (opts.autoApprove === false) return 'default';
+  return DEFAULT_TASK_PERMISSION_MODE;
+}
+
 class GatewayTaskManager extends EventEmitter {
   /**
    * @param {object} opts
@@ -46,7 +68,10 @@ class GatewayTaskManager extends EventEmitter {
    * @param {number} [opts.maxConcurrent=4]
    * @param {number} [opts.maxTimeoutMs] - upper bound on per-task timeout
    * @param {number} [opts.defaultTimeoutMs] - timeout for tasks that send none
-   * @param {boolean} [opts.autoApprove=true] - bypass permissions for gateway agents
+   * @param {string} [opts.permissionMode='auto'] - what a task may do
+   *   without a human, see TASK_PERMISSION_MODES
+   * @param {boolean} [opts.autoApprove] - legacy: true means 'bypass',
+   *   false means 'default'; ignored when permissionMode is given
    */
   constructor(opts) {
     super();
@@ -59,7 +84,8 @@ class GatewayTaskManager extends EventEmitter {
     this.maxConcurrent = opts.maxConcurrent || 4;
     this.maxTimeoutMs = opts.maxTimeoutMs || MAX_TIMEOUT_MS_DEFAULT;
     this.defaultTimeoutMs = opts.defaultTimeoutMs || DEFAULT_TIMEOUT_MS;
-    this.autoApprove = opts.autoApprove !== false;
+    this.permissionMode = resolveTaskPermissionMode(opts);
+    this.autoApprove = this.permissionMode === 'bypass';
     // Optional stores for bidirectional file transfer. Both omitted by
     // default so legacy text-only tasks work unchanged.
     this.uploadStore = opts.uploadStore || null;
@@ -75,6 +101,7 @@ class GatewayTaskManager extends EventEmitter {
       hubPort: this.hubPort,
       hubToken: this.hubToken,
       autoApprove: this.autoApprove,
+      claudePermissionMode: this.permissionMode === 'auto' ? 'auto' : null,
       createAgent: opts.createAgent,        // injectable in tests
       waitForSocket: opts.waitForSocket,    // injectable in tests
     });
@@ -287,7 +314,7 @@ class GatewayTaskManager extends EventEmitter {
       'prompt-len=' + (task.prompt ? task.prompt.length : 0),
       'attachments=' + (task.attachments ? task.attachments.length : 0),
       'capture-artifacts=' + !!task.captureArtifacts,
-      'auto-approve=' + !!this.autoApprove,
+      'permission-mode=' + this.permissionMode,
     ];
     log.info(parts.join(' '));
   }
@@ -809,6 +836,8 @@ module.exports = {
   // same explicit-client, User-Agent, anon-hash ladder as a task.
   resolveClientLabel,
   VALID_AGENT_TYPES,
+  TASK_PERMISSION_MODES,
+  DEFAULT_TASK_PERMISSION_MODE,
   DEFAULT_TIMEOUT_MS,
   MAX_TIMEOUT_MS_DEFAULT,
   TASK_TTL_MS,

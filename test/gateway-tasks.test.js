@@ -796,3 +796,64 @@ describe('GatewayTaskManager: with captureArtifacts', () => {
     assert.deepEqual(list, []);
   });
 });
+
+// Gateway tasks used to run with no permission checks at all, so the
+// gateway key alone let a caller run any command as the user polpo runs
+// as. They now default to Claude's auto mode, and anything it still asks
+// about fails the task.
+describe('GatewayTaskManager: permission mode', () => {
+  let im, tm, spawned;
+
+  function managerWith(opts) {
+    im = createMockIM();
+    spawned = [];
+    tm = new GatewayTaskManager(Object.assign({
+      instanceManager: im, hubPort: 7890,
+      createAgent: (type, o) => { spawned.push(o); return createFakeAgent(im, type, o); },
+      waitForSocket: async () => {},
+    }, opts));
+    return tm;
+  }
+
+  afterEach(() => tm.destroy());
+
+  async function spawnOne() {
+    const { taskId } = await tm.createTask({ agentType: 'claude', cwd: '/tmp', prompt: 'x' });
+    return { opts: spawned[0], inst: im.get(tm.getTask(taskId).agentInstanceId) };
+  }
+
+  it('defaults to auto mode, behind the approval check', async () => {
+    managerWith({});
+    assert.equal(tm.permissionMode, 'auto');
+    const { opts, inst } = await spawnOne();
+    assert.equal(opts.permissionMode, 'default', 'not bypassed');
+    assert.equal(opts.claudePermissionMode, 'auto');
+    assert.equal(inst.autoApprove, false, 'the hub does not approve on its own');
+  });
+
+  it('can ask for every approval', async () => {
+    managerWith({ permissionMode: 'default' });
+    const { opts, inst } = await spawnOne();
+    assert.equal(opts.permissionMode, 'default');
+    assert.equal(opts.claudePermissionMode, undefined);
+    assert.equal(inst.autoApprove, false);
+  });
+
+  it('bypasses permissions only when told to', async () => {
+    managerWith({ permissionMode: 'bypass' });
+    const { opts, inst } = await spawnOne();
+    assert.equal(opts.permissionMode, 'bypass');
+    assert.equal(opts.claudePermissionMode, undefined);
+    assert.equal(inst.autoApprove, true);
+  });
+
+  it('keeps the old autoApprove option working', () => {
+    assert.equal(managerWith({ autoApprove: true }).permissionMode, 'bypass');
+    tm.destroy();
+    assert.equal(managerWith({ autoApprove: false }).permissionMode, 'default');
+  });
+
+  it('never falls back to bypass on an unknown mode', () => {
+    assert.equal(managerWith({ permissionMode: 'yolo' }).permissionMode, 'auto');
+  });
+});

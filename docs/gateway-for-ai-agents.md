@@ -177,14 +177,14 @@ If you missed the stream (network dropped, you connected late), poll `GET /v1/ta
 
 ### Approvals fail closed
 
-Gateway tasks have **no human in the loop**. If the agent asks permission to use a tool, polpo immediately aborts the task and emits:
+Gateway tasks have **no human in the loop**. By default they run in Claude's `auto` mode, which lets the agent do what it judges safe on its own (reading files, running tests, ordinary edits) and asks about the rest. If the agent asks permission to use a tool, polpo immediately aborts the task and emits:
 
 ```
 event: approval data: { request: {...} }
 event: error    data: { message: "approval_required" }
 ```
 
-Treat this as a hard failure. Adjust your prompt so the agent doesn't need to ask: give it explicit instructions and avoid prompts that imply destructive operations the host hasn't pre-authorised.
+Treat this as a hard failure. Adjust your prompt so the agent doesn't need to ask: give it explicit instructions and avoid prompts that imply destructive operations the host hasn't pre-authorised. Do not retry the same prompt hoping it passes; report to the operator what the agent wanted to do (it is in the `approval` event). The operator chooses the mode on the host (`POLPO_GATEWAY_TASK_PERMISSION_MODE`); you cannot change it.
 
 ### Cancellation
 

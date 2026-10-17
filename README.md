@@ -554,7 +554,7 @@ Gateway-spawned agents register in the dashboard with `source: 'gateway:<client>
 
 The gateway can also follow the sessions running right now (`GET /v1/instances`, `GET /v1/instances/:id/conversation`), for example so a personal assistant on Telegram can tell you what your coding agent is doing. With `POLPO_GATEWAY_SESSION_CONTROL=1` it can also take over an idle session and continue it, under the same one-writer rule as the dashboard (see [Phone Takeover](#phone-takeover)). Secrets are removed from the session content the gateway returns (`POLPO_GATEWAY_REDACT=0` turns that off), and a session taken over through the gateway keeps its own permission mode only with `POLPO_GATEWAY_INHERIT_PERMISSION_MODE=1`.
 
-Security: separate Bearer key, per-token rate limits, path-traversal defense at every fs touchpoint, sealed-artifact pattern that defeats TOCTOU, fail-closed approvals (no human-in-the-loop confirmation), and no new dependencies. Full reference: [docs/gateway.md](docs/gateway.md). Building an AI agent that calls the gateway? See [docs/gateway-for-ai-agents.md](docs/gateway-for-ai-agents.md) — a compact, agent-oriented guide.
+Security: separate Bearer key, per-token rate limits, path-traversal defense at every fs touchpoint, sealed-artifact pattern that defeats TOCTOU, tasks in Claude's `auto` mode with anything it still asks about failing the task (`POLPO_GATEWAY_TASK_PERMISSION_MODE` selects `auto`, `default` or `bypass`), and no new dependencies. Full reference: [docs/gateway.md](docs/gateway.md). Building an AI agent that calls the gateway? See [docs/gateway-for-ai-agents.md](docs/gateway-for-ai-agents.md), a compact, agent-oriented guide.
 
 ## Terminal Sync (Hooks)
 

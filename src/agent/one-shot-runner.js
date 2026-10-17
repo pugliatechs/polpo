@@ -50,6 +50,9 @@ class OneShotAgentRunner extends EventEmitter {
    * @param {number} opts.hubPort         WS port the agent dials back into
    * @param {string} [opts.hubToken]      auth token for agent registration
    * @param {boolean} [opts.autoApprove=true]  bypass permissions by default
+   * @param {string} [opts.claudePermissionMode] Claude's own mode
+   *   (--permission-mode, e.g. 'auto') for runs that do not bypass
+   *   permissions; whatever it still asks about fails the run
    * @param {function} [opts.createAgent] injectable agent factory (for tests)
    * @param {function} [opts.waitForSocket] injectable socket-ready waiter (for tests)
    */
@@ -62,6 +65,7 @@ class OneShotAgentRunner extends EventEmitter {
     this.hubPort = opts.hubPort;
     this.hubToken = opts.hubToken || null;
     this.autoApprove = opts.autoApprove !== false;
+    this.claudePermissionMode = opts.claudePermissionMode || null;
 
     this._createAgent = opts.createAgent || createAgent;
     this._waitForSocket = opts.waitForSocket || waitForAgentSocket;
@@ -159,6 +163,9 @@ class OneShotAgentRunner extends EventEmitter {
       permissionMode: permissionMode,
     };
     if (opts.model) agentSpawnOpts.model = opts.model;
+    if (permissionMode !== 'bypass' && this.claudePermissionMode) {
+      agentSpawnOpts.claudePermissionMode = this.claudePermissionMode;
+    }
     const agent = this._createAgent(opts.agentType, agentSpawnOpts);
 
     await agent.start();

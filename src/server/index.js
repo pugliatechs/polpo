@@ -269,7 +269,7 @@ function createServer(options = {}) {
   let gatewayState = null;
   if (options.gateway) {
     const { loadOrCreateGatewayKey } = require('./gateway-auth');
-    const { GatewayTaskManager } = require('./gateway-tasks');
+    const { GatewayTaskManager, TASK_PERMISSION_MODES, DEFAULT_TASK_PERMISSION_MODE } = require('./gateway-tasks');
     const { GatewayUploadStore } = require('./gateway-uploads');
     const { GatewayArtifactStore } = require('./gateway-artifacts');
     const { createGatewayRouter } = require('./gateway');
@@ -304,7 +304,23 @@ function createServer(options = {}) {
     });
     const artifactStore = new GatewayArtifactStore({});
 
+    // What a gateway task may do with nobody to approve anything. An
+    // unknown value falls back to the default rather than to bypass.
+    let taskPermissionMode = process.env.POLPO_GATEWAY_TASK_PERMISSION_MODE || DEFAULT_TASK_PERMISSION_MODE;
+    if (!TASK_PERMISSION_MODES.has(taskPermissionMode)) {
+      log.warn(`POLPO_GATEWAY_TASK_PERMISSION_MODE=${JSON.stringify(taskPermissionMode)} is not one of `
+        + `${[...TASK_PERMISSION_MODES].join(', ')}; using ${DEFAULT_TASK_PERMISSION_MODE}`);
+      taskPermissionMode = DEFAULT_TASK_PERMISSION_MODE;
+    }
+    if (taskPermissionMode === 'bypass') {
+      log.warn('Gateway tasks run with no permission checks (POLPO_GATEWAY_TASK_PERMISSION_MODE=bypass): '
+        + 'anyone holding the gateway key can run any command as this user.');
+    } else {
+      log.info(`Gateway tasks run in permission mode "${taskPermissionMode}"; approvals fail the task.`);
+    }
+
     const taskManager = new GatewayTaskManager({
+      permissionMode: taskPermissionMode,
       instanceManager,
       hubPort: port,
       hubToken: authState.enabled ? authState.token : null,

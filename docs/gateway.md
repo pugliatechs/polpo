@@ -30,7 +30,7 @@ curl -s -H "Authorization: Bearer $KEY" http://localhost:7890/v1/health
 | Audience | Humans (phone, browser) | Machines (scripts, bots, agents) |
 | Auth | Token + optional PIN/TOTP + session cookies | Long-lived Bearer key only |
 | Stability | May change between releases | Stable API contract under `/v1` |
-| Approvals | Phone-based | Fail closed (`approval_required`) |
+| Approvals | Phone-based | Tasks run in Claude's `auto` mode; anything it still asks about fails the task (`approval_required`) |
 | Sessions | Long-lived, multi-turn | One-shot tasks; continuing a live session is opt-in (`POLPO_GATEWAY_SESSION_CONTROL=1`) |
 | Visibility | Dashboard shows the conversation | Dashboard shows the gateway-spawned arm (`source: 'gateway:<client>'`), can be observed live |
 
@@ -728,7 +728,12 @@ The full reference for the response shape, scoring heuristics, and privacy model
 - **Ownership scoping**: every upload records the sha256 of the bearer token that created it. Task-create and artifact-download routes re-check the fingerprint, so a future second key cannot read another caller's uploads or artifacts.
 - **Path traversal**: filename regex + `..`/separator/NUL pre-rejection + `path.resolve` prefix check at every fs touchpoint. `lstat` (not `stat`) used for symlink defense.
 - **Content sniffing**: `nosniff` + `attachment` on downloads. Inline allowed only for the same image whitelist the dashboard uses. SVG and HTML always force-attach (they can carry script).
-- **Approval handling**: gateway tasks have no human in the loop, so any approval request from the agent fails the task immediately with `approval_required`. Callers must write self-sufficient prompts (e.g. set up permissions on the host beforehand).
+- **Task permissions**: gateway tasks have no human in the loop. `POLPO_GATEWAY_TASK_PERMISSION_MODE` decides what they may do on their own:
+  - `auto` (default): Claude runs in its auto mode, which approves what it judges safe; Codex runs sandboxed (`--full-auto`).
+  - `default`: nothing is approved on its own.
+  - `bypass`: no permission checks at all (`--dangerously-skip-permissions`). Anyone holding the gateway key can then run any command as the user polpo runs as; polpo warns at startup. Up to and including 1.2.4 this was the only behaviour.
+
+  In `auto` and `default`, any approval request fails the task immediately with `approval_required`, so callers must write self-sufficient prompts. An unknown value falls back to `auto`, never to `bypass`. OpenCode, Pi and Goose take no mode from polpo; their own settings apply.
 - **Driving live sessions is opt-in**: `POLPO_GATEWAY_SESSION_CONTROL=1` turns it on. Even then a busy session is read only, a session is never forked, and polpo hands it back as soon as someone writes to it again in VSCode or a terminal. A caller gets the session's own permission mode only with `POLPO_GATEWAY_INHERIT_PERMISSION_MODE=1`.
 - **Secrets are filtered from session content**: see [Secrets in session content](#secrets-in-session-content).
 - **No filenames in logs**: caller-controlled strings stay out of logs; uploads are recorded by size and sha256 for forensics.
@@ -743,6 +748,7 @@ The full reference for the response shape, scoring heuristics, and privacy model
 | `POLPO_GATEWAY_DEFAULT_TIMEOUT_MS` | 30 × 60 × 1000 | Timeout for a task that sends no `timeoutMs` |
 | `POLPO_GATEWAY_MAX_TIMEOUT_MS` | 60 × 60 × 1000 | Hard cap on per-task `timeoutMs` (a larger request is clamped) |
 | `POLPO_GATEWAY_MAX_UPLOAD_SIZE` | 25 × 1024 × 1024 | Per-upload byte cap (decoded) |
+| `POLPO_GATEWAY_TASK_PERMISSION_MODE` | `auto` | What a `/v1/tasks` agent may do without approval: `auto`, `default` or `bypass` (see Security Model) |
 | `POLPO_GATEWAY_SESSION_CONTROL` | off | `1` lets callers take over and continue live coding sessions |
 | `POLPO_GATEWAY_INHERIT_PERMISSION_MODE` | off | `1` lets a session taken over through the gateway keep its own permission mode (`auto`, ...) |
 | `POLPO_GATEWAY_REDACT` | on | `0` stops removing secrets from session content the gateway returns |
