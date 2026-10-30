@@ -73,10 +73,12 @@ class PendingApprovals extends EventEmitter {
       return this._attach(existing, o.holdMs);
     }
     if (existing) {
-      // A new request while another is pending: the old one was
-      // abandoned (its process is gone). Its waiter, if any, is answered
-      // as before; nobody is listening for it any more.
-      this._finish(instanceId, existing, { behavior: 'allow', updatedInput: existing.toolInput }, { via: 'superseded' });
+      // A new request while another is pending: either the old one was
+      // abandoned (its process is gone) or the agent asked for two at
+      // once. Either way nobody answered the old one, so it is denied.
+      // It used to be allowed, which approved a parallel tool call that
+      // no one had seen.
+      this._finish(instanceId, existing, { behavior: 'deny', message: 'Superseded by a newer approval request' }, { via: 'superseded' });
     }
     const entry = {
       toolUseId: req.toolUseId || null,

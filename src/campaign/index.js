@@ -92,6 +92,9 @@ class CampaignManager extends EventEmitter {
    * @param {Set<string>} [opts.agentMay] - decision kinds a PA may decide
    * @param {function} [opts.runGate] - injectable for tests
    * @param {function} [opts.gitState] - injectable for tests
+   * @param {boolean} [opts.gatewayInheritPermissionMode] - whether a campaign
+   *   proposed through the gateway keeps the session's desk permission mode;
+   *   the host's POLPO_GATEWAY_INHERIT_PERMISSION_MODE, as for takeovers
    */
   constructor(opts) {
     super();
@@ -100,6 +103,7 @@ class CampaignManager extends EventEmitter {
     this.approvals = opts.approvals;
     this.store = opts.store || new CampaignStore();
     this.agentMay = opts.agentMay || new Set();
+    this.gatewayInheritPermissionMode = opts.gatewayInheritPermissionMode === true;
     this._runGate = opts.runGate || gateRunner.runGate;
     this._gitState = opts.gitState || gateRunner.gitState;
     this.campaigns = new Map();
@@ -651,8 +655,13 @@ class CampaignManager extends EventEmitter {
       return fail('campaign_exists', 'A campaign named ' + id + ' already exists; give this one another name.');
     }
     const now = new Date().toISOString();
+    const channel = opts.channel || 'dashboard';
     const c = {
       id,
+      // The session keeps its desk permission mode, unless the campaign was
+      // proposed through the gateway and the host does not let gateway
+      // callers inherit it: a campaign must not be a way around that.
+      inheritPermissionMode: channel.indexOf('gateway:') === 0 ? this.gatewayInheritPermissionMode : true,
       cwd: file.root,
       file: path.relative(file.root, file.path),
       agentType: 'claude',
@@ -672,8 +681,8 @@ class CampaignManager extends EventEmitter {
       decisions: [],
     };
     this.campaigns.set(id, c);
-    this._record(c, 'campaign_created', opts.channel || 'dashboard', {
-      cwd: c.cwd, file: c.file, sessionId, hash: read.hash,
+    this._record(c, 'campaign_created', channel, {
+      cwd: c.cwd, file: c.file, sessionId, hash: read.hash, inheritPermissionMode: c.inheritPermissionMode,
     });
     const d = this._raiseDefinition(c, read, []);
     return { ok: true, campaign: this.describe(c), decision: decisions.publicDecision(d) };
@@ -683,6 +692,7 @@ class CampaignManager extends EventEmitter {
   async _bind(c) {
     const heldBy = this._heldBy(c);
     const ctl = this.sessionController;
+    const inheritPermissionMode = c.inheritPermissionMode !== false;
     if (c.instanceId) {
       const inst = this.instanceManager.get(c.instanceId);
       if (inst && inst.heldBy === heldBy && ctl.agentFor(inst)) return { ok: true, instanceId: inst.id };
@@ -693,9 +703,9 @@ class CampaignManager extends EventEmitter {
       if (c.sessionId) {
         const live = (this.instanceManager.getAll() || []).find((i) => i && i.sessionId === c.sessionId);
         out = live
-          ? await ctl.takeover(live.id, { heldBy, inheritPermissionMode: true })
+          ? await ctl.takeover(live.id, { heldBy, inheritPermissionMode })
           : await ctl.resume(c.sessionId, {
-            agentType: 'claude', cwd: c.cwd, heldBy, inheritPermissionMode: true, name: 'Campaign ' + c.id,
+            agentType: 'claude', cwd: c.cwd, heldBy, inheritPermissionMode, name: 'Campaign ' + c.id,
           });
       } else {
         out = await ctl.start({ agentType: 'claude', cwd: c.cwd, name: 'Campaign ' + c.id, heldBy });

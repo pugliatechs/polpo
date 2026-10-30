@@ -264,6 +264,7 @@ function createServer(options = {}) {
   const agentMay = parseAgentMay(process.env.POLPO_CAMPAIGN_AGENT_MAY);
   const campaigns = new CampaignManager({
     instanceManager, sessionController, approvals, agentMay,
+    gatewayInheritPermissionMode: process.env.POLPO_GATEWAY_INHERIT_PERMISSION_MODE === '1',
   });
   const loadedCampaigns = campaigns.load();
   if (loadedCampaigns) log.info(`Loaded ${loadedCampaigns} campaign(s); running ones come back paused.`);

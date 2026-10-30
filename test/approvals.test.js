@@ -53,8 +53,9 @@ describe('PendingApprovals', () => {
   it('a new request replaces an abandoned one and says so', async () => {
     const settled = [];
     a.on('settled', (e) => settled.push(e));
-    a.wait('i1', { toolUseId: 'old', toolInput: {} }, { expiresMs: null });
+    const old = a.wait('i1', { toolUseId: 'old', toolInput: {} }, { expiresMs: null });
     a.wait('i1', { toolUseId: 'new', toolInput: {} }, { expiresMs: null });
+    assert.equal((await old).behavior, 'deny', 'an unanswered approval is never allowed');
     assert.equal(settled[0].toolUseId, 'old');
     assert.equal(settled[0].meta.via, 'superseded');
     assert.equal(a.current('i1').toolUseId, 'new');

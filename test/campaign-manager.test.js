@@ -205,6 +205,15 @@ describe('CampaignManager', () => {
     assert.equal(mgr.create({ cwd: repo, sessionId: 'nope' }).error, 'session_not_found');
   });
 
+  it('a campaign proposed through the gateway follows the host\'s inherit setting', async () => {
+    const inst = im.register({ name: 'vscode', sessionId: 'known-session', canReceivePrompts: false });
+    im.updateStatus(inst.id, 'idle');
+    const out = mgr.create({ cwd: repo, sessionId: 'known-session', channel: 'gateway:pa' });
+    await mgr.answer('storage-engine', out.decision.decisionId, { answer: 'approve', hash: out.decision.details.hash, decidedBy: 'user', userMessage: 'y' });
+    assert.equal(ctl.calls.takeover[0].o.inheritPermissionMode, false, 'off unless the host allows it');
+    assert.equal(mgr.ledgerSince('storage-engine', 0).entries[0].inheritPermissionMode, false);
+  });
+
   it('pauses with the reason when the session is busy at approval', async () => {
     const inst = im.register({ name: 'vscode', sessionId: 'known-session', canReceivePrompts: false });
     im.updateStatus(inst.id, 'busy');
