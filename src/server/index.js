@@ -5,6 +5,9 @@ const InstanceManager = require('./instances');
 const { createApiRouter } = require('./api');
 const { setupWebSocket } = require('./websocket');
 const { SessionController } = require('./session-control');
+const { PendingApprovals } = require('./approvals');
+const { CampaignManager } = require('../campaign');
+const { parseAgentMay } = require('../campaign/decisions');
 const {
   AuthState,
   createAuthMiddleware,
@@ -252,7 +255,22 @@ function createServer(options = {}) {
     instanceManager, outboxManager, getAuthState, hubPort: port,
   });
 
-  app.use('/api', createApiRouter(instanceManager, getAuthState, pushManager, outboxManager, () => tunnelInfo, sessionController));
+  // Approvals the agents wait on, shared by the dashboard and campaigns.
+  const approvals = new PendingApprovals(instanceManager);
+
+  // Campaigns (docs/campaigns.md). What a PA may decide on its own is the
+  // host's choice, and some decisions are never its: a setting that lists
+  // one stops polpo from starting rather than being quietly narrowed.
+  const agentMay = parseAgentMay(process.env.POLPO_CAMPAIGN_AGENT_MAY);
+  const campaigns = new CampaignManager({
+    instanceManager, sessionController, approvals, agentMay,
+  });
+  const loadedCampaigns = campaigns.load();
+  if (loadedCampaigns) log.info(`Loaded ${loadedCampaigns} campaign(s); running ones come back paused.`);
+  if (agentMay.size) log.warn(`A PA may decide these campaign decisions on its own: ${[...agentMay].join(', ')}`);
+
+  app.use('/api', createApiRouter(instanceManager, getAuthState, pushManager, outboxManager, () => tunnelInfo, sessionController,
+    { approvals, campaigns }));
 
   // Alien Mind handle — declared up here so the gateway router (mounted
   // below) can wire /v1/goals to its coordinator. The mind itself is
@@ -342,6 +360,9 @@ function createServer(options = {}) {
       // A session the gateway drives keeps its desk permission mode only
       // when asked to; otherwise every approval goes to the dashboard.
       inheritPermissionMode: process.env.POLPO_GATEWAY_INHERIT_PERMISSION_MODE === '1',
+      // Reading campaigns needs the key; acting on them is opt-in.
+      campaigns,
+      campaignControl: process.env.POLPO_GATEWAY_CAMPAIGN_CONTROL === '1',
     }));
     gatewayState = { keyInfo, taskManager, uploadStore, artifactStore };
   }
@@ -354,6 +375,18 @@ function createServer(options = {}) {
 
   // WebSocket
   const wss = setupWebSocket(server, instanceManager, getAuthState, pushManager, outboxManager, sessionController);
+
+  // Campaign changes reach the dashboard live; a new decision also goes
+  // to the phone as a push notification.
+  campaigns.on('campaign', (campaign) => wss.broadcastToDashboards({ type: 'campaign:update', campaign }));
+  campaigns.on('decision', (decision) => {
+    wss.broadcastToDashboards({ type: 'campaign:decision', decision });
+    const first = String(decision.text || '').split('\n')[0];
+    pushManager.sendToAll('Campaign ' + decision.campaignId + ': ' + decision.kind, first.slice(0, 180),
+      'campaign-' + decision.decisionId).catch(() => {});
+  });
+  campaigns.on('decision_closed', (decision) => wss.broadcastToDashboards({ type: 'campaign:decision_closed', decision }));
+  campaigns.on('gate', (e) => wss.broadcastToDashboards({ type: 'campaign:gate', campaignId: e.campaignId, run: e.run }));
 
   // Alien Mind meta-agent (opt-in: POLPO_MIND=1). When --gateway is on
   // it was already created above. This block is the dashboard-only path.
@@ -397,6 +430,8 @@ function createServer(options = {}) {
     },
     stop() {
       if (mind) { try { mind.destroy(); } catch {} }
+      try { campaigns.destroy(); } catch {}
+      try { approvals.destroy(); } catch {}
       if (gatewayState) {
         try { gatewayState.taskManager.destroy(); } catch {}
         if (gatewayState.uploadStore) try { gatewayState.uploadStore.destroy(); } catch {}
@@ -464,6 +499,7 @@ function createServer(options = {}) {
       return gatewayState;
     },
     instanceManager,
+    campaigns,
     server,
   };
 }

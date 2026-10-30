@@ -123,6 +123,11 @@ function handleMessage(msg) {
 
 // ---- Hub communication ----
 
+// When the hub cannot be reached or answers nonsense, the call is denied.
+// It used to be allowed, so a polpo restart while an approval waited (for
+// hours, in a campaign) approved whatever the agent had asked for.
+const UNREACHABLE = { behavior: 'deny', message: 'polpo could not be reached; approval denied' };
+
 function requestApproval(toolUseId, toolName, toolInput) {
   const payload = JSON.stringify({
     instanceId: INSTANCE_ID,
@@ -150,18 +155,24 @@ function requestApproval(toolUseId, toolName, toolInput) {
       res.on('data', (chunk) => (data += chunk));
       res.on('end', () => {
         try {
-          resolve(JSON.parse(data));
+          const decision = JSON.parse(data);
+          // A campaign's approval waits for an answer however long it
+          // takes; the hub answers {retry: true} every few minutes so no
+          // request stays open for hours. Ask again with the same id.
+          if (decision && decision.retry === true) {
+            resolve(requestApproval(toolUseId, toolName, toolInput));
+            return;
+          }
+          resolve(decision);
         } catch {
-          // On parse error, allow the tool (fail open)
-          resolve({ behavior: 'allow', updatedInput: toolInput });
+          resolve(UNREACHABLE);
         }
       });
     });
 
     req.on('error', (err) => {
       log(`Hub request error: ${err.message}`);
-      // On network error, allow the tool (fail open)
-      resolve({ behavior: 'allow', updatedInput: toolInput });
+      resolve(UNREACHABLE);
     });
 
     req.on('timeout', () => {

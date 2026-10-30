@@ -726,6 +726,39 @@ class SessionController {
     return { ok: true, instanceId: agent.instanceId };
   }
 
+  /**
+   * Start a new session polpo drives.
+   *
+   * @param {object} opts - { agentType, cwd, name, model, serverUrl, heldBy }
+   *   `heldBy` marks it as held from the start, as a takeover would.
+   */
+  async start(opts) {
+    const o = opts || {};
+    const agent = this._createAgentFn()(o.agentType || 'claude', {
+      name: o.name || ('Session (' + path.basename(o.cwd || '') + ')'),
+      cwd: o.cwd,
+      model: o.model || undefined,
+      serverUrl: this._serverUrl(o.serverUrl),
+      token: this._authToken(),
+    });
+    await agent.start();
+    this.track(agent.instanceId, agent);
+    if (o.heldBy) this._hold(agent.instanceId, o.heldBy, null);
+    return { ok: true, instanceId: agent.instanceId };
+  }
+
+  /**
+   * Pass a session polpo drives to another holder (a campaign that ended
+   * hands its session to the dashboard). Keeps the permission mode.
+   */
+  handOver(instanceId, heldBy) {
+    const inst = this.instanceManager.get(instanceId);
+    if (!inst || !this.held.has(instanceId)) return false;
+    this.held.get(instanceId).heldBy = heldBy;
+    this.instanceManager.setControl(instanceId, { canReceivePrompts: true, heldBy });
+    return true;
+  }
+
   /** Remember an agent and forget it when its connection closes. */
   track(key, agent) {
     this.agents.set(key, agent);

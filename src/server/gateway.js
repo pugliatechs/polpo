@@ -42,6 +42,9 @@ const { resolveClientLabel } = require('./gateway-tasks');
 const InstanceManager = require('./instances');
 const sessionControl = require('./session-control');
 const { capTail, goalFinalOutput } = require('../mind/goal-output');
+const { campaignErrorStatus } = require('../campaign');
+const { checkRelay, DECISION_ID_RE } = require('../campaign/decisions');
+const { ID_RE: CAMPAIGN_ID_RE } = require('../campaign/definition');
 
 const log = makeLogger('gateway');
 
@@ -52,6 +55,8 @@ const log = makeLogger('gateway');
  * @param {object} [opts.uploadStore] - GatewayUploadStore (enables POST /v1/uploads)
  * @param {object} [opts.instanceManager] - InstanceManager (enables /v1/search live walk,
  *   /v1/sessions live merge, /v1/sessions/:id live fallback)
+ * @param {object} [opts.campaigns] - CampaignManager (enables /v1/campaigns, /v1/decisions)
+ * @param {boolean} [opts.campaignControl] - allow acting on campaigns, not just reading them
  * @param {object} [opts.mind] - Alien Mind handle (enables /v1/goals).
  *   Shape: { coordinator } — coordinator must implement submitGoal,
  *   getActiveGoals, cancelGoal, and emit 'goal:event' for SSE relay.
@@ -584,6 +589,200 @@ function createGatewayRouter(opts) {
       log.error('/v1/sessions/:id/resume failed:', err && err.message);
       res.status(500).json({ error: 'resume_failed' });
     }
+  });
+
+  // ---- Campaigns ----
+  //
+  // A PA (Telegram, Slack, anything) can carry every decision of a
+  // campaign between you and polpo: it is told when one is pending, puts
+  // it to you, and brings your answer back with an attestation of who
+  // decided. Reading needs the gateway key; acting needs
+  // POLPO_GATEWAY_CAMPAIGN_CONTROL=1. See docs/campaigns.md, 4.10.
+
+  const campaigns = opts.campaigns || null;
+  const campaignControl = opts.campaignControl === true;
+  const campaignLimiter = createPerTokenRateLimit({ windowMs: 60_000, max: 60 });
+  const campaignControlLimiter = createPerTokenRateLimit({ windowMs: 60_000, max: 30 });
+
+  function sendCampaignFailure(res, out) {
+    const body = { error: out.error, message: out.message };
+    for (const k of ['errors', 'decided', 'reason', 'hash', 'status', 'decisions']) {
+      if (out[k] !== undefined) body[k] = out[k];
+    }
+    return res.status(campaignErrorStatus(out.error)).json(body);
+  }
+
+  /** The campaign of :id, or null after responding. */
+  function campaignOf(req, res, control) {
+    if (!campaigns) {
+      res.status(503).json({ error: 'campaigns_not_enabled' });
+      return null;
+    }
+    if (control && !campaignControl) {
+      res.status(403).json({ error: 'campaign_control_not_enabled' });
+      return null;
+    }
+    if (!CAMPAIGN_ID_RE.test(req.params.id)) {
+      res.status(400).json({ error: 'invalid_campaign_id' });
+      return null;
+    }
+    const c = campaigns.get(req.params.id);
+    if (!c) {
+      res.status(404).json({ error: 'campaign_not_found' });
+      return null;
+    }
+    return c;
+  }
+
+  /** Relay attestation, or null after responding. `required` for answers and stop. */
+  function relayOf(req, res, required) {
+    const body = req.body || {};
+    if (body.relay === undefined && !required) return { decidedBy: 'user', userMessage: null };
+    const r = checkRelay(body.relay);
+    if (!r.ok) {
+      res.status(400).json({ error: r.error, message: r.message });
+      return null;
+    }
+    return r;
+  }
+
+  // GET /v1/campaigns
+  router.get('/campaigns', campaignLimiter, (req, res) => {
+    if (!campaigns) return res.status(503).json({ error: 'campaigns_not_enabled' });
+    res.json({ campaigns: campaigns.list(), control: campaignControl });
+  });
+
+  // GET /v1/campaigns/:id: the ladder, gate history, pending decisions.
+  router.get('/campaigns/:id', campaignLimiter, (req, res) => {
+    const c = campaignOf(req, res, false);
+    if (!c) return;
+    res.json(campaigns.describe(c, { full: true }));
+  });
+
+  // GET /v1/campaigns/:id/ledger?since=<seq>&limit=<n>
+  router.get('/campaigns/:id/ledger', campaignLimiter, (req, res) => {
+    const c = campaignOf(req, res, false);
+    if (!c) return;
+    const since = clampNonNegativeInt(req.query && req.query.since, 0, Number.MAX_SAFE_INTEGER);
+    const limit = clampPositiveInt(req.query && req.query.limit, 100, 500);
+    res.json(campaigns.ledgerSince(c.id, since, limit));
+  });
+
+  // GET /v1/decisions?since=<cursor>: pending decisions across campaigns.
+  // Poll with the returned cursor; `closed` lists the ones settled since.
+  router.get('/decisions', campaignLimiter, (req, res) => {
+    if (!campaigns) return res.status(503).json({ error: 'campaigns_not_enabled' });
+    const since = clampNonNegativeInt(req.query && req.query.since, 0, Number.MAX_SAFE_INTEGER);
+    res.json(campaigns.decisionsSince(since));
+  });
+
+  // GET /v1/campaigns/:id/decisions/:decisionId
+  router.get('/campaigns/:id/decisions/:decisionId', campaignLimiter, (req, res) => {
+    const c = campaignOf(req, res, false);
+    if (!c) return;
+    const d = DECISION_ID_RE.test(req.params.decisionId) ? campaigns.getDecision(c.id, req.params.decisionId) : null;
+    if (!d) return res.status(404).json({ error: 'decision_not_found' });
+    res.json(d);
+  });
+
+  // POST /v1/campaigns { cwd, file?, sessionId? }: propose a campaign from
+  // a repository's campaign file. Nothing runs until its definition
+  // decision is answered by you.
+  router.post('/campaigns', campaignControlLimiter, smallJson, (req, res) => {
+    if (!campaigns) return res.status(503).json({ error: 'campaigns_not_enabled' });
+    if (!campaignControl) return res.status(403).json({ error: 'campaign_control_not_enabled' });
+    const body = req.body || {};
+    if (body.file !== undefined && typeof body.file !== 'string') return res.status(400).json({ error: 'invalid_file' });
+    const out = campaigns.create({
+      cwd: body.cwd,
+      file: body.file,
+      sessionId: body.sessionId,
+      channel: 'gateway:' + clientLabelFor(req, body),
+    });
+    if (!out.ok) return sendCampaignFailure(res, out);
+    res.status(201).json({ campaign: out.campaign, decision: out.decision });
+  });
+
+  // POST /v1/campaigns/:id/decisions/:decisionId
+  //   { answer, text?, hash?, relay: { decidedBy, userMessage } }
+  router.post('/campaigns/:id/decisions/:decisionId', campaignControlLimiter, smallJson, async (req, res) => {
+    const c = campaignOf(req, res, true);
+    if (!c) return;
+    if (!DECISION_ID_RE.test(req.params.decisionId)) return res.status(400).json({ error: 'invalid_decision_id' });
+    const relay = relayOf(req, res, true);
+    if (!relay) return;
+    const body = req.body || {};
+    try {
+      const out = await campaigns.answer(c.id, req.params.decisionId, {
+        answer: body.answer,
+        text: body.text,
+        hash: body.hash,
+        channel: 'gateway:' + clientLabelFor(req, body),
+        decidedBy: relay.decidedBy,
+        userMessage: relay.userMessage,
+      });
+      if (!out.ok) return sendCampaignFailure(res, out);
+      res.json({ decision: out.decision, campaign: out.campaign });
+    } catch (err) {
+      log.error('/v1/campaigns/:id/decisions failed:', err && err.message);
+      res.status(500).json({ error: 'answer_failed' });
+    }
+  });
+
+  // POST /v1/campaigns/:id/pause | resume | stop { text?, relay? }
+  // Stopping a campaign is yours alone: it needs relay.decidedBy "user".
+  for (const action of ['pause', 'resume', 'stop']) {
+    router.post('/campaigns/:id/' + action, campaignControlLimiter, smallJson, async (req, res) => {
+      const c = campaignOf(req, res, true);
+      if (!c) return;
+      const relay = relayOf(req, res, action === 'stop');
+      if (!relay) return;
+      if (action === 'stop' && relay.decidedBy !== 'user') {
+        return res.status(403).json({ error: 'agent_may_not_decide', message: 'Only the user can stop a campaign.' });
+      }
+      const body = req.body || {};
+      if (body.text !== undefined && (typeof body.text !== 'string' || body.text.length > 4000)) {
+        return res.status(400).json({ error: 'invalid_text' });
+      }
+      try {
+        const out = await campaigns[action](c.id, {
+          channel: 'gateway:' + clientLabelFor(req, body),
+          text: body.text,
+          decidedBy: relay.decidedBy,
+          userMessage: relay.userMessage,
+        });
+        if (!out.ok) return sendCampaignFailure(res, out);
+        res.json({ campaign: out.campaign });
+      } catch (err) {
+        log.error('/v1/campaigns/:id/' + action + ' failed:', err && err.message);
+        res.status(500).json({ error: action + '_failed' });
+      }
+    });
+  }
+
+  // POST /v1/campaigns/:id/prompt { text }: steer the campaign's session.
+  router.post('/campaigns/:id/prompt', campaignControlLimiter, smallJson, (req, res) => {
+    const c = campaignOf(req, res, true);
+    if (!c) return;
+    const body = req.body || {};
+    const out = campaigns.prompt(c.id, typeof body.text === 'string' ? body.text : '', {
+      channel: 'gateway:' + clientLabelFor(req, body),
+    });
+    if (!out.ok) return sendCampaignFailure(res, out);
+    res.json({ ok: true, instanceId: c.instanceId });
+  });
+
+  // POST /v1/campaigns/:id/gate { milestone? }: run a gate now.
+  router.post('/campaigns/:id/gate', campaignControlLimiter, smallJson, (req, res) => {
+    const c = campaignOf(req, res, true);
+    if (!c) return;
+    const body = req.body || {};
+    if (body.milestone !== undefined && typeof body.milestone !== 'string') {
+      return res.status(400).json({ error: 'invalid_milestone' });
+    }
+    const out = campaigns.runGate(c.id, { milestone: body.milestone }, { channel: 'gateway:' + clientLabelFor(req, body) });
+    if (!out.ok) return sendCampaignFailure(res, out);
+    res.status(202).json({ run: out.run });
   });
 
   // GET /v1/search — merged disk + memory hits (chronological).

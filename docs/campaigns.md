@@ -1,6 +1,9 @@
 # Campaigns: Human-Directed Agentic Engineering in polpo
 
-**Status:** design, not implemented.
+**Status:** phase 1 is built (section 8): the campaign file and its pin,
+binding to a session, gates on demand, the ledger and its export, pending
+decisions on the dashboard, the phone and the gateway, and approvals that
+wait for you. Phases 2 to 4 are design.
 
 A campaign is a long-running piece of work, days or weeks, done by one
 coding-agent session against milestones and executable gates that you
@@ -283,9 +286,10 @@ Every intervention is appended to
  "prev":"<sha256 of entry 41>"}
 ```
 
-- **Kinds:** `campaign_approved`, `campaign_changed`, `prompt`, `approval`,
-  `denial`, `approval_expired`, `gate_run`, `verdict`, `budget_pause`,
-  `handback`, `resume`, `question`, `answer`, `refusal`, `stop`.
+- **Kinds:** `campaign_created`, `campaign_approved`, `definition_rejected`,
+  `campaign_changed`, `prompt`, `approval`, `denial`, `approval_expired`,
+  `gate_run`, `verdict`, `budget_pause`, `pause`, `handback`, `resume`,
+  `question`, `answer`, `refusal`, `stop`.
 - **Channels:** `desk` (seen in the transcript), `dashboard`, `phone`,
   `gateway:<client>`, `polpo` (the driver itself).
 - **Hash-chained:** each entry carries the hash of the previous one, so a
@@ -512,6 +516,94 @@ describes.
    five minutes; the budget clock stops while it waits.
 5. **Budgets are turns, time and repeated failures.** Cost is shown where
    the agent reports it, not enforced.
+
+## 8. Phase 1 as built
+
+### Starting a campaign
+
+1. Put a campaign file in the repository (default `.polpo/campaign.json`,
+   section 4.1). polpo checks it strictly: unknown keys, a gate given as a
+   string instead of an argv list, or a pinned path outside the
+   repository are errors, so a typo cannot quietly change what you approve.
+2. Propose it, from any of:
+   - the dashboard: `/campaign start [file]` in the chat of the session
+     the campaign should hold (it then continues that session);
+   - the gateway: `POST /v1/campaigns { cwd, file?, sessionId? }`, with
+     `POLPO_GATEWAY_CAMPAIGN_CONTROL=1`; without `sessionId` polpo starts a
+     new session when the campaign is approved.
+3. Approve the `definition` decision. It shows the ladder as text, with
+   the file's hash. On approval polpo pins the file and the pinned paths,
+   takes or starts the session as `campaign:<id>`, keeping the permission
+   mode it had at your desk, and sends the agent a briefing: the
+   objective, the active milestone, how it is accepted, its gate, the
+   constraints and `read_first`. The briefing says that polpo runs the
+   gate itself and that the agent's own checks do not pass a milestone.
+
+The campaign id is the file's `name`; a second campaign with the same name
+is refused. Campaigns hold Claude sessions only for now: approvals and the
+desk handback both rely on Claude's transcript and permission prompt.
+
+### What runs, and when
+
+- **Prompts** come from you: the dashboard's prompt box, or
+  `POST /v1/campaigns/:id/prompt` through a PA. A prompt is refused while
+  the agent is working. The inner loop that prompts on its own is phase 2.
+- **Gates** run on demand: the Run gate button, `/gate [milestone]`, or
+  `POST /v1/campaigns/:id/gate`. A gate is refused while the agent is
+  working (it would test a tree being edited) and while another gate runs.
+  The run records the commit, whether the tree had uncommitted changes and
+  a hash of them, the exit code, the duration, the log's sha256 and its
+  last 200 lines, the pinned paths changed since approval, and the model
+  the session reported. Logs are kept in
+  `~/.config/polpo/campaigns/<id>/gates/`.
+- **A changed campaign file** is noticed when a turn ends, and before any
+  prompt or gate: the campaign stops in `awaiting_definition` and a new
+  `definition` decision lists what changed, milestone by milestone. A
+  version you rejected is not asked about again; going back to the
+  approved version leaves the campaign paused for you to resume.
+- **Desk work**: a prompt typed in VSCode or a terminal while polpo holds
+  the session hands it back at once and is recorded with channel `desk`.
+  So is another holder taking the session (the dashboard, another gateway
+  caller). The campaign is then `paused_desk`.
+- **Resuming** after a pause, a handback or a polpo restart is the
+  `resume` control (dashboard button, `/resume`,
+  `POST /v1/campaigns/:id/resume`). The `resume` decision that polpo
+  raises on its own is phase 2.
+- **Stopping** supersedes every pending decision, denies a waiting
+  approval and hands the session to the dashboard, where it continues as
+  an ordinary session.
+
+### Approvals that wait
+
+When the agent of a campaign session asks for an approval, it becomes an
+`approval` decision (`allow`/`deny`; `approve`/`reject` for a plan;
+`answer`/`deny` for a question, the answer text going to every question)
+on the dashboard, the phone and the gateway. Auto-approve is ignored on a
+campaign session. The approval does not expire: the hub answers the
+permission server `{ "retry": true }` every four minutes and the server
+asks again with the same tool use id, so no HTTP request stays open for
+hours and one approval stays one decision. Claude aborts an MCP call that
+is silent for 30 minutes unless the server sets its own timeout, so polpo's
+approval server is configured with a 7 day one. Outside campaigns an
+approval is still denied after five minutes.
+
+### The gateway, as built
+
+The routes of section 4.10 exist except the webhook and the `diff` route
+(phase 2, with verdicts); a `definition` decision lists its changes
+instead. `GET /v1/campaigns/:id/decisions/:decisionId` returns one
+decision, open or closed, and `POST /v1/campaigns/:id/gate` runs a gate.
+An answer attested `decidedBy: "user"` must carry `relay.userMessage`, the
+user's words (for a button tap, the button's text): the ledger records an
+attestation with nothing to show as weaker than none. Answers from the
+dashboard and from the phone are both recorded as channel `dashboard`:
+they are the same page.
+
+### Records
+
+`polpo campaign list`, `polpo campaign verify <id>` (checks the hash
+chain) and `polpo campaign export <id> [--out DIR]` read
+`~/.config/polpo/campaigns/` directly; no server is needed.
 
 ## References
 

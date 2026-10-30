@@ -45,6 +45,12 @@ function printHelp() {
                   --days N        analysis window (1-365, default 90)
                   --agent NAME    filter by agent type (default all)
                   --json          emit raw JSON instead of human view
+    campaign    Campaign records (docs/campaigns.md), read from
+                ~/.config/polpo/campaigns. No server needed.
+                  list            every campaign and its status
+                  verify <id>     check the ledger's hash chain
+                  export <id>     write manifest.json and STEERING.md
+                    --out DIR     where (default ./campaign-<id>)
     help        Show this help message
     --version   Print version and exit
 
@@ -74,6 +80,10 @@ function printHelp() {
     POLPO_GATEWAY_MAX_CONCURRENT Max in-flight tasks (default 4).
     POLPO_GATEWAY_MAX_TIMEOUT_MS Hard cap per-task timeout (default 30min).
     POLPO_GATEWAY_MAX_UPLOAD_SIZE Per-upload byte cap (default 25MB).
+    POLPO_GATEWAY_CAMPAIGN_CONTROL=1  Let gateway callers act on campaigns
+                                 (answer decisions, prompt, gate, pause).
+    POLPO_CAMPAIGN_AGENT_MAY     Decision kinds a PA may decide on its own:
+                                 question, budget, resume (default none).
 
   AGENT OPTIONS
     --name <name>       Display name for this instance
@@ -687,6 +697,56 @@ function wrapForTerminal(text, width, indent) {
   return lines.join('\n' + indent);
 }
 
+function runCampaign() {
+  const { CampaignStore } = require('../src/campaign/store');
+  const { readLedger } = require('../src/campaign/ledger');
+  const { exportCampaign } = require('../src/campaign/export');
+  const { ID_RE } = require('../src/campaign/definition');
+  const store = new CampaignStore();
+  const sub = args[1];
+  const id = args[2];
+
+  if (sub === 'list' || sub === undefined) {
+    const all = store.loadAll();
+    if (!all.length) {
+      console.log('No campaigns in ' + store.root);
+      return;
+    }
+    for (const c of all) {
+      console.log(c.id.padEnd(28) + ' ' + String(c.status).padEnd(20) + ' ' + c.cwd);
+    }
+    return;
+  }
+  if (!id || !ID_RE.test(id)) {
+    console.error('Usage: polpo campaign ' + sub + ' <campaign-id>');
+    process.exit(1);
+  }
+  if (sub === 'verify') {
+    const r = readLedger(store.ledgerPath(id));
+    if (!r.entries.length) {
+      console.error('No ledger for campaign ' + id);
+      process.exit(1);
+    }
+    if (r.ok) {
+      console.log('Ledger of ' + id + ': ' + r.entries.length + ' entries, chain intact (last ' + r.lastHash.slice(0, 16) + ').');
+    } else {
+      console.error('Ledger of ' + id + ': the chain breaks at entry ' + r.brokenAt + '.');
+      process.exit(2);
+    }
+    return;
+  }
+  if (sub === 'export') {
+    const out = typeof flags.out === 'string' ? flags.out : require('path').join(process.cwd(), 'campaign-' + id);
+    const r = exportCampaign(id, require('path').resolve(out), { store });
+    console.log('Wrote ' + r.manifest);
+    console.log('Wrote ' + r.steering);
+    if (!r.chainOk) console.error('Warning: the ledger chain breaks at entry ' + r.brokenAt + '.');
+    return;
+  }
+  console.error('Unknown campaign command: ' + sub);
+  process.exit(1);
+}
+
 async function runGateway() {
   // Headless gateway: dashboard routes still exist (one process, one port)
   // but we don't print the phone URL or open a tunnel. The dashboard
@@ -730,6 +790,15 @@ switch (command) {
 
   case 'hooks':
     printHooks();
+    break;
+
+  case 'campaign':
+    try {
+      runCampaign();
+    } catch (err) {
+      console.error('Campaign command failed:', err && err.message);
+      process.exit(1);
+    }
     break;
 
   case 'profile':

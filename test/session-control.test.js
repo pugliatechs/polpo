@@ -197,6 +197,30 @@ describe('SessionController', () => {
     ctl = new SessionController({ instanceManager: im, createAgent: agentFactory, hubPort: 7890, sessions: {} });
   });
 
+  describe('start and handOver', () => {
+    it('starts a new session, held when asked', async () => {
+      const plain = await ctl.start({ cwd: tmp, name: 'New' });
+      assert.equal(plain.ok, true);
+      assert.equal(im.get(plain.instanceId).heldBy || null, null, 'a plain new session is not marked held');
+      assert.equal(agents[0].opts.cwd, tmp);
+      assert.equal(agents[0].opts.resumeSessionId, undefined, 'a new session, not a resume');
+      const held = await ctl.start({ cwd: tmp, heldBy: 'campaign:demo' });
+      assert.equal(im.get(held.instanceId).heldBy, 'campaign:demo');
+      assert.equal(ctl.held.get(held.instanceId).heldBy, 'campaign:demo');
+    });
+
+    it('passes a held session to another holder, keeping its mode', async () => {
+      discovered('idle');
+      const out = await ctl.takeover('vscode-1', { heldBy: 'campaign:demo' });
+      im.setControl(out.instanceId, { permissionMode: 'auto' });
+      assert.equal(ctl.handOver(out.instanceId, 'dashboard'), true);
+      const inst = im.get(out.instanceId);
+      assert.equal(inst.heldBy, 'dashboard');
+      assert.equal(inst.permissionMode, 'auto');
+      assert.equal(ctl.handOver('no-such', 'dashboard'), false);
+    });
+  });
+
   describe('takeover', () => {
     it('is refused while the agent is busy', async () => {
       discovered('busy');

@@ -656,6 +656,7 @@
   function handleMessage(msg) {
     switch (msg.type) {
       case 'snapshot':
+        loadCampaigns();
         instances.clear();
         msg.instances.forEach(function (inst) {
           inst.conversation = inst.conversation || [];
@@ -816,6 +817,14 @@
         updateNotificationBadge();
         renderList();
         if (activeInstanceId === msg.id) renderDetail();
+        break;
+
+      case 'campaign:update':
+        if (msg.campaign && msg.campaign.campaignId) {
+          campaigns.set(msg.campaign.campaignId, msg.campaign);
+          renderCampaigns();
+          if (activeInstanceId) renderCampaignBanner(instances.get(activeInstanceId));
+        }
         break;
 
       case 'instance:autoApprove':
@@ -1402,6 +1411,7 @@
 
     // Template bar
     renderTemplateBar();
+    renderCampaignBanner(inst);
 
     // Takeover vs prompt input
     var canPrompt = inst.canReceivePrompts !== false;
@@ -2113,6 +2123,11 @@
   function sendPrompt() {
     var text = $promptInput.value.trim();
     if ((!text && pendingAttachments.length === 0) || !activeInstanceId) return;
+    if (pendingAttachments.length === 0 && handleCampaignCommand(text)) {
+      $promptInput.value = '';
+      $promptInput.style.height = 'auto';
+      return;
+    }
 
     var attachments = pendingAttachments.map(function (a) {
       return { id: a.id, path: a.path, filename: a.filename, mediaType: a.mediaType };
@@ -3292,6 +3307,225 @@
    * escaped, because they are not special in text content. That makes
    * this unsafe for attribute values: use escapeAttr there.
    */
+  // ---- Campaigns (docs/campaigns.md) ----
+  //
+  // A campaign holds one session and waits on your decisions: approving
+  // its campaign file, approvals its agent asks for. The same decisions
+  // reach the gateway; the first answer anywhere closes them.
+
+  var campaigns = new Map();
+  var $campaignSection = document.getElementById('campaign-section');
+  var $campaignList = document.getElementById('campaign-list');
+  var $campaignBanner = document.getElementById('campaign-banner');
+  var CAMPAIGN_STATUS_LABELS = {
+    awaiting_definition: 'waiting for approval',
+    active: 'active',
+    paused: 'paused',
+    paused_desk: 'handed back',
+    stopped: 'stopped',
+  };
+
+  function loadCampaigns() {
+    authFetch('/api/campaigns').then(function (r) { return r.json(); }).then(function (data) {
+      campaigns.clear();
+      (data.campaigns || []).forEach(function (c) { campaigns.set(c.campaignId, c); });
+      renderCampaigns();
+      if (activeInstanceId) renderCampaignBanner(instances.get(activeInstanceId));
+    }).catch(function () {});
+  }
+
+  /** The running campaign bound to a session card, or null. */
+  function campaignForInstance(inst) {
+    if (!inst) return null;
+    var found = null;
+    campaigns.forEach(function (c) {
+      if (found || c.status === 'stopped') return;
+      if (c.instanceId === inst.id || (c.sessionId && c.sessionId === inst.sessionId)) found = c;
+    });
+    return found;
+  }
+
+  function campaignGateLine(c) {
+    if (c.gateRunning) return 'Gate of ' + escapeHtml(c.gateRunning.milestone) + ' running...';
+    var active = (c.milestones || []).filter(function (m) { return m.active; })[0];
+    if (!active) return '';
+    var line = 'Milestone <strong>' + escapeHtml(active.id) + '</strong>: ' + escapeHtml(active.goal);
+    if (active.lastRun) {
+      line += '<br>Last gate: <span class="' + (active.lastRun.passed ? 'campaign-gate-pass">passed' : 'campaign-gate-fail">failed (exit ' + escapeHtml(String(active.lastRun.exit)) + ')') + '</span>';
+    } else {
+      line += '<br>Gate not run yet: <code>' + escapeHtml(active.gate) + '</code>';
+    }
+    return line;
+  }
+
+  function campaignDecisionHtml(c, d) {
+    var buttons = d.options.map(function (opt) {
+      var cls = (opt === 'approve' || opt === 'allow' || opt === 'answer') ? 'btn-approve' : 'btn-reject';
+      return '<button class="btn ' + cls + '" data-campaign-id="' + escapeAttr(c.campaignId) +
+        '" data-decision-id="' + escapeAttr(d.decisionId) + '" data-answer="' + escapeAttr(opt) + '">' +
+        escapeHtml(opt.charAt(0).toUpperCase() + opt.slice(1)) + '</button>';
+    }).join('');
+    return '<div class="campaign-decision"><strong>' + escapeHtml(d.kind === 'definition' ? 'Approve the campaign file' : 'Approval') +
+      '</strong><pre>' + escapeHtml(d.text) + '</pre><div class="campaign-actions">' + buttons + '</div></div>';
+  }
+
+  function campaignControlsHtml(c) {
+    var b = function (action, label, cls) {
+      return '<button class="btn btn-small ' + (cls || '') + '" data-campaign-id="' + escapeAttr(c.campaignId) +
+        '" data-campaign-action="' + action + '">' + label + '</button>';
+    };
+    var out = [];
+    if (c.definitionHash && c.status !== 'awaiting_definition') out.push(b('gate', 'Run gate'));
+    if (c.status === 'active') out.push(b('pause', 'Pause'));
+    if (c.status === 'paused' || c.status === 'paused_desk') out.push(b('resume', 'Resume'));
+    out.push(b('stop', 'Stop', 'btn-danger'));
+    return '<div class="campaign-actions">' + out.join('') + '</div>';
+  }
+
+  function campaignCardHtml(c, withDecisions) {
+    var html = '<div class="campaign-head"><strong>' + escapeHtml(c.campaignId) + '</strong>' +
+      '<span class="campaign-status campaign-' + escapeAttr(c.status) + '">' + escapeHtml(CAMPAIGN_STATUS_LABELS[c.status] || c.status) + '</span></div>';
+    if (c.statusReason) html += '<div class="campaign-line">' + escapeHtml(c.statusReason) + '</div>';
+    var gate = campaignGateLine(c);
+    if (gate) html += '<div class="campaign-line">' + gate + '</div>';
+    if (withDecisions) {
+      (c.pendingDecisions || []).forEach(function (d) { html += campaignDecisionHtml(c, d); });
+    }
+    if (c.status !== 'stopped') html += campaignControlsHtml(c);
+    return html;
+  }
+
+  function renderCampaigns() {
+    var live = Array.from(campaigns.values()).filter(function (c) { return c.status !== 'stopped'; });
+    if (!live.length) {
+      $campaignSection.classList.add('hidden');
+      $campaignList.innerHTML = '';
+      return;
+    }
+    $campaignSection.classList.remove('hidden');
+    $campaignList.innerHTML = live.map(function (c) {
+      return '<div class="campaign-card">' + campaignCardHtml(c, true) + '</div>';
+    }).join('');
+  }
+
+  function renderCampaignBanner(inst) {
+    var c = campaignForInstance(inst);
+    if (!c) {
+      $campaignBanner.classList.add('hidden');
+      $campaignBanner.innerHTML = '';
+      return;
+    }
+    $campaignBanner.classList.remove('hidden');
+    // Approvals already have their banner below; show the others here.
+    var html = campaignCardHtml(c, false);
+    (c.pendingDecisions || []).forEach(function (d) {
+      if (d.kind !== 'approval') html += campaignDecisionHtml(c, d);
+    });
+    $campaignBanner.innerHTML = html;
+  }
+
+  function campaignNotice(text) {
+    var inst = instances.get(activeInstanceId);
+    var msg = { role: 'system', content: text, source: 'polpo', timestamp: Date.now() };
+    if (inst) {
+      if (!inst.conversation) inst.conversation = [];
+      inst.conversation.push(msg);
+    }
+    appendMessage(msg);
+  }
+
+  function campaignRequest(url, body) {
+    return authFetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {}),
+    }).then(function (r) {
+      return r.json().then(function (data) {
+        if (!r.ok) throw new Error(data.message || data.error || ('HTTP ' + r.status));
+        if (data.campaign && data.campaign.campaignId) campaigns.set(data.campaign.campaignId, data.campaign);
+        renderCampaigns();
+        if (activeInstanceId) renderCampaignBanner(instances.get(activeInstanceId));
+        return data;
+      });
+    });
+  }
+
+  function answerCampaignDecision(campaignId, decisionId, answer) {
+    var c = campaigns.get(campaignId);
+    var d = c && (c.pendingDecisions || []).filter(function (x) { return x.decisionId === decisionId; })[0];
+    if (!d) return;
+    var body = { answer: answer };
+    if (d.needsText && d.needsText[answer]) {
+      var text = window.prompt(d.needsText[answer].charAt(0).toUpperCase() + d.needsText[answer].slice(1) + ':');
+      if (!text || !text.trim()) return;
+      body.text = text.trim();
+    }
+    if (d.kind === 'definition' && answer === 'approve') body.hash = d.details && d.details.hash;
+    campaignRequest('/api/campaigns/' + encodeURIComponent(campaignId) + '/decisions/' + encodeURIComponent(decisionId), body)
+      .catch(function (err) { alert('Campaign ' + campaignId + ': ' + err.message); loadCampaigns(); });
+  }
+
+  function runCampaignAction(campaignId, action) {
+    if (action === 'stop' && !window.confirm('Stop campaign ' + campaignId + '? This ends it; the session stays open.')) return;
+    return campaignRequest('/api/campaigns/' + encodeURIComponent(campaignId) + '/' + action, {})
+      .then(function () {
+        if (action === 'gate') campaignNotice('Campaign ' + campaignId + ': gate started. The result appears on the campaign banner.');
+      })
+      .catch(function (err) { alert('Campaign ' + campaignId + ': ' + err.message); });
+  }
+
+  function onCampaignClick(e) {
+    var el = e.target.closest('[data-campaign-id]');
+    if (!el) return;
+    if (el.getAttribute('data-decision-id')) {
+      answerCampaignDecision(el.getAttribute('data-campaign-id'), el.getAttribute('data-decision-id'), el.getAttribute('data-answer'));
+    } else if (el.getAttribute('data-campaign-action')) {
+      runCampaignAction(el.getAttribute('data-campaign-id'), el.getAttribute('data-campaign-action'));
+    }
+  }
+  $campaignList.addEventListener('click', onCampaignClick);
+  $campaignBanner.addEventListener('click', onCampaignClick);
+
+  /**
+   * Campaign commands typed in a session's chat. `/campaign start [file]`
+   * proposes a campaign for this session; on a session a campaign holds,
+   * /gate /pause /resume /stop /status act on it. Anything else is an
+   * ordinary prompt.
+   * @returns {boolean} true when the text was a campaign command
+   */
+  function handleCampaignCommand(text) {
+    var inst = instances.get(activeInstanceId);
+    var start = /^\/campaign\s+start(?:\s+(\S+))?\s*$/.exec(text);
+    if (start) {
+      var body = { instanceId: activeInstanceId };
+      if (start[1]) body.file = start[1];
+      campaignRequest('/api/campaigns', body).then(function (data) {
+        campaignNotice('Campaign ' + data.campaign.campaignId + ' proposed. Approve its campaign file on the banner above to start it.');
+      }).catch(function (err) { campaignNotice('Campaign not started: ' + err.message); });
+      return true;
+    }
+    var c = campaignForInstance(inst);
+    var m = /^\/(gate|pause|resume|stop|status)(?:\s+(\S+))?\s*$/.exec(text);
+    if (!c || !m) return false;
+    if (m[1] === 'status') {
+      var lines = ['Campaign ' + c.campaignId + ': ' + (CAMPAIGN_STATUS_LABELS[c.status] || c.status) + (c.statusReason ? ' (' + c.statusReason + ')' : '')];
+      (c.milestones || []).forEach(function (ms) {
+        lines.push((ms.active ? '> ' : '  ') + ms.id + ': ' + (ms.lastRun ? (ms.lastRun.passed ? 'gate passed' : 'gate failed') : 'gate not run'));
+      });
+      if ((c.pendingDecisions || []).length) lines.push(c.pendingDecisions.length + ' decision(s) waiting for you.');
+      campaignNotice(lines.join('\n'));
+      return true;
+    }
+    if (m[1] === 'gate' && m[2]) {
+      campaignRequest('/api/campaigns/' + encodeURIComponent(c.campaignId) + '/gate', { milestone: m[2] })
+        .then(function () { campaignNotice('Campaign ' + c.campaignId + ': gate of ' + m[2] + ' started.'); })
+        .catch(function (err) { campaignNotice('Gate not started: ' + err.message); });
+      return true;
+    }
+    runCampaignAction(c.campaignId, m[1]);
+    return true;
+  }
+
   function escapeHtml(str) {
     var div = document.createElement('div');
     div.appendChild(document.createTextNode(str));

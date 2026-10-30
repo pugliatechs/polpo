@@ -142,6 +142,7 @@ The dashboard shows active sessions, past session history, and lets you send pro
 | Skills Management | Browse, search, install, and remove [skills.sh](https://skills.sh) skills from Claude instance detail view |
 | Mobile-First UI | Dark OLED theme, touch-optimized, safe-area support, responsive layout |
 | Tunnel Access | Expose the hub over the internet with `--tunnel` (cloudflared, localtunnel, ngrok, SSH) |
+| Campaigns | Days of work by one session against milestones and gates you define; polpo runs the gates, keeps a hash-chained steering record, and brings every decision to the dashboard, the phone or a PA through the gateway ([docs/campaigns.md](docs/campaigns.md)) |
 
 > **Note**: Polpo streaming is **near real-time**, not strictly real-time. Auto-discovery relies on filesystem events (`fs.watch`) which have inherent OS-level latency; JSONL/JSON watchers debounce file changes; agents using one-shot process invocation (Codex, Gemini) accumulate deltas before flushing; and when `fs.watch` is unavailable (e.g. inotify limit exhaustion), the system falls back to periodic polling. In practice, latency is typically under one second, but it is not zero.
 

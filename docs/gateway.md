@@ -689,6 +689,55 @@ curl -N -H "Authorization: Bearer $KEY" $HOST/v1/goals/$GOAL_ID/stream
 
 You'll see the mind plan the work, dispatch it to arms (some in parallel), broker context between dependent tasks, and finally emit `done` when every task is in a terminal state.
 
+## Campaigns (`/v1/campaigns`, `/v1/decisions`)
+
+A campaign is long-running work by one session against milestones and gates you define; see [campaigns.md](campaigns.md). Everything a campaign waits on is a **pending decision**, and a PA (Telegram, Slack, ...) can carry each one between you and polpo: it polls for decisions, puts them to you, and brings your answer back with an attestation of who decided. Reading needs the gateway key; acting needs `POLPO_GATEWAY_CAMPAIGN_CONTROL=1` (otherwise `403 campaign_control_not_enabled`).
+
+### Reading
+
+| Route | Returns |
+|---|---|
+| `GET /v1/campaigns` | `{ campaigns: [...], control }` |
+| `GET /v1/campaigns/:id` | status, milestones with their last gate run, `pendingDecisions`, the definition, the last 20 gate runs |
+| `GET /v1/campaigns/:id/ledger?since=<seq>&limit=<1..500>` | the steering record, `{ entries, hasMore, lastSeq }` |
+| `GET /v1/decisions?since=<cursor>` | `{ decisions, closed, cursor }`: decisions pending across campaigns raised after the cursor, and those answered or superseded since it |
+| `GET /v1/campaigns/:id/decisions/:decisionId` | one decision, open or closed |
+
+A decision:
+
+```json
+{
+  "decisionId": "dec-3f9a1c2b7e4d", "campaignId": "storage-engine", "kind": "definition",
+  "milestone": "m1-format", "createdAt": "2026-11-03T21:10:44.000Z", "seq": 1793740244000,
+  "status": "pending",
+  "text": "Approve campaign storage-engine before it runs anything. ...",
+  "options": ["approve", "reject"], "needsText": { "reject": "what to change" },
+  "details": { "hash": "0b8895bf...", "changes": [] }
+}
+```
+
+`text` is plain text under 3,500 characters with secrets filtered: forward it as it is. Phase 1 raises `definition` (approve a new or changed campaign file) and `approval` (the agent waits for a tool approval; it never expires) decisions.
+
+### Acting (`POLPO_GATEWAY_CAMPAIGN_CONTROL=1`)
+
+| Route | Body |
+|---|---|
+| `POST /v1/campaigns` | `{ cwd, file?, sessionId? }`: propose a campaign; it starts in `awaiting_definition` |
+| `POST /v1/campaigns/:id/decisions/:decisionId` | `{ answer, text?, hash?, relay: { decidedBy, userMessage } }` |
+| `POST /v1/campaigns/:id/prompt` | `{ text }`: steer the session; `409 session_busy` while it works |
+| `POST /v1/campaigns/:id/gate` | `{ milestone? }`: run a gate now; `202 { run }`, result on the campaign and in the ledger |
+| `POST /v1/campaigns/:id/pause`, `/resume` | `{ text?, relay? }` |
+| `POST /v1/campaigns/:id/stop` | `{ text?, relay }`: `relay.decidedBy` must be `user` |
+
+Rules a caller meets:
+
+- **Attestation.** `relay.decidedBy` is `user` (you answered, the PA relays your words in `relay.userMessage`, required) or `agent` (the PA decided). `definition` and `approval` decisions are always yours: `403 agent_may_not_decide`. The host can let a PA decide `question`, `budget` and `resume` decisions with `POLPO_CAMPAIGN_AGENT_MAY`; polpo refuses to start if that lists anything else.
+- **First answer wins.** `409 decision_closed` carries what was decided, on which channel, by whom.
+- **No stale answers.** `409 decision_superseded` when the campaign moved on (the file changed again, the agent stopped waiting).
+- **Definitions by hash.** Approving a `definition` needs `hash` equal to `details.hash` of the version you showed (`409 hash_mismatch`).
+
+Every action is recorded in the ledger with channel `gateway:<client>` (from `X-Polpo-Client`). Rate limits: 60/min reading, 30/min acting, per token.
+
 ## Builder Profile (`/v1/profile`)
 
 Returns a "how this host's operator works with AI agents" report. Computed entirely from local session transcripts — no LLM calls, no transcript content leaves the machine. Useful for an external bot that wants to introspect a host before deciding how to phrase a task ("the operator is heavy on tests and commits, I can be terse" vs. "the operator is heavy on plans, I should structure my request").
@@ -735,7 +784,8 @@ The full reference for the response shape, scoring heuristics, and privacy model
 
   In `auto` and `default`, any approval request fails the task immediately with `approval_required`, so callers must write self-sufficient prompts. An unknown value falls back to `auto`, never to `bypass`. OpenCode, Pi and Goose take no mode from polpo; their own settings apply.
 - **Driving live sessions is opt-in**: `POLPO_GATEWAY_SESSION_CONTROL=1` turns it on. Even then a busy session is read only, a session is never forked, and polpo hands it back as soon as someone writes to it again in VSCode or a terminal. A caller gets the session's own permission mode only with `POLPO_GATEWAY_INHERIT_PERMISSION_MODE=1`.
-- **Secrets are filtered from session content**: see [Secrets in session content](#secrets-in-session-content).
+- **Secrets are filtered from session content**: see [Secrets in session content](#secrets-in-session-content). Campaign decisions and the campaign ledger go through the same filter.
+- **Campaigns are directed, not bypassed**: acting on campaigns is opt-in (`POLPO_GATEWAY_CAMPAIGN_CONTROL=1`); a PA can carry your answer to any decision but never approve a campaign file or an agent's approval on its own, nor stop a campaign; gate commands run only after you approve the pinned campaign file, as an argv without a shell.
 - **No filenames in logs**: caller-controlled strings stay out of logs; uploads are recorded by size and sha256 for forensics.
 - **No new dependencies**: pure Node 22, no multipart parsers, no third-party crypto.
 
@@ -752,6 +802,8 @@ The full reference for the response shape, scoring heuristics, and privacy model
 | `POLPO_GATEWAY_SESSION_CONTROL` | off | `1` lets callers take over and continue live coding sessions |
 | `POLPO_GATEWAY_INHERIT_PERMISSION_MODE` | off | `1` lets a session taken over through the gateway keep its own permission mode (`auto`, ...) |
 | `POLPO_GATEWAY_REDACT` | on | `0` stops removing secrets from session content the gateway returns |
+| `POLPO_GATEWAY_CAMPAIGN_CONTROL` | off | `1` lets callers act on campaigns: propose, answer decisions, prompt, run gates, pause, resume, stop |
+| `POLPO_CAMPAIGN_AGENT_MAY` | empty | Decision kinds a PA may decide on its own: any of `question`, `budget`, `resume`. Anything else stops polpo from starting |
 | `POLPO_SESSION_STALE_MS` | 10 × 60 × 1000 | A Claude session with no transcript activity for this long counts as idle |
 
 ## File Layout (server-side)

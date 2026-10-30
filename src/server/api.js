@@ -7,6 +7,8 @@ const { execFile } = require('child_process');
 const { scanSessions, loadHistory, resolveSessionCwd } = require('./sessions');
 const { createAgent } = require('../agent/agent-factory');
 const { SessionController } = require('./session-control');
+const { PendingApprovals, DEFAULT_HOLD_MS } = require('./approvals');
+const { campaignErrorStatus } = require('../campaign');
 const {
   UPLOAD_DIR,
   DASHBOARD_MAX_UPLOAD_SIZE,
@@ -94,7 +96,13 @@ function parseSkillsSearchOutput(stdout) {
 // is unchanged — see src/server/normalize-timestamp.js.
 const { normalizeTimestamp } = require('./normalize-timestamp');
 
-function createApiRouter(instanceManager, getAuthState, pushManager, outboxManager, getTunnelInfo, sessionController) {
+/**
+ * @param {object} [extras]
+ * @param {object} [extras.approvals] - shared PendingApprovals
+ * @param {object} [extras.campaigns] - CampaignManager (enables /api/campaigns)
+ * @param {number} [extras.approvalHoldMs] - see approvals.js
+ */
+function createApiRouter(instanceManager, getAuthState, pushManager, outboxManager, getTunnelInfo, sessionController, extras) {
   const router = express.Router();
 
   // Track spawned wrapped agents so we can clean them up
@@ -106,9 +114,14 @@ function createApiRouter(instanceManager, getAuthState, pushManager, outboxManag
     instanceManager, outboxManager, getAuthState, createAgent,
   });
 
-  // Pending permission decisions: instanceId -> { resolve, timeout }
-  // Used by the MCP permission server long-poll endpoint.
-  const pendingDecisions = new Map();
+  // Approvals the MCP permission server is long-polling for. Shared with
+  // campaigns, which carry them to the gateway; a private one otherwise.
+  const ext = extras || {};
+  const approvals = ext.approvals || new PendingApprovals(instanceManager);
+  const campaigns = ext.campaigns || null;
+  // How long a campaign approval's request is held before the permission
+  // server is told to ask again. Shorter in tests.
+  const approvalHoldMs = ext.approvalHoldMs || DEFAULT_HOLD_MS;
 
   // Upload a file attachment from the phone
   router.post('/upload', (req, res) => {
@@ -375,23 +388,15 @@ function createApiRouter(instanceManager, getAuthState, pushManager, outboxManag
       return res.status(400).json({ error: 'cwd does not exist' });
     }
 
-    const authState = typeof getAuthState === 'function' ? getAuthState() : null;
-    const authToken = authState && authState.enabled ? authState.token : undefined;
-
     try {
-      const agent = createAgent(type, {
-        name: name || `Session (${path.basename(cwd)})`,
+      const out = await controller.start({
+        agentType: type,
+        name,
         cwd,
-        model: model || undefined,
+        model,
         serverUrl: `ws://127.0.0.1:${req.socket.localPort}`,
-        token: authToken,
       });
-
-      await agent.start();
-
-      controller.track(agent.instanceId, agent);
-
-      res.json({ instanceId: agent.instanceId });
+      res.json({ instanceId: out.instanceId });
     } catch (err) {
       log.error('error:', err);
       res.status(500).json({ error: 'Internal server error' });
@@ -532,7 +537,10 @@ function createApiRouter(instanceManager, getAuthState, pushManager, outboxManag
     const isPlan = toolName === 'ExitPlanMode' || toolName === 'EnterPlanMode';
     const isQuestion = toolName === 'AskUserQuestion';
     const inst = instanceManager.get(instanceId);
-    if (inst && inst.autoApprove && !isPlan && !isQuestion) {
+    // A campaign's approvals always reach you: auto-approve would make it
+    // a bypassed campaign.
+    const campaignId = campaigns ? campaigns.campaignForInstance(instanceId) : null;
+    if (inst && inst.autoApprove && !isPlan && !isQuestion && !campaignId) {
       return res.json({ behavior: 'allow', updatedInput: toolInput });
     }
 
@@ -603,88 +611,58 @@ function createApiRouter(instanceManager, getAuthState, pushManager, outboxManag
         : `${questions.length} questions to answer`;
     }
 
-    // Show approval banner on phone
-    instanceManager.setPendingApproval(instanceId, {
-      tool: toolName, description, command, approvalType, questions, planFile,
-    });
-
-    // Cancel any previous pending decision for this instance
-    const existing = pendingDecisions.get(instanceId);
-    if (existing) {
-      clearTimeout(existing.timeout);
-      existing.resolve({ behavior: 'allow', updatedInput: toolInput });
+    // A campaign's approval waits for an answer instead of expiring: the
+    // permission server is told to ask again every few minutes.
+    const repoll = approvals.isRepoll(instanceId, toolUseId);
+    if (!repoll) {
+      // Show approval banner on phone
+      instanceManager.setPendingApproval(instanceId, {
+        tool: toolName, description, command, approvalType, questions, planFile,
+      });
     }
-
-    // Wait for phone decision (up to 5 minutes)
-    const promise = new Promise((resolve) => {
-      const timeout = setTimeout(() => {
-        pendingDecisions.delete(instanceId);
-        instanceManager.clearPendingApproval(instanceId);
-        resolve({ behavior: 'deny', message: 'Approval timed out' });
-      }, 5 * 60 * 1000);
-
-      pendingDecisions.set(instanceId, { resolve, timeout, toolInput });
-    });
-
-    promise.then((decision) => res.json(decision));
+    const waitOpts = campaignId ? { expiresMs: null, holdMs: approvalHoldMs } : {};
+    approvals.wait(instanceId, { toolUseId, toolInput, approvalType }, waitOpts)
+      .then((decision) => res.json(decision));
+    if (campaignId && !repoll) {
+      campaigns.approvalRequested(campaignId, instanceId, {
+        toolUseId, tool: toolName, description, command, approvalType, questions, toolInput,
+      });
+    }
   });
 
   // Approve pending action
   router.post('/instances/:id/approve', (req, res) => {
     const id = req.params.id;
-    const pending = pendingDecisions.get(id);
-    if (pending) {
-      clearTimeout(pending.timeout);
-      pendingDecisions.delete(id);
+    if (approvals.approve(id, { channel: 'dashboard' })) return res.json({ ok: true });
+    // Fallback: try sending via WebSocket (hook-based approval)
+    const sent = instanceManager.sendToAgent(id, { type: 'approve' });
+    if (sent) {
       instanceManager.clearPendingApproval(id);
-      pending.resolve({ behavior: 'allow', updatedInput: pending.toolInput });
       res.json({ ok: true });
     } else {
-      // Fallback: try sending via WebSocket (hook-based approval)
-      const sent = instanceManager.sendToAgent(id, { type: 'approve' });
-      if (sent) {
-        instanceManager.clearPendingApproval(id);
-        res.json({ ok: true });
-      } else {
-        res.status(502).json({ error: 'No pending approval' });
-      }
+      res.status(502).json({ error: 'No pending approval' });
     }
   });
 
   // Reject pending action
   router.post('/instances/:id/reject', (req, res) => {
     const id = req.params.id;
-    const pending = pendingDecisions.get(id);
-    if (pending) {
-      clearTimeout(pending.timeout);
-      pendingDecisions.delete(id);
+    if (approvals.reject(id, 'Rejected via Polpo', { channel: 'dashboard' })) return res.json({ ok: true });
+    const sent = instanceManager.sendToAgent(id, { type: 'reject' });
+    if (sent) {
       instanceManager.clearPendingApproval(id);
-      pending.resolve({ behavior: 'deny', message: 'Rejected via Polpo' });
       res.json({ ok: true });
     } else {
-      const sent = instanceManager.sendToAgent(id, { type: 'reject' });
-      if (sent) {
-        instanceManager.clearPendingApproval(id);
-        res.json({ ok: true });
-      } else {
-        res.status(502).json({ error: 'No pending approval' });
-      }
+      res.status(502).json({ error: 'No pending approval' });
     }
   });
 
   // Answer questions (AskUserQuestion)
   router.post('/instances/:id/answer', (req, res) => {
     const id = req.params.id;
-    const pending = pendingDecisions.get(id);
-    if (!pending) return res.status(502).json({ error: 'No pending question' });
-
-    clearTimeout(pending.timeout);
-    pendingDecisions.delete(id);
-    instanceManager.clearPendingApproval(id);
-
-    // Merge answers into the tool input
-    const updatedInput = { ...pending.toolInput, answers: req.body.answers || {} };
-    pending.resolve({ behavior: 'allow', updatedInput });
+    if (!approvals.answer(id, req.body.answers || {}, { channel: 'dashboard' })) {
+      return res.status(502).json({ error: 'No pending question' });
+    }
     res.json({ ok: true });
   });
 
@@ -700,16 +678,11 @@ function createApiRouter(instanceManager, getAuthState, pushManager, outboxManag
     // If enabling and there's a pending decision, approve it now
     // (but not plans or questions - those always need explicit review)
     if (value) {
-      const pending = pendingDecisions.get(id);
+      const pending = approvals.current(id);
       if (pending) {
         const approval = inst.pendingApproval;
         const isProtected = approval && (approval.approvalType === 'plan' || approval.approvalType === 'question');
-        if (!isProtected) {
-          clearTimeout(pending.timeout);
-          pendingDecisions.delete(id);
-          instanceManager.clearPendingApproval(id);
-          pending.resolve({ behavior: 'allow', updatedInput: pending.toolInput });
-        }
+        if (!isProtected) approvals.approve(id, { channel: 'dashboard', auto: true });
       }
     }
 
@@ -1233,6 +1206,116 @@ function createApiRouter(instanceManager, getAuthState, pushManager, outboxManag
       },
       sessions: sessions,
     });
+  });
+
+  // ----- Campaigns (docs/campaigns.md) -----
+  //
+  // The dashboard and the phone answer as you: no relay attestation, the
+  // channel is 'dashboard'.
+
+  function campaignOr404(req, res) {
+    if (!campaigns) {
+      res.status(503).json({ error: 'campaigns_not_enabled' });
+      return null;
+    }
+    const c = campaigns.get(req.params.id);
+    if (!c) {
+      res.status(404).json({ error: 'campaign_not_found' });
+      return null;
+    }
+    return c;
+  }
+
+  function sendCampaignFailure(res, out) {
+    const body = { error: out.error, message: out.message };
+    for (const k of ['errors', 'decided', 'reason', 'hash', 'status']) {
+      if (out[k] !== undefined) body[k] = out[k];
+    }
+    return res.status(campaignErrorStatus(out.error)).json(body);
+  }
+
+  router.get('/campaigns', (req, res) => {
+    if (!campaigns) return res.json({ enabled: false, campaigns: [] });
+    res.json({ enabled: true, campaigns: campaigns.list() });
+  });
+
+  router.get('/campaigns/:id', (req, res) => {
+    const c = campaignOr404(req, res);
+    if (!c) return;
+    res.json(campaigns.describe(c, { full: true }));
+  });
+
+  // Propose a campaign for a session: { instanceId } or { cwd, sessionId? },
+  // and optionally { file }.
+  router.post('/campaigns', (req, res) => {
+    if (!campaigns) return res.status(503).json({ error: 'campaigns_not_enabled' });
+    const body = req.body || {};
+    let cwd = body.cwd;
+    let sessionId = body.sessionId;
+    if (typeof body.instanceId === 'string') {
+      const inst = instanceManager.get(body.instanceId);
+      if (!inst) return res.status(404).json({ error: 'instance_not_found' });
+      if (inst.agentType && inst.agentType !== 'claude') {
+        return res.status(400).json({ error: 'unsupported_agent', message: 'Campaigns run Claude sessions for now.' });
+      }
+      cwd = inst.cwd;
+      sessionId = inst.sessionId || undefined;
+    }
+    if (body.file !== undefined && typeof body.file !== 'string') return res.status(400).json({ error: 'invalid_file' });
+    const out = campaigns.create({ cwd, file: body.file, sessionId, channel: 'dashboard' });
+    if (!out.ok) return sendCampaignFailure(res, out);
+    res.status(201).json({ campaign: out.campaign, decision: out.decision });
+  });
+
+  router.post('/campaigns/:id/decisions/:decisionId', async (req, res) => {
+    const c = campaignOr404(req, res);
+    if (!c) return;
+    const body = req.body || {};
+    try {
+      const out = await campaigns.answer(c.id, String(req.params.decisionId), {
+        answer: body.answer, text: body.text, hash: body.hash, channel: 'dashboard', decidedBy: 'user',
+      });
+      if (!out.ok) return sendCampaignFailure(res, out);
+      res.json({ decision: out.decision, campaign: out.campaign });
+    } catch (err) {
+      log.error('campaign answer failed:', err && err.message);
+      res.status(500).json({ error: 'answer_failed' });
+    }
+  });
+
+  for (const action of ['pause', 'resume', 'stop']) {
+    router.post('/campaigns/:id/' + action, async (req, res) => {
+      const c = campaignOr404(req, res);
+      if (!c) return;
+      const body = req.body || {};
+      try {
+        const out = await campaigns[action](c.id, {
+          channel: 'dashboard', decidedBy: 'user', text: typeof body.text === 'string' ? body.text.slice(0, 4000) : undefined,
+        });
+        if (!out.ok) return sendCampaignFailure(res, out);
+        res.json({ campaign: out.campaign });
+      } catch (err) {
+        log.error('campaign ' + action + ' failed:', err && err.message);
+        res.status(500).json({ error: action + '_failed' });
+      }
+    });
+  }
+
+  router.post('/campaigns/:id/gate', (req, res) => {
+    const c = campaignOr404(req, res);
+    if (!c) return;
+    const body = req.body || {};
+    const out = campaigns.runGate(c.id, { milestone: typeof body.milestone === 'string' ? body.milestone : undefined }, { channel: 'dashboard' });
+    if (!out.ok) return sendCampaignFailure(res, out);
+    res.status(202).json({ run: out.run });
+  });
+
+  router.get('/campaigns/:id/ledger', (req, res) => {
+    const c = campaignOr404(req, res);
+    if (!c) return;
+    const since = Math.max(0, parseInt(req.query.since, 10) || 0);
+    const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 100));
+    res.json(campaigns.ledgerSince(c.id, since, limit));
   });
 
   return router;

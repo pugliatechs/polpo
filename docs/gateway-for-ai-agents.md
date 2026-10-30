@@ -64,6 +64,8 @@ If the base URL you were given ends in `.trycloudflare.com`, the host is reachab
 | Delegate a multi-step *goal* (mind plans + fans out across arms) | `POST /v1/goals` → SSE on `/v1/goals/:id/stream` *(experimental, host must have `POLPO_MIND=1`)* |
 | List active goals / inspect / cancel | `GET /v1/goals`, `GET /v1/goals/:id`, `DELETE /v1/goals/:id` |
 | Get the operator's working-style profile (statistics only, no transcripts) | `GET /v1/profile` |
+| Find decisions a campaign waits on, to put to the operator | `GET /v1/decisions?since=<cursor>` |
+| Carry the operator's answer back (host must have `POLPO_GATEWAY_CAMPAIGN_CONTROL=1`) | `POST /v1/campaigns/:id/decisions/:decisionId` |
 
 ### Decision rule: discover before executing
 
@@ -380,7 +382,7 @@ The rules you must follow:
 4. **Handed back means stop.** `409 session_resumed_elsewhere` (with `writer`, e.g. `claude-vscode`) means the operator picked the session up again at their desk. Do not take it over again on your own: they are working in it. Tell them, and wait for them to ask.
 5. **`409 takeover_required`** means polpo is only watching that session. Take it over first, and only if it is idle.
 
-It continues the same session, it does not fork it: when the operator reloads the VSCode tab, they see what you did. Approvals are not forwarded to you; if `pendingApproval` is set, tell the operator to answer it on their dashboard. An approval nobody answers expires after 5 minutes, and the agent is told it was denied. `permissionMode` says whether the session runs in its own mode (`auto`, say, which asks for few approvals) or `null` (every approval goes to the dashboard).
+It continues the same session, it does not fork it: when the operator reloads the VSCode tab, they see what you did. Approvals are not forwarded to you; if `pendingApproval` is set, tell the operator to answer it on their dashboard. An approval nobody answers expires after 5 minutes, and the agent is told it was denied. In a campaign it is different: approvals are decisions you carry (6d), and they wait. `permissionMode` says whether the session runs in its own mode (`auto`, say, which asks for few approvals) or `null` (every approval goes to the dashboard).
 
 **Secrets are filtered.** Session content you read through the gateway has keys, tokens and passwords replaced with `[redacted]` (`redacted: true` on the message). Never ask the agent to put a secret into a command or a reply so you can read it: it will be filtered, and it would end up in the transcript. `POST /v1/instances/:id/abort` stops the turn in progress. `POST /v1/sessions/:id/resume` with `{ "agentType": "claude" }` continues a session from the catalogue that is not running right now (same rules; `409 session_busy` if a live copy is busy).
 
@@ -481,6 +483,28 @@ When to use:
 - `dimensions.planning` high → propose a plan first; low → just execute.
 
 This is *advisory only*. The operator may override any inference at any time, and they always will. Treat the profile as a starting heuristic, not a contract.
+
+## 6d. Carrying campaign decisions (`/v1/decisions`, `/v1/campaigns`)
+
+A campaign is days of work by one coding session against milestones the operator defined. It waits on **decisions**: approving its campaign file, approving a tool call its agent wants to make. Your job is to be the operator's messenger, not their deputy.
+
+1. **Poll** `GET /v1/decisions?since=<cursor>` (start with no cursor, then pass back the `cursor` you got). `decisions` are new pending ones; `closed` are ones settled since your cursor (answered on the dashboard, say): tell the operator so they do not answer twice.
+2. **Ask.** Send the operator the decision's `text` as it is (plain text, under 3,500 characters, secrets already filtered) with its `options`. You may add a one-line summary, never replace the text.
+3. **Answer** with what they said:
+   ```
+   POST /v1/campaigns/:id/decisions/:decisionId
+   { "answer": "<one of options>", "text": "<reason, when needsText asks>",
+     "hash": "<details.hash, for a definition you are approving>",
+     "relay": { "decidedBy": "user", "userMessage": "<their words, verbatim>" } }
+   ```
+   `userMessage` is required with `decidedBy: "user"`. For a button tap, send the button's text.
+4. **Never decide for them** what they did not decide. Use `decidedBy: "agent"` only for kinds the host allows (`403 agent_may_not_decide` otherwise); campaign files, approvals and stopping a campaign are always the operator's.
+
+Errors: `409 decision_closed` (someone answered first; the body says who and where), `409 decision_superseded` (the campaign moved on; poll again and ask about the new decision), `409 hash_mismatch` (you showed a different version of the campaign file; ask again with the current text).
+
+To steer: `POST /v1/campaigns/:id/prompt { text }` sends the operator's correction to the session (`409 session_busy` while it works: wait, do not retry in a loop). `POST /v1/campaigns/:id/gate` runs the milestone's gate; the result appears on `GET /v1/campaigns/:id`. `pause` and `resume` take an optional `relay`; `stop` needs `relay.decidedBy: "user"`.
+
+---
 
 ## 7. Multi-node routing (chatbot fan-out)
 

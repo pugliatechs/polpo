@@ -27,6 +27,7 @@ const { logPrefix } = require('./log-prefix');
 
 const DEFAULT_SERVER = 'ws://127.0.0.1:7890';
 const UPLOAD_DIR = path.join(os.tmpdir(), 'polpo-uploads');
+const APPROVAL_CALL_TIMEOUT_MS = 7 * 24 * 60 * 60 * 1000;
 
 class WrappedAgent {
   constructor(options = {}) {
@@ -218,6 +219,11 @@ class WrappedAgent {
           polpo: {
             command: process.execPath,
             args: [permissionServerPath],
+            // claude aborts an MCP call that is silent for 30 minutes
+            // unless the server sets its own timeout. An approval in a
+            // campaign waits for you as long as it takes; the hub still
+            // denies an ordinary one after five minutes.
+            timeout: APPROVAL_CALL_TIMEOUT_MS,
             env: {
               POLPO_INSTANCE_ID: this.instanceId,
               POLPO_HUB_URL: this.serverUrl

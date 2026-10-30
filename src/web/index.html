@@ -54,6 +54,14 @@
       <button id="btn-new-session" class="btn btn-new-session">+ New Session</button>
     </div>
 
+    <!-- Campaigns (docs/campaigns.md): status and the decisions they wait on -->
+    <div id="campaign-section" class="sessions-section hidden">
+      <div class="section-header">
+        <h3>Campaigns</h3>
+      </div>
+      <div id="campaign-list" class="campaign-list"></div>
+    </div>
+
     <!-- Distributed Mind (Alien Mind + its arms) -->
     <div id="mind-section" class="sessions-section hidden">
       <div class="section-header">
@@ -196,6 +204,9 @@
       <button id="btn-conv-search-next" class="btn-icon" title="Next match (Enter)" aria-label="Next match">&#8595;</button>
       <button id="btn-conv-search-close" class="btn-icon" title="Close (Esc)" aria-label="Close search">&#10005;</button>
     </div>
+
+    <!-- Campaign holding this session: milestone, gate, controls -->
+    <div id="campaign-banner" class="campaign-banner hidden"></div>
 
     <!-- Approval Banner (standard tool approval) -->
     <div id="approval-banner" class="approval-banner hidden">
