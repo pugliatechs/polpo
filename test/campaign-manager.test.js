@@ -214,6 +214,36 @@ describe('CampaignManager', () => {
     assert.equal(mgr.ledgerSince('storage-engine', 0).entries[0].inheritPermissionMode, false);
   });
 
+  it('a gateway caller taking the session of a desk campaign does not get the desk mode', async () => {
+    const inst = im.register({ name: 'vscode', sessionId: 'known-session', canReceivePrompts: false });
+    im.updateStatus(inst.id, 'idle');
+    const out = mgr.create({ cwd: repo, sessionId: 'known-session' });
+    await mgr.answer('storage-engine', out.decision.decisionId, {
+      answer: 'approve', hash: out.decision.details.hash, channel: 'gateway:pa', decidedBy: 'user', userMessage: 'go',
+    });
+    assert.equal(ctl.calls.takeover[0].o.inheritPermissionMode, false, 'approved through the gateway');
+    // The session ends; the PA resumes the campaign.
+    im.unregister(inst.id);
+    mgr.get('storage-engine').status = 'paused';
+    await mgr.resume('storage-engine', { channel: 'gateway:pa', decidedBy: 'user', userMessage: 'resume' });
+    assert.equal(ctl.calls.resume[0].o.inheritPermissionMode, false, 'resumed through the gateway');
+    assert.equal(mgr.get('storage-engine').inheritPermissionMode, true, 'the campaign itself is unchanged');
+  });
+
+  it('a stored campaign without the setting decides it from where it was proposed', async () => {
+    mgr.create({ cwd: repo, sessionId: 'known-session', channel: 'gateway:pa' });
+    const s = store.load('storage-engine');
+    delete s.inheritPermissionMode;
+    store.save(s);
+    mgr.destroy();
+    const im2 = new InstanceManager();
+    const mgr2 = new CampaignManager({ instanceManager: im2, sessionController: fakeController(im2), approvals: new PendingApprovals(im2), store });
+    mgr2.load();
+    assert.equal(mgr2.get('storage-engine').inheritPermissionMode, false);
+    mgr2.destroy();
+    mgr = makeManager();
+  });
+
   it('pauses with the reason when the session is busy at approval', async () => {
     const inst = im.register({ name: 'vscode', sessionId: 'known-session', canReceivePrompts: false });
     im.updateStatus(inst.id, 'busy');

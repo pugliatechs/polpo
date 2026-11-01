@@ -140,6 +140,12 @@ class CampaignManager extends EventEmitter {
       }
       const ledger = this._ledger(c);
       if (!ledger.ok) log.warn('Campaign ' + c.id + ': the ledger chain breaks at ' + ledger.brokenAt);
+      if (typeof c.inheritPermissionMode !== 'boolean') {
+        // Stored before the setting existed: decide it as create() would,
+        // from where the campaign was proposed, and never from a guess.
+        const created = ledger.all().find((e) => e.kind === 'campaign_created');
+        c.inheritPermissionMode = !!created && this._mayInherit(created.channel);
+      }
       c.instanceId = null;
       if (c.gateRunning) {
         this._record(c, 'gate_run', 'polpo', { milestone: c.gateRunning.milestone, runId: c.gateRunning.runId, interrupted: true });
@@ -447,7 +453,7 @@ class CampaignManager extends EventEmitter {
       c.statusReason = 'campaign file approved; still ' + (back === 'paused' ? 'paused' : 'handed back');
       this._save(c);
     } else {
-      await this._activate(c, previousHash ? 'changed' : 'start');
+      await this._activate(c, previousHash ? 'changed' : 'start', how.channel);
     }
     return { ok: true, decision: decisions.publicDecision(d), campaign: this.describe(c) };
   }
@@ -661,7 +667,7 @@ class CampaignManager extends EventEmitter {
       // The session keeps its desk permission mode, unless the campaign was
       // proposed through the gateway and the host does not let gateway
       // callers inherit it: a campaign must not be a way around that.
-      inheritPermissionMode: channel.indexOf('gateway:') === 0 ? this.gatewayInheritPermissionMode : true,
+      inheritPermissionMode: this._mayInherit(channel),
       cwd: file.root,
       file: path.relative(file.root, file.path),
       agentType: 'claude',
@@ -688,11 +694,21 @@ class CampaignManager extends EventEmitter {
     return { ok: true, campaign: this.describe(c), decision: decisions.publicDecision(d) };
   }
 
-  /** Take or start the campaign's session and hold it as campaign:<id>. */
-  async _bind(c) {
+  /** Whether a session taken from this channel may keep its desk permission mode. */
+  _mayInherit(channel) {
+    return String(channel || '').indexOf('gateway:') === 0 ? this.gatewayInheritPermissionMode === true : true;
+  }
+
+  /**
+   * Take or start the campaign's session and hold it as campaign:<id>.
+   * The desk permission mode carries over only if both the campaign and
+   * whoever triggered this bind may have it: a gateway caller resuming a
+   * campaign started at the desk is still a gateway caller.
+   */
+  async _bind(c, channel) {
     const heldBy = this._heldBy(c);
     const ctl = this.sessionController;
-    const inheritPermissionMode = c.inheritPermissionMode !== false;
+    const inheritPermissionMode = c.inheritPermissionMode === true && this._mayInherit(channel);
     if (c.instanceId) {
       const inst = this.instanceManager.get(c.instanceId);
       if (inst && inst.heldBy === heldBy && ctl.agentFor(inst)) return { ok: true, instanceId: inst.id };
@@ -724,8 +740,8 @@ class CampaignManager extends EventEmitter {
   }
 
   /** Hold the session and tell the agent what the campaign is. */
-  async _activate(c, why) {
-    const bound = await this._bind(c);
+  async _activate(c, why, channel) {
+    const bound = await this._bind(c, channel);
     if (!bound.ok) {
       c.status = 'paused';
       c.statusReason = bound.message;
@@ -814,7 +830,7 @@ class CampaignManager extends EventEmitter {
     this._record(c, 'resume', m.channel || 'dashboard', {
       from: c.status, decidedBy: m.decidedBy || 'user', userMessage: m.userMessage || null,
     });
-    const out = await this._activate(c, 'resume');
+    const out = await this._activate(c, 'resume', m.channel || 'dashboard');
     if (!out.ok) return out;
     return { ok: true, campaign: this.describe(c) };
   }

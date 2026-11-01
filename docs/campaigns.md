@@ -534,9 +534,10 @@ describes.
 3. Approve the `definition` decision. It shows the ladder as text, with
    the file's hash. On approval polpo pins the file and the pinned paths,
    takes or starts the session as `campaign:<id>`, keeping the permission
-   mode it had at your desk (for a campaign proposed through the gateway,
-   only when the host sets `POLPO_GATEWAY_INHERIT_PERMISSION_MODE=1`, as
-   for any gateway takeover), and sends the agent a briefing: the
+   mode it had at your desk (when the campaign was proposed through the
+   gateway, or the approval or a later resume comes through it, only when
+   the host sets `POLPO_GATEWAY_INHERIT_PERMISSION_MODE=1`, as for any
+   gateway takeover), and sends the agent a briefing: the
    objective, the active milestone, how it is accepted, its gate, the
    constraints and `read_first`. The briefing says that polpo runs the
    gate itself and that the agent's own checks do not pass a milestone.
