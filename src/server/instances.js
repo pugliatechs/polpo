@@ -52,6 +52,9 @@ class InstanceManager extends EventEmitter {
       transcriptPath: info.transcriptPath || null,
       canReceivePrompts: info.canReceivePrompts !== undefined ? info.canReceivePrompts : true,
       firstPrompt: info.firstPrompt || null,
+      // A label its creator gave it (a gateway task's title), shown
+      // instead of the first prompt.
+      title: info.title || null,
       agentType: info.agentType || 'claude',
       // Origin tag, e.g. 'gateway:openclaw', 'mind', or null for user-started.
       // Used by the dashboard to distinguish programmatic agents from manual ones.
@@ -105,6 +108,7 @@ class InstanceManager extends EventEmitter {
         heldBy: inst.heldBy || null,
         permissionMode: inst.permissionMode || null,
         firstPrompt: inst.firstPrompt,
+        title: inst.title || null,
         agentType: inst.agentType,
         source: inst.source,
       }));
@@ -162,6 +166,14 @@ class InstanceManager extends EventEmitter {
    * shows the takeover banner instead of the prompt box. `heldBy` names
    * who took it over ('dashboard', 'gateway:<client>'), or null.
    */
+  /** Give an instance a label to show instead of its first prompt. */
+  setTitle(id, title) {
+    const instance = this.instances.get(id);
+    if (!instance) return;
+    instance.title = typeof title === 'string' && title ? title : null;
+    this.emit('instance:title', { id, title: instance.title });
+  }
+
   setControl(id, control) {
     const instance = this.instances.get(id);
     if (!instance || !control) return;

@@ -442,7 +442,7 @@ class GeminiAgent {
     await this.register();
     this.connectToHub();
     this._log(`Registered as "${this.name}" (${this.instanceId})`);
-    this._log('Waiting for prompts from phone...');
+    this._log('Waiting for prompts...');
   }
 
   /**

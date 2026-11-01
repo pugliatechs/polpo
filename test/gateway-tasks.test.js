@@ -41,6 +41,10 @@ function createMockIM() {
     inst.conversation.push({ ...message, timestamp: Date.now() });
     em.emit('instance:message', { id, message });
   };
+  em.setTitle = function (id, title) {
+    const inst = instances.get(id);
+    if (inst) inst.title = title;
+  };
   em.setAutoApprove = function (id, value) {
     const inst = instances.get(id);
     if (inst) inst.autoApprove = !!value;
@@ -184,6 +188,16 @@ describe('GatewayTaskManager: validation', () => {
       () => tm.createTask({ agentType: 'claude', cwd: '/tmp', prompt: 'x', model: 'with\x00null' }),
       /invalid_model/
     );
+  });
+
+  it('rejects a title that is not a short single line', async () => {
+    for (const title of [42, '', '   ', 'x'.repeat(121), 'two\nlines', 'with\x00null']) {
+      await assert.rejects(
+        () => tm.createTask({ agentType: 'claude', cwd: '/tmp', prompt: 'x', title }),
+        /invalid_title/,
+        JSON.stringify(title)
+      );
+    }
   });
 
   it('clamps oversized timeout to the configured max', async () => {
@@ -336,6 +350,18 @@ describe('GatewayTaskManager: lifecycle', () => {
     assert.equal(captured[0].opts.model, 'ollama/qwen2.5');
     const snap = tm.getTask(taskId);
     assert.equal(snap.model, 'ollama/qwen2.5');
+  });
+
+  it('shows a title on the task\'s instance and in its snapshot', async () => {
+    const { taskId } = await tm.createTask({
+      agentType: 'claude', cwd: '/tmp', prompt: 'CONTEXT: shared preamble\nYOUR TASK: sweep', title: '  Catalogue sweep ',
+    });
+    const snap = tm.getTask(taskId);
+    assert.equal(snap.title, 'Catalogue sweep');
+    assert.equal(im.get(snap.agentInstanceId).title, 'Catalogue sweep');
+    const plain = tm.getTask((await tm.createTask({ agentType: 'claude', cwd: '/tmp', prompt: 'x' })).taskId);
+    assert.equal(plain.title, null);
+    assert.equal(im.get(plain.agentInstanceId).title, undefined);
   });
 
   it('snapshot.model is null when the caller did not specify one', async () => {

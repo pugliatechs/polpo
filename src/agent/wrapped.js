@@ -324,7 +324,7 @@ class WrappedAgent {
       case 'system': {
         if (msg.subtype === 'init') {
           this.claudeSessionId = msg.session_id;
-          this._log(`Session: ${msg.session_id} (model: ${msg.model})`);
+          this._log(`Session: ${msg.session_id} (instance ${this.instanceId}, model: ${msg.model})`);
 
           // Bridge session_info to the hub so the dashboard can dedup
           this._sendToHub({
@@ -610,7 +610,7 @@ class WrappedAgent {
     await this.register();
     this.connectToHub();
     this._log(`Registered as "${this.name}" (${this.instanceId})`);
-    this._log('Waiting for prompts from phone...');
+    this._log('Waiting for prompts...');
     // Don't spawn claude yet — wait for the first prompt from the phone
   }
 

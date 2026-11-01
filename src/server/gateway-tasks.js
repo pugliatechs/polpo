@@ -34,6 +34,8 @@ const VALID_AGENT_TYPES = new Set(['claude', 'codex', 'gemini', 'opencode', 'pi'
 // minutes was too short for real delegated work (security sweeps, job
 // scans), and the old 30 min cap silently cut callers that asked for 40.
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;      // 30 min
+// A dashboard card shows about 60 characters; this only bounds the input.
+const MAX_TITLE_CHARS = 120;
 const MAX_TIMEOUT_MS_DEFAULT = 60 * 60 * 1000;  // 60 min
 const TASK_TTL_MS = 5 * 60 * 1000;              // keep completed tasks for 5 min
 
@@ -174,6 +176,7 @@ class GatewayTaskManager extends EventEmitter {
       userAgent: userAgent,
       agentType: args.agentType,
       model: args.model,
+      title: args.title,
       cwd: args.cwd,
       prompt: args.prompt,
       timeoutMs: args.timeoutMs,
@@ -224,6 +227,7 @@ class GatewayTaskManager extends EventEmitter {
       userAgent: t.userAgent || null,
       agentType: t.agentType,
       model: t.model || null,
+      title: t.title || null,
       cwd: t.cwd,
       prompt: t.prompt,
       status: t.status,
@@ -315,6 +319,7 @@ class GatewayTaskManager extends EventEmitter {
       'attachments=' + (task.attachments ? task.attachments.length : 0),
       'capture-artifacts=' + !!task.captureArtifacts,
       'permission-mode=' + this.permissionMode,
+      'timeout-ms=' + task.timeoutMs,
     ];
     log.info(parts.join(' '));
   }
@@ -415,6 +420,9 @@ class GatewayTaskManager extends EventEmitter {
       onSpawn: (agentInstanceId) => {
         task.agentInstanceId = agentInstanceId;
         this._agentToTask.set(agentInstanceId, task.id);
+        // Ties the task to the instance id the agent's own lines carry.
+        log.info('task=' + task.id + ' instance=' + agentInstanceId);
+        if (task.title) this.instanceManager.setTitle(agentInstanceId, task.title);
       },
       onStatus: (next) => {
         // Only forward the 'running' transition. Terminal states arrive
@@ -681,7 +689,7 @@ function validateInput(input, maxTimeoutMs, defaultTimeoutMs) {
     err.code = 'invalid_body';
     throw err;
   }
-  const { agentType, cwd, prompt, timeoutMs, client, attachments, captureArtifacts, model } = input;
+  const { agentType, cwd, prompt, timeoutMs, client, attachments, captureArtifacts, model, title } = input;
 
   if (typeof agentType !== 'string' || !VALID_AGENT_TYPES.has(agentType)) {
     const err = new Error('invalid_agentType');
@@ -772,6 +780,18 @@ function validateInput(input, maxTimeoutMs, defaultTimeoutMs) {
     }
   }
 
+  // title: optional, shown on the task's dashboard card instead of the
+  // prompt's opening, which a caller often shares across many tasks.
+  if (title !== undefined && title !== null) {
+    if (typeof title !== 'string' || !title.trim() || title.trim().length > MAX_TITLE_CHARS
+        || /[\x00-\x1f\x7f]/.test(title)) {
+      const err = new Error('invalid_title');
+      err.code = 'invalid_title';
+      err.limit = MAX_TITLE_CHARS;
+      throw err;
+    }
+  }
+
   // attachments: optional array of { uploadId }
   let resolvedAttachments = [];
   if (attachments !== undefined && attachments !== null) {
@@ -827,6 +847,7 @@ function validateInput(input, maxTimeoutMs, defaultTimeoutMs) {
     attachments: resolvedAttachments,
     captureArtifacts: !!captureArtifacts,
     model: typeof model === 'string' ? model.trim() : null,
+    title: typeof title === 'string' ? title.trim() : null,
   };
 }
 

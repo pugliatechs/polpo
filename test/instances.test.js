@@ -188,6 +188,21 @@ describe('InstanceManager', () => {
     });
   });
 
+  describe('title', () => {
+    it('is set, announced, listed, and cleared', () => {
+      mgr.register({ id: 't1', name: 'Gateway: moltbot' });
+      assert.equal(mgr.get('t1').title, null);
+      const events = [];
+      mgr.on('instance:title', (e) => events.push(e));
+      mgr.setTitle('t1', 'Catalogue sweep');
+      assert.deepEqual(events, [{ id: 't1', title: 'Catalogue sweep' }]);
+      assert.equal(mgr.getAll().find((i) => i.id === 't1').title, 'Catalogue sweep');
+      mgr.setTitle('t1', '');
+      assert.equal(mgr.get('t1').title, null);
+      mgr.setTitle('nope', 'x');
+    });
+  });
+
   describe('pendingApproval', () => {
     it('sets approval and moves to waiting status', () => {
       mgr.register({ id: 'ap' });

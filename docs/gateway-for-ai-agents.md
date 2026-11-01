@@ -115,6 +115,7 @@ Request body:
   "prompt":     "the instruction for the agent",
   "timeoutMs":  300000,
   "client":     "your-label",
+  "title":      "Catalogue sweep",
   "model":      "claude-opus-4-7",
   "attachments":      [{ "uploadId": "u-..." }],
   "captureArtifacts": true
@@ -128,6 +129,7 @@ Request body:
 | `prompt` | yes | ≤ 50 000 chars. Be specific and self-sufficient — see Section 8. |
 | `timeoutMs` | no | Default 30 min, max 60 min (host-configurable). A larger value is clamped to the max, not rejected. |
 | `client` | no | Free label; also overrideable via `X-Polpo-Client` header. |
+| `title` | no | ≤ 120 chars, what the operator sees on the task's dashboard card instead of the start of the prompt. **Always set it when you start several tasks**: prompts that share a context block look identical on the dashboard otherwise. |
 | `model` | no | Opaque string passed to the agent. Format is agent-specific (see below). Omit to use the host's CLI default. |
 | `attachments` | no | ≤ 20 entries, each referencing an `uploadId` you created earlier. |
 | `captureArtifacts` | no | `true` to receive files back. |
@@ -692,7 +694,7 @@ Drive        POST /v1/instances/:id/takeover    (idle only; use the returned id)
              409 session_resumed_elsewhere    → operator is back; stop
 
 Execute      POST /v1/uploads               body: {filename, mediaType, dataBase64}
-             POST /v1/tasks                 body: {agentType, cwd, prompt,
+             POST /v1/tasks                 body: {agentType, cwd, prompt, title?,
                                                    attachments?, captureArtifacts?}
              GET  /v1/tasks/:id/stream      SSE
              GET  /v1/tasks/:id             snapshot

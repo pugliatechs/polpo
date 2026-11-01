@@ -1630,6 +1630,7 @@ function mapErrorStatus(code) {
     case 'invalid_cwd':
     case 'invalid_prompt':
     case 'invalid_client':
+    case 'invalid_title':
     case 'prompt_too_long':
     case 'cwd_must_be_absolute':
     case 'cwd_does_not_exist':

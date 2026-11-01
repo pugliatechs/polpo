@@ -158,6 +158,7 @@ function describeInstance(inst) {
     permissionMode: inst.permissionMode || null,
     pendingApproval: describeApproval(inst.pendingApproval),
     firstPrompt: inst.firstPrompt ? capText(redact(inst.firstPrompt), 200).text : null,
+    title: inst.title || null,
     lastActivity: inst.lastActivity || null,
     lastSeq: last && typeof last.seq === 'number' ? last.seq : 0,
   };

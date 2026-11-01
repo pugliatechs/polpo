@@ -102,6 +102,7 @@ Create a one-shot task. The body:
   "prompt":     "the instruction for the agent",
   "timeoutMs":  300000,
   "client":     "remote-claude",
+  "title":      "Catalogue sweep",
   "model":      "claude-opus-4-7",
   "attachments":      [{ "uploadId": "u-..." }],
   "captureArtifacts": true
@@ -115,6 +116,7 @@ Create a one-shot task. The body:
 | `prompt` | yes | ≤ 50 000 chars |
 | `timeoutMs` | no | Default `POLPO_GATEWAY_DEFAULT_TIMEOUT_MS` (30 min), hard-capped at `POLPO_GATEWAY_MAX_TIMEOUT_MS` (60 min) |
 | `client` | no | Free-form label, also overrideable via `X-Polpo-Client` header. Becomes `source: 'gateway:<client>'` on the spawned instance and shows up in the dashboard. |
+| `title` | no | Up to 120 characters, no control characters. Shown on the task's dashboard card instead of the start of its prompt, and returned in the task snapshot. Give one whenever you run several tasks whose prompts open the same way. |
 | `model` | no | Opaque string the gateway forwards to the spawned agent. Format is agent-specific (see table below). When omitted, the agent uses whatever its CLI defaults to on the host. |
 | `attachments` | no | Up to 20 entries. Each must reference an `uploadId` created earlier by the same caller. |
 | `captureArtifacts` | no | When `true`, polpo creates a sealed dir and prepends a `<polpo:artifacts>` directive to the prompt (see [Artifacts](#artifacts)). |

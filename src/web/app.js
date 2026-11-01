@@ -199,6 +199,7 @@
   const $detailStatus = document.getElementById('detail-status');
   const $detailProject = document.getElementById('detail-project');
   const $detailType = document.getElementById('detail-type');
+  const $detailSession = document.getElementById('detail-session');
   const $approvalBanner = document.getElementById('approval-banner');
   const $approvalDescription = document.getElementById('approval-description');
   const $approvalCommand = document.getElementById('approval-command');
@@ -834,6 +835,12 @@
         if (activeInstanceId === msg.id) renderDetail();
         break;
 
+      case 'instance:title':
+        if (instances.has(msg.id)) instances.get(msg.id).title = msg.title || null;
+        renderList();
+        if (activeInstanceId === msg.id) renderDetail();
+        break;
+
       case 'instance:control':
         // Taken over, or handed back because the session was picked up
         // again in VSCode or a terminal. canReceivePrompts decides
@@ -876,6 +883,7 @@
           instances.get(msg.id).transcriptPath = msg.transcriptPath;
         }
         renderList();
+        if (activeInstanceId === msg.id) renderDetail();
         break;
 
       case 'tunnel:changed':
@@ -983,6 +991,16 @@
     return src.slice('gateway:'.length) || 'unknown';
   }
 
+  /**
+   * The start of the session id, so sessions whose prompts open the same
+   * way (gateway tasks sharing a preamble) can be told apart.
+   */
+  function sessionChip(inst) {
+    if (typeof inst.sessionId !== 'string' || !inst.sessionId) return '';
+    return '<span class="session-chip" title="Session ' + escapeAttr(inst.sessionId) + '">' +
+      escapeHtml(inst.sessionId.slice(0, 8)) + '</span>';
+  }
+
   function renderInstanceCard(inst) {
     var badgeClass = 'badge badge-' + inst.status;
     var cardClass = 'instance-card ' + inst.status;
@@ -994,12 +1012,10 @@
         escapeHtml(inst.pendingApproval.description || 'Action requires approval') +
         '</div>';
     }
-    // Use first prompt as title, fall back to instance name, show spinner only if neither
-    var title = inst._firstPrompt
-      ? truncate(inst._firstPrompt, 60)
-      : inst.name
-        ? truncate(inst.name, 60)
-        : null;
+    // The title its creator gave it (a gateway task's), else the first
+    // prompt, else the instance name; a spinner only if none.
+    var titleText = inst.title || inst._firstPrompt || inst.name || '';
+    var title = titleText ? truncate(titleText, 60) : null;
     // Only ever used inside attributes, so it needs the attribute
     // escaper; escapeHtml leaves quotes intact.
     var safeId = escapeAttr(inst.id);
@@ -1025,6 +1041,7 @@
             ? '<span class="client-badge" title="Submitted by ' + escapeAttr(gatewayClient) + ' via the gateway">' +
                 escapeHtml(gatewayClient) + '</span>'
             : '') +
+          sessionChip(inst) +
         '</div>' +
         approvalHtml +
       '</div>'
@@ -1381,7 +1398,7 @@
     var inst = instances.get(activeInstanceId);
     if (!inst) return;
 
-    var detailTitle = inst._firstPrompt || inst.name || '';
+    var detailTitle = inst.title || inst._firstPrompt || inst.name || '';
     if (detailTitle) {
       $detailName.textContent = truncate(detailTitle, 80);
       $detailName.classList.remove('detail-name-loading');
@@ -1396,6 +1413,7 @@
       $detailStatus.textContent = inst.status;
     }
     $detailProject.textContent = '📁 ' + (inst.project || '');
+    $detailSession.innerHTML = sessionChip(inst);
     var detailAgentType = VALID_AGENT_TYPES.indexOf(inst.agentType) !== -1 ? inst.agentType : 'claude';
     $detailType.innerHTML = '<span class="agent-badge agent-' + detailAgentType + '">' + agentLabel(detailAgentType) + '</span>';
     renderModelPill(inst, detailAgentType);

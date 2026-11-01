@@ -507,7 +507,7 @@ class GooseAgent {
     this.connect();
     this.spawnGoose();
     this._sendToHub({ type: 'status', status: 'idle' });
-    this._log('Waiting for prompts from phone...');
+    this._log('Waiting for prompts...');
   }
 
   stop() {

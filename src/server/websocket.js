@@ -151,6 +151,12 @@ function setupWebSocket(server, instanceManager, getAuthState, pushManager, outb
 
   // Who may drive a session changed: taken over, or handed back after
   // someone picked it up again in VSCode or a terminal.
+  instanceManager.on('instance:title', (data) => {
+    const inst = instanceManager.get(data.id);
+    if (inst && InstanceManager.isInternalInstance(inst)) return;
+    broadcastToDashboards({ type: 'instance:title', ...data });
+  });
+
   instanceManager.on('instance:control', (data) => {
     const inst = instanceManager.get(data.id);
     if (inst && InstanceManager.isInternalInstance(inst)) return;
