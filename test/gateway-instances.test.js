@@ -171,6 +171,7 @@ describe('Gateway: driving live sessions', () => {
         im.setAgentSocket(id, { readyState: 1, send: () => {} });
       },
       releaseProcess() { this.released++; },
+      setClaudePermissionMode(mode) { this.modes = (this.modes || []).concat([mode]); },
     };
     agents.push(agent);
     return agent;
@@ -331,6 +332,222 @@ describe('Gateway: driving live sessions', () => {
       const r = await post('/v1/instances/vscode-1/takeover');
       assert.equal(agents[0].opts.claudePermissionMode, 'auto');
       assert.equal(r.body.instance.permissionMode, 'auto');
+    });
+  });
+
+  describe('a permission mode the caller chooses', () => {
+    let ctl;
+    const ALLOWED = new Set(['default', 'auto']);
+    beforeEach(() => {
+      ctl = new SessionController({ instanceManager: im, createAgent: agentFactory, sessions: {} });
+    });
+
+    it('is refused unless the host lists the modes', async () => {
+      h = await startWith(ctl);
+      const r = await post('/v1/instances/vscode-1/takeover', { permissionMode: 'auto' });
+      assert.equal(r.status, 403);
+      assert.equal(r.body.error, 'permission_mode_not_enabled');
+      assert.equal(agents.length, 0, 'nothing was taken over');
+      assert.deepEqual((await get(h, '/v1/health')).body.sessionControl, { enabled: true, permissionModes: [], approvals: false });
+    });
+
+    it('is refused outside the list, and the list is given back', async () => {
+      h = await startWith(ctl, { allowedPermissionModes: ALLOWED });
+      for (const permissionMode of ['acceptEdits', 'bypassPermissions', 'bypass', 42]) {
+        const r = await post('/v1/instances/vscode-1/takeover', { permissionMode });
+        assert.equal(r.status, 400);
+        assert.equal(r.body.error, 'permission_mode_not_allowed');
+        assert.deepEqual(r.body.allowed, ['default', 'auto']);
+      }
+      assert.equal(agents.length, 0);
+    });
+
+    it('applies at takeover, even where the session had none at the desk', async () => {
+      h = await startWith(ctl, { allowedPermissionModes: ALLOWED });
+      assert.deepEqual((await get(h, '/v1/health')).body.sessionControl.permissionModes, ['default', 'auto']);
+      const r = await post('/v1/instances/vscode-1/takeover', { permissionMode: 'auto' });
+      assert.equal(r.status, 200);
+      assert.equal(agents[0].opts.claudePermissionMode, 'auto');
+      assert.equal(r.body.instance.permissionMode, 'auto');
+    });
+
+    it("'default' means none, whatever the inherit setting says", async () => {
+      fs.writeFileSync(transcript, JSON.stringify({ type: 'user', uuid: 'v0', entrypoint: 'claude-vscode', permissionMode: 'auto', message: {} }) + '\n'
+        + JSON.stringify({ type: 'assistant', uuid: 'v1', entrypoint: 'claude-vscode', message: { stop_reason: 'end_turn' } }) + '\n');
+      h = await startWith(ctl, { allowedPermissionModes: ALLOWED, inheritPermissionMode: true });
+      const r = await post('/v1/instances/vscode-1/takeover', { permissionMode: 'default' });
+      assert.equal(agents[0].opts.claudePermissionMode, undefined);
+      assert.equal(r.body.instance.permissionMode, null);
+    });
+
+    it('applies when resuming from the catalogue, for Claude only', async () => {
+      h = await startWith(ctl, { allowedPermissionModes: ALLOWED });
+      const r = await post('/v1/sessions/sess-9/resume', { cwd: tmp, permissionMode: 'auto' });
+      assert.equal(r.status, 200);
+      assert.equal(agents[0].opts.claudePermissionMode, 'auto');
+      const codex = await post('/v1/sessions/sess-8/resume', { cwd: tmp, agentType: 'codex', permissionMode: 'auto' });
+      assert.equal(codex.status, 400);
+      assert.equal(codex.body.error, 'permission_mode_unsupported');
+    });
+
+    it('changes between turns on a session the caller drives', async () => {
+      h = await startWith(ctl, { allowedPermissionModes: ALLOWED });
+      assert.equal((await post('/v1/instances/vscode-1/permission-mode', { permissionMode: 'auto' })).body.error, 'takeover_required');
+      const id = (await post('/v1/instances/vscode-1/takeover')).body.instanceId;
+      assert.equal(im.get(id).permissionMode, null);
+
+      const r = await post('/v1/instances/' + id + '/permission-mode', { permissionMode: 'auto' });
+      assert.equal(r.status, 200);
+      assert.equal(r.body.permissionMode, 'auto');
+      assert.deepEqual(agents[0].modes, ['auto'], 'the next turn starts in the new mode');
+      assert.equal(im.get(id).permissionMode, 'auto');
+      assert.match(im.get(id).conversation.slice(-1)[0].content, /Permission mode set to auto by gateway:openclaw/);
+
+      assert.equal((await post('/v1/instances/' + id + '/permission-mode', { permissionMode: 'dontAsk' })).status, 400);
+      assert.equal((await post('/v1/instances/' + id + '/permission-mode', {})).body.error, 'permission_mode_required');
+      im.updateStatus(id, 'waiting');
+      const busy = await post('/v1/instances/' + id + '/permission-mode', { permissionMode: 'default' });
+      assert.equal(busy.status, 409);
+      assert.equal(busy.body.error, 'session_busy');
+      assert.deepEqual(agents[0].modes, ['auto']);
+    });
+
+    it('does not change the mode of a session you or a campaign drive', async () => {
+      h = await startWith(ctl, { allowedPermissionModes: ALLOWED });
+      const id = (await post('/v1/instances/vscode-1/takeover')).body.instanceId;
+      for (const heldBy of ['dashboard', 'campaign:storage-engine']) {
+        im.setControl(id, { heldBy });
+        const r = await post('/v1/instances/' + id + '/permission-mode', { permissionMode: 'auto' });
+        assert.equal(r.status, 409);
+        assert.equal(r.body.error, 'held_elsewhere');
+      }
+      assert.equal(agents[0].modes, undefined);
+    });
+  });
+
+  describe('approvals relayed by the caller', () => {
+    const { PendingApprovals } = require('../src/server/approvals');
+    let ctl, approvals, id;
+
+    /** The agent asks for an approval, as the permission route does. */
+    function ask(toolUseId, tool, input, approvalType) {
+      im.setPendingApproval(id, {
+        tool, description: 'Run: ' + (input.command || ''), command: input.command || '', approvalType: approvalType || 'tool',
+        questions: input.questions || null, toolUseId, input: JSON.stringify(input),
+      });
+      return approvals.wait(id, { toolUseId, toolInput: input, approvalType: approvalType || 'tool' }, { expiresMs: null });
+    }
+
+    const RELAY = { decidedBy: 'user', userMessage: 'yes, run it' };
+
+    beforeEach(async () => {
+      ctl = new SessionController({ instanceManager: im, createAgent: agentFactory, sessions: {} });
+      approvals = new PendingApprovals(im);
+    });
+    afterEach(() => approvals.destroy());
+
+    async function driven(extra) {
+      h = await startWith(ctl, Object.assign({ approvals, approvalControl: true }, extra || {}));
+      id = (await post('/v1/instances/vscode-1/takeover')).body.instanceId;
+    }
+
+    it('is off unless the host opted in', async () => {
+      h = await startWith(ctl, { approvals });
+      id = (await post('/v1/instances/vscode-1/takeover')).body.instanceId;
+      ask('tu-1', 'Bash', { command: 'make deploy' });
+      const r = await post('/v1/instances/' + id + '/approval', { toolUseId: 'tu-1', answer: 'approve', relay: RELAY });
+      assert.equal(r.status, 403);
+      assert.equal(r.body.error, 'approval_control_not_enabled');
+      assert.ok(approvals.current(id), 'still waiting');
+    });
+
+    it('shows the caller what to put to you', async () => {
+      await driven();
+      ask('tu-1', 'Bash', { command: 'make deploy ENV=prod' });
+      const p = (await get(h, '/v1/instances/' + id)).body.pendingApproval;
+      assert.equal(p.toolUseId, 'tu-1');
+      assert.equal(p.approvalType, 'tool');
+      assert.equal(p.command, 'make deploy ENV=prod');
+      assert.match(p.input, /ENV=prod/);
+      assert.equal((await get(h, '/v1/health')).body.sessionControl.approvals, true);
+    });
+
+    it('approves with your words, and records who decided', async () => {
+      await driven();
+      const decision = ask('tu-1', 'Bash', { command: 'make deploy' });
+      const settled = [];
+      approvals.on('settled', (e) => settled.push(e));
+      const r = await post('/v1/instances/' + id + '/approval', { toolUseId: 'tu-1', answer: 'approve', relay: RELAY });
+      assert.equal(r.status, 200);
+      assert.deepEqual(await decision, { behavior: 'allow', updatedInput: { command: 'make deploy' } });
+      assert.deepEqual(settled[0].meta, { channel: 'gateway:openclaw', decidedBy: 'user', userMessage: 'yes, run it' });
+      assert.match(im.get(id).conversation.slice(-1)[0].content, /Approved Bash through gateway:openclaw\. The user said: "yes, run it"/);
+    });
+
+    it('passes your reason on a rejection to the agent', async () => {
+      await driven();
+      const decision = ask('tu-1', 'Bash', { command: 'git push --force' });
+      const r = await post('/v1/instances/' + id + '/approval', {
+        toolUseId: 'tu-1', answer: 'reject', text: 'open a PR instead', relay: { decidedBy: 'user', userMessage: 'no, open a PR' },
+      });
+      assert.equal(r.status, 200);
+      assert.deepEqual(await decision, { behavior: 'deny', message: 'Rejected by the user: open a PR instead' });
+    });
+
+    it('answers a question with the choices you made', async () => {
+      await driven();
+      const questions = [{ question: 'Which database?', header: 'DB', options: [{ label: 'Postgres' }, { label: 'SQLite' }] }];
+      const decision = ask('tu-q', 'AskUserQuestion', { questions }, 'question');
+      const shown = (await get(h, '/v1/instances/' + id)).body.pendingApproval;
+      assert.equal(shown.approvalType, 'question');
+      assert.deepEqual(shown.questions[0].options.map((o) => o.label), ['Postgres', 'SQLite']);
+      assert.equal((await post('/v1/instances/' + id + '/approval', { toolUseId: 'tu-q', answer: 'approve', relay: RELAY })).status, 400);
+      for (const answers of [undefined, {}, ['Postgres'], { 'Which database?': 3 }, JSON.parse('{"__proto__": "x"}')]) {
+        const r = await post('/v1/instances/' + id + '/approval', { toolUseId: 'tu-q', answer: 'answer', answers, relay: RELAY });
+        assert.equal(r.status, 400, JSON.stringify(answers));
+      }
+      const r = await post('/v1/instances/' + id + '/approval', {
+        toolUseId: 'tu-q', answer: 'answer', answers: { 'Which database?': 'Postgres' }, relay: RELAY,
+      });
+      assert.equal(r.status, 200);
+      assert.deepEqual((await decision).updatedInput.answers, { 'Which database?': 'Postgres' });
+    });
+
+    it('needs your words: an agent may not approve on its own', async () => {
+      await driven();
+      ask('tu-1', 'Bash', { command: 'make deploy' });
+      const url = '/v1/instances/' + id + '/approval';
+      assert.equal((await post(url, { toolUseId: 'tu-1', answer: 'approve' })).body.error, 'invalid_relay');
+      assert.equal((await post(url, { toolUseId: 'tu-1', answer: 'approve', relay: { decidedBy: 'user' } })).body.error, 'invalid_relay');
+      const agent = await post(url, { toolUseId: 'tu-1', answer: 'approve', relay: { decidedBy: 'agent' } });
+      assert.equal(agent.status, 403);
+      assert.equal(agent.body.error, 'agent_may_not_decide');
+      assert.ok(approvals.current(id), 'still waiting for you');
+    });
+
+    it('lands only on the approval you were shown', async () => {
+      await driven();
+      ask('tu-1', 'Bash', { command: 'ls' });
+      ask('tu-2', 'Bash', { command: 'rm -rf build' });
+      const r = await post('/v1/instances/' + id + '/approval', { toolUseId: 'tu-1', answer: 'approve', relay: RELAY });
+      assert.equal(r.status, 409);
+      assert.equal(r.body.error, 'approval_superseded');
+      assert.equal(r.body.pendingApproval.toolUseId, 'tu-2');
+      assert.equal(r.body.pendingApproval.command, 'rm -rf build');
+      assert.equal(approvals.current(id).toolUseId, 'tu-2', 'the newer one still waits');
+      assert.equal((await post('/v1/instances/' + id + '/approval', { answer: 'approve', relay: RELAY })).body.error, 'invalid_tool_use_id');
+    });
+
+    it('is only for sessions a gateway caller drives', async () => {
+      await driven();
+      ask('tu-1', 'Bash', { command: 'ls' });
+      for (const heldBy of ['dashboard', 'campaign:storage-engine']) {
+        im.setControl(id, { heldBy });
+        const r = await post('/v1/instances/' + id + '/approval', { toolUseId: 'tu-1', answer: 'approve', relay: RELAY });
+        assert.equal(r.status, 409);
+        assert.equal(r.body.error, 'not_held_by_gateway');
+      }
+      assert.ok(approvals.current(id));
     });
   });
 });

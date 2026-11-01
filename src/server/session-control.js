@@ -25,6 +25,8 @@ const MAX_MESSAGE_CHARS = 20000;
 const DEFAULT_CONVERSATION_LIMIT = 50;
 const MAX_CONVERSATION_LIMIT = 200;
 const MAX_APPROVAL_INPUT_CHARS = 2000;
+// AskUserQuestion asks a handful at most; this only bounds a malformed call.
+const MAX_QUESTIONS = 20;
 
 // Instance ids are UUIDs minted by the instance manager; anything else is
 // rejected before it reaches a lookup.
@@ -53,6 +55,10 @@ const DEFAULT_STALE_MS = 10 * 60 * 1000;
 // Never bypassPermissions: it would also skip polpo's own approval
 // prompt. 'default' (or 'manual') needs no flag.
 const INHERITABLE_PERMISSION_MODES = new Set(['acceptEdits', 'auto', 'plan', 'dontAsk']);
+// What a caller may choose for a session it drives, among the modes the
+// host allows: one of the above, or 'default' for none, which sends every
+// approval to polpo.
+const CHOOSABLE_PERMISSION_MODES = new Set(['default', ...INHERITABLE_PERMISSION_MODES]);
 
 // Assistant stop reasons that end a turn.
 const TURN_ENDED = new Set(['end_turn', 'refusal', 'max_tokens', 'stop_sequence']);
@@ -97,10 +103,33 @@ function describeApproval(approval) {
     input = capText(redact(raw), MAX_APPROVAL_INPUT_CHARS).text;
   }
   return {
+    // Which tool call this is: an answer through the gateway names it, so
+    // it cannot land on a newer approval the user was never shown.
+    toolUseId: typeof approval.toolUseId === 'string' ? approval.toolUseId : null,
+    approvalType: typeof approval.approvalType === 'string' ? approval.approvalType : 'tool',
     tool: typeof approval.tool === 'string' ? approval.tool : null,
     description: typeof approval.description === 'string' ? capText(redact(approval.description), 1000).text : null,
+    // The whole command, or the plan for a plan review.
+    command: typeof approval.command === 'string' && approval.command
+      ? capText(redact(approval.command), MAX_MESSAGE_CHARS).text
+      : null,
+    questions: describeQuestions(approval.questions),
     input: input,
   };
+}
+
+/** AskUserQuestion's questions, as text a caller can put to the user. */
+function describeQuestions(questions) {
+  if (!Array.isArray(questions) || !questions.length) return null;
+  const text = (v, max) => (typeof v === 'string' ? capText(redact(v), max).text : null);
+  return questions.slice(0, MAX_QUESTIONS).map((q) => ({
+    question: text(q && q.question, 1000),
+    header: text(q && q.header, 100),
+    multiSelect: !!(q && q.multiSelect),
+    options: Array.isArray(q && q.options)
+      ? q.options.slice(0, MAX_QUESTIONS).map((o) => ({ label: text(o && o.label, 200), description: text(o && o.description, 500) }))
+      : [],
+  }));
 }
 
 /**
@@ -273,6 +302,42 @@ function sessionPermissionMode(entries) {
     return INHERITABLE_PERMISSION_MODES.has(e.permissionMode) ? e.permissionMode : null;
   }
   return null;
+}
+
+/**
+ * Parse POLPO_GATEWAY_ALLOWED_PERMISSION_MODES: the permission modes a
+ * gateway caller may choose for a session it drives. Throws on bypass and
+ * on anything unknown, so a typo cannot widen it silently.
+ * @returns {Set<string>} empty when the host allows none
+ */
+function parseAllowedPermissionModes(value) {
+  const out = new Set();
+  if (value === undefined || value === null || String(value).trim() === '') return out;
+  for (const raw of String(value).split(',')) {
+    const m = raw.trim();
+    if (!m) continue;
+    if (m === 'bypassPermissions' || m === 'bypass') {
+      throw new Error('POLPO_GATEWAY_ALLOWED_PERMISSION_MODES: "' + m + '" is never allowed: '
+        + "it would also skip polpo's own approvals");
+    }
+    if (!CHOOSABLE_PERMISSION_MODES.has(m)) {
+      throw new Error('POLPO_GATEWAY_ALLOWED_PERMISSION_MODES: unknown permission mode "' + m + '"; use '
+        + [...CHOOSABLE_PERMISSION_MODES].join(', '));
+    }
+    out.add(m);
+  }
+  return out;
+}
+
+/**
+ * The mode to run in when a caller chose one: null for 'default'.
+ * @returns {{ok: true, mode: ?string} | {ok: false, error: string, message: string}}
+ */
+function chosenMode(mode) {
+  if (!CHOOSABLE_PERMISSION_MODES.has(mode)) {
+    return fail('invalid_permission_mode', 'permissionMode must be one of: ' + [...CHOOSABLE_PERMISSION_MODES].join(', ') + '.');
+  }
+  return { ok: true, mode: mode === 'default' ? null : mode };
 }
 
 function staleMs() {
@@ -586,6 +651,42 @@ class SessionController {
   }
 
   /**
+   * Change the permission mode of a session polpo drives. The running
+   * Claude process keeps the mode it started with, so it is let go and
+   * the next prompt starts one in the new mode: the change applies from
+   * the next turn. Refused while the agent works or waits for an approval.
+   *
+   * @param {string} instanceId
+   * @param {string} mode - 'auto', 'default', ...; the caller checks it is allowed
+   * @param {object} [opts] - { by: who asked, for the conversation }
+   * @returns {{ok: true, permissionMode: ?string} | {ok: false, error: string, message: string}}
+   */
+  setPermissionMode(instanceId, mode, opts) {
+    const o = opts || {};
+    const inst = this.instanceManager.get(instanceId);
+    if (!inst) return fail('instance_not_found', 'No such session.');
+    if (!this._guarded(inst)) return fail('permission_mode_unsupported', 'Only Claude sessions have a permission mode.');
+    const chosen = chosenMode(mode);
+    if (!chosen.ok) return chosen;
+    if (!this.held.has(instanceId) || inst.canReceivePrompts === false) {
+      return fail('takeover_required', 'polpo is only watching this session. Take it over first, once it is idle.');
+    }
+    if (this._busy(inst)) {
+      return fail('session_busy', 'The agent is still working. Change the mode once it is idle.', { status: inst.status });
+    }
+    const agent = this.agentFor(inst);
+    if (!agent) return fail('agent_not_connected', 'The agent for this session is not connected.');
+    this._applyPermissionMode(agent, chosen.mode);
+    this.instanceManager.setControl(instanceId, { permissionMode: chosen.mode });
+    this.instanceManager.addMessage(instanceId, {
+      role: 'system',
+      content: 'Permission mode set to ' + mode + (o.by ? ' by ' + o.by : '') + '. It applies from the next prompt.',
+      source: 'polpo',
+    });
+    return { ok: true, permissionMode: chosen.mode };
+  }
+
+  /**
    * Take over a session so polpo can drive it.
    *
    * Refused while the agent is busy or waiting for an approval: whoever
@@ -598,6 +699,8 @@ class SessionController {
    * @param {string} [opts.serverUrl]
    * @param {boolean} [opts.inheritPermissionMode] - continue in the
    *   permission mode the session was last used with outside polpo
+   * @param {string} [opts.permissionMode] - a mode the caller chose
+   *   instead ('auto', 'default', ...); the caller checks it is allowed
    * @returns {Promise<{ok: true, instanceId: string, retaken?: boolean} | {ok: false, error: string, message: string}>}
    */
   async takeover(instanceId, opts) {
@@ -610,9 +713,15 @@ class SessionController {
         { status: inst.status });
     }
 
-    const mode = this._guarded(inst)
-      ? this._permissionModeFor(this.transcriptPathFor(inst), o.inheritPermissionMode)
-      : null;
+    let mode = null;
+    if (o.permissionMode !== undefined) {
+      if (!this._guarded(inst)) return fail('permission_mode_unsupported', 'Only Claude sessions have a permission mode.');
+      const chosen = chosenMode(o.permissionMode);
+      if (!chosen.ok) return chosen;
+      mode = chosen.mode;
+    } else if (this._guarded(inst)) {
+      mode = this._permissionModeFor(this.transcriptPathFor(inst), o.inheritPermissionMode);
+    }
 
     // A session polpo already runs an agent for (taken over earlier and
     // handed back, or open twice): reclaim it rather than spawning another.
@@ -665,7 +774,7 @@ class SessionController {
    *
    * @param {string} sessionId
    * @param {object} [opts] - { name, cwd, agentType, heldBy, serverUrl,
-   *   inheritPermissionMode }
+   *   inheritPermissionMode, permissionMode }, as for takeover
    */
   async resume(sessionId, opts) {
     const o = opts || {};
@@ -677,7 +786,14 @@ class SessionController {
     }
 
     let mode = null;
-    if (!o.agentType || o.agentType === 'claude') {
+    if (o.permissionMode !== undefined) {
+      if (o.agentType && o.agentType !== 'claude') {
+        return fail('permission_mode_unsupported', 'Only Claude sessions have a permission mode.');
+      }
+      const chosen = chosenMode(o.permissionMode);
+      if (!chosen.ok) return chosen;
+      mode = chosen.mode;
+    } else if (!o.agentType || o.agentType === 'claude') {
       const sessions = this._sessionsModule();
       let p = null;
       if (typeof sessions.findSessionFile === 'function') {
@@ -784,7 +900,9 @@ module.exports = {
   SessionController,
   transcriptActivity,
   sessionPermissionMode,
+  parseAllowedPermissionModes,
   INHERITABLE_PERMISSION_MODES,
+  CHOOSABLE_PERMISSION_MODES,
   DEFAULT_STALE_MS,
   POLPO_WRITERS,
   readTranscriptTail,

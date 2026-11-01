@@ -471,3 +471,22 @@ describe('SessionController', () => {
     assert.equal(ctl.held.has(out.instanceId), false);
   });
 });
+
+describe('parseAllowedPermissionModes', () => {
+  const { parseAllowedPermissionModes } = require('../src/server/session-control');
+
+  it('is empty when unset', () => {
+    for (const v of [undefined, null, '', '  ']) assert.equal(parseAllowedPermissionModes(v).size, 0);
+  });
+
+  it('reads a list', () => {
+    assert.deepEqual([...parseAllowedPermissionModes(' default, auto ,acceptEdits,')], ['default', 'auto', 'acceptEdits']);
+  });
+
+  it('refuses bypass and anything unknown, so a typo cannot widen it', () => {
+    assert.throws(() => parseAllowedPermissionModes('auto,bypassPermissions'), /never allowed/);
+    assert.throws(() => parseAllowedPermissionModes('bypass'), /never allowed/);
+    assert.throws(() => parseAllowedPermissionModes('Auto'), /unknown permission mode "Auto"/);
+    assert.throws(() => parseAllowedPermissionModes('manual'), /unknown permission mode/);
+  });
+});

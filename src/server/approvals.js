@@ -78,7 +78,8 @@ class PendingApprovals extends EventEmitter {
       // once. Either way nobody answered the old one, so it is denied.
       // It used to be allowed, which approved a parallel tool call that
       // no one had seen.
-      this._finish(instanceId, existing, { behavior: 'deny', message: 'Superseded by a newer approval request' }, { via: 'superseded' });
+      // The banner already shows the new request: leave it.
+      this._finish(instanceId, existing, { behavior: 'deny', message: 'Superseded by a newer approval request' }, { via: 'superseded' }, false);
     }
     const entry = {
       toolUseId: req.toolUseId || null,
@@ -149,12 +150,12 @@ class PendingApprovals extends EventEmitter {
     return this.settle(instanceId, { behavior: 'allow', updatedInput }, meta);
   }
 
-  _finish(instanceId, entry, decision, meta) {
+  _finish(instanceId, entry, decision, meta, clearBanner) {
     clearTimeout(entry.timer);
     clearTimeout(entry.holdTimer);
     entry.settled = true;
     entry.decision = decision;
-    if (this.instanceManager) this.instanceManager.clearPendingApproval(instanceId);
+    if (this.instanceManager && clearBanner !== false) this.instanceManager.clearPendingApproval(instanceId);
     if (entry.waiter) {
       const w = entry.waiter;
       entry.waiter = null;

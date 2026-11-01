@@ -60,6 +60,8 @@ If the base URL you were given ends in `.trycloudflare.com`, the host is reachab
 | See which coding sessions are running right now | `GET /v1/instances` |
 | Follow a running session's new messages | `GET /v1/instances/:id/conversation?since=<seq>` |
 | Continue a running session (host must have `POLPO_GATEWAY_SESSION_CONTROL=1`) | `POST /v1/instances/:id/takeover`, then `POST /v1/instances/:id/prompt` |
+| Run a session you drive in another permission mode (host lists the modes in `POLPO_GATEWAY_ALLOWED_PERMISSION_MODES`) | `permissionMode` on `takeover`/`resume`, or `POST /v1/instances/:id/permission-mode` |
+| Put a session's pending approval to the operator and bring back their answer (host must have `POLPO_GATEWAY_APPROVALS=1`) | `GET /v1/instances/:id` (`pendingApproval`), then `POST /v1/instances/:id/approval` |
 | Abort a runaway task you started | `DELETE /v1/tasks/:id` |
 | Delegate a multi-step *goal* (mind plans + fans out across arms) | `POST /v1/goals` → SSE on `/v1/goals/:id/stream` *(experimental, host must have `POLPO_MIND=1`)* |
 | List active goals / inspect / cancel | `GET /v1/goals`, `GET /v1/goals/:id`, `DELETE /v1/goals/:id` |
@@ -87,8 +89,13 @@ If the user wants fresh work done (no prior context implied), skip discovery and
 Use this once at the start of a session to verify the host is reachable and to learn its version.
 
 ```json
-{ "status": "ok", "version": "1.2.1", "activeTasks": 3 }
+{
+  "status": "ok", "version": "1.2.1", "activeTasks": 3,
+  "sessionControl": { "enabled": true, "permissionModes": ["default", "auto"], "approvals": true }
+}
 ```
+
+`sessionControl` tells you, before you try, whether you may drive sessions on this host, which permission modes you may choose for them (empty: none), and whether you may answer their approvals (6a).
 
 `activeTasks` tells you how many gateway-spawned agents are currently running. If it's near the host's `maxConcurrent` (default 4), expect `POST /v1/tasks` to return `429 max_concurrent_reached`.
 
@@ -382,7 +389,22 @@ The rules you must follow:
 4. **Handed back means stop.** `409 session_resumed_elsewhere` (with `writer`, e.g. `claude-vscode`) means the operator picked the session up again at their desk. Do not take it over again on your own: they are working in it. Tell them, and wait for them to ask.
 5. **`409 takeover_required`** means polpo is only watching that session. Take it over first, and only if it is idle.
 
-It continues the same session, it does not fork it: when the operator reloads the VSCode tab, they see what you did. Approvals are not forwarded to you; if `pendingApproval` is set, tell the operator to answer it on their dashboard. An approval nobody answers expires after 5 minutes, and the agent is told it was denied. In a campaign it is different: approvals are decisions you carry (6d), and they wait. `permissionMode` says whether the session runs in its own mode (`auto`, say, which asks for few approvals) or `null` (every approval goes to the dashboard).
+It continues the same session, it does not fork it: when the operator reloads the VSCode tab, they see what you did. `permissionMode` says whether the session runs in a mode (`auto`, say, which asks for few approvals) or `null` (every approval goes to polpo).
+
+### Permission mode and approvals
+
+**Choosing the mode.** If `sessionControl.permissionModes` in `/v1/health` is not empty, you may pass one of those modes as `permissionMode` to `takeover` or `resume`, or change it between turns with `POST /v1/instances/:id/permission-mode` `{ "permissionMode": "auto" }` (idle only; it applies from your next prompt). `default` means none. Choose the mode the operator asked for; do not raise it on your own to get past an approval. A mode the host does not list returns `400 permission_mode_not_allowed` with `allowed`; an empty list returns `403 permission_mode_not_enabled`. Then tell the operator; never claim you cannot help when the host simply does not allow it, and never send them to a dashboard setting that does not exist: the mode is chosen here or in the host's configuration.
+
+**When `pendingApproval` is set.** The agent is waiting for someone to allow a tool call.
+
+- If `sessionControl.approvals` is `true`, put it to the operator and bring back their answer:
+  1. Show them what is asked, from `pendingApproval`: `tool`, `command` (the whole command, or the plan of a plan review), `description`, and for a question (`approvalType: "question"`) each question with its options. Never shorten the command into something milder.
+  2. Wait for their reply. The approval waits too; there is no timeout.
+  3. `POST /v1/instances/:id/approval` with the `toolUseId` you showed them, `answer` (`approve` or `reject`; for a question `answer`, with `answers` mapping each question to the chosen label, or `reject`), an optional `text` for a rejection (the agent reads it as the reason), and `relay: { "decidedBy": "user", "userMessage": "<their reply, verbatim>" }`.
+  4. Never approve on your own: `decidedBy: "agent"` returns `403 agent_may_not_decide`, and saying the operator decided when they did not is a lie in their record. `409 approval_superseded` means the agent now asks something else, returned in `pendingApproval`: put that one to them. `409 no_pending_approval` means it was answered elsewhere.
+- Otherwise, tell the operator the session is waiting for an approval they answer on the polpo dashboard or phone, quoting what it is. An approval nobody answers there expires after 5 minutes, and the agent is told it was denied.
+
+In a campaign it is different: approvals are campaign decisions you carry (6d).
 
 **Secrets are filtered.** Session content you read through the gateway has keys, tokens and passwords replaced with `[redacted]` (`redacted: true` on the message). Never ask the agent to put a secret into a command or a reply so you can read it: it will be filtered, and it would end up in the transcript. `POST /v1/instances/:id/abort` stops the turn in progress. `POST /v1/sessions/:id/resume` with `{ "agentType": "claude" }` continues a session from the catalogue that is not running right now (same rules; `409 session_busy` if a live copy is busy).
 
@@ -621,6 +643,8 @@ Live         GET  /v1/instances
 Drive        POST /v1/instances/:id/takeover    (idle only; use the returned id)
 (opt-in)     POST /v1/instances/:id/prompt      body: {text}
              POST /v1/instances/:id/abort
+             POST /v1/instances/:id/permission-mode  body: {permissionMode}
+             POST /v1/instances/:id/approval   body: {toolUseId, answer, text?, answers?, relay}
              POST /v1/sessions/:id/resume       body: {agentType?, cwd?}
              503 session_control_not_enabled  → host has it off; read only
              409 session_busy                 → wait, do not retry in a loop

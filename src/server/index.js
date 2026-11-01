@@ -4,7 +4,7 @@ const path = require('path');
 const InstanceManager = require('./instances');
 const { createApiRouter } = require('./api');
 const { setupWebSocket } = require('./websocket');
-const { SessionController } = require('./session-control');
+const { SessionController, parseAllowedPermissionModes } = require('./session-control');
 const { PendingApprovals } = require('./approvals');
 const { CampaignManager } = require('../campaign');
 const { parseAgentMay } = require('../campaign/decisions');
@@ -262,6 +262,10 @@ function createServer(options = {}) {
   // host's choice, and some decisions are never its: a setting that lists
   // one stops polpo from starting rather than being quietly narrowed.
   const agentMay = parseAgentMay(process.env.POLPO_CAMPAIGN_AGENT_MAY);
+  // The same for the permission modes a gateway caller may choose: never
+  // bypass, and a typo stops polpo rather than allowing something else.
+  const gatewayPermissionModes = parseAllowedPermissionModes(process.env.POLPO_GATEWAY_ALLOWED_PERMISSION_MODES);
+  const gatewayApprovals = process.env.POLPO_GATEWAY_APPROVALS === '1';
   const campaigns = new CampaignManager({
     instanceManager, sessionController, approvals, agentMay,
     gatewayInheritPermissionMode: process.env.POLPO_GATEWAY_INHERIT_PERMISSION_MODE === '1',
@@ -271,7 +275,7 @@ function createServer(options = {}) {
   if (agentMay.size) log.warn(`A PA may decide these campaign decisions on its own: ${[...agentMay].join(', ')}`);
 
   app.use('/api', createApiRouter(instanceManager, getAuthState, pushManager, outboxManager, () => tunnelInfo, sessionController,
-    { approvals, campaigns }));
+    { approvals, campaigns, gatewayApprovals: gatewayApprovals && process.env.POLPO_GATEWAY_SESSION_CONTROL === '1' }));
 
   // Alien Mind handle — declared up here so the gateway router (mounted
   // below) can wire /v1/goals to its coordinator. The mind itself is
@@ -364,7 +368,22 @@ function createServer(options = {}) {
       // Reading campaigns needs the key; acting on them is opt-in.
       campaigns,
       campaignControl: process.env.POLPO_GATEWAY_CAMPAIGN_CONTROL === '1',
+      // Choosing a mode and answering approvals are opt-in too: with them
+      // the agent driving a session stands in for you at the dashboard.
+      allowedPermissionModes: gatewayPermissionModes,
+      approvals,
+      approvalControl: gatewayApprovals,
     }));
+    if (process.env.POLPO_GATEWAY_SESSION_CONTROL === '1') {
+      if (gatewayPermissionModes.size) {
+        log.warn(`Gateway callers may run the sessions they drive in these permission modes: ${[...gatewayPermissionModes].join(', ')}`);
+      }
+      if (gatewayApprovals) {
+        log.warn('Gateway callers may answer the approvals of the sessions they drive, relaying your words (POLPO_GATEWAY_APPROVALS=1).');
+      }
+    } else if (gatewayPermissionModes.size || gatewayApprovals) {
+      log.warn('POLPO_GATEWAY_ALLOWED_PERMISSION_MODES and POLPO_GATEWAY_APPROVALS need POLPO_GATEWAY_SESSION_CONTROL=1; ignored.');
+    }
     gatewayState = { keyInfo, taskManager, uploadStore, artifactStore };
   }
 

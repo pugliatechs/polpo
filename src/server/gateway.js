@@ -43,7 +43,7 @@ const InstanceManager = require('./instances');
 const sessionControl = require('./session-control');
 const { capTail, goalFinalOutput } = require('../mind/goal-output');
 const { campaignErrorStatus } = require('../campaign');
-const { checkRelay, DECISION_ID_RE } = require('../campaign/decisions');
+const { checkRelay, DECISION_ID_RE, MAX_ANSWER_TEXT } = require('../campaign/decisions');
 const { ID_RE: CAMPAIGN_ID_RE } = require('../campaign/definition');
 
 const log = makeLogger('gateway');
@@ -57,6 +57,11 @@ const log = makeLogger('gateway');
  *   /v1/sessions live merge, /v1/sessions/:id live fallback)
  * @param {object} [opts.campaigns] - CampaignManager (enables /v1/campaigns, /v1/decisions)
  * @param {boolean} [opts.campaignControl] - allow acting on campaigns, not just reading them
+ * @param {Set<string>} [opts.allowedPermissionModes] - permission modes a caller may
+ *   choose for a session it drives
+ * @param {object} [opts.approvals] - shared PendingApprovals
+ * @param {boolean} [opts.approvalControl] - let a caller answer, with the user's words,
+ *   the approvals of the sessions it drives
  * @param {object} [opts.mind] - Alien Mind handle (enables /v1/goals).
  *   Shape: { coordinator } — coordinator must implement submitGoal,
  *   getActiveGoals, cancelGoal, and emit 'goal:event' for SSE relay.
@@ -76,6 +81,13 @@ function createGatewayRouter(opts) {
   // had at the desk ('auto', say). Off by default: the caller then gets
   // the same automatic approvals you have at your desk.
   const inheritPermissionMode = opts.inheritPermissionMode === true;
+  // The permission modes a caller may choose for a session it drives
+  // (POLPO_GATEWAY_ALLOWED_PERMISSION_MODES). Empty: it chooses none.
+  const allowedPermissionModes = opts.allowedPermissionModes instanceof Set ? opts.allowedPermissionModes : new Set();
+  // Approvals of the sessions a caller drives, which it may relay to you
+  // and answer with your words (POLPO_GATEWAY_APPROVALS=1).
+  const approvals = opts.approvals || null;
+  const approvalControl = opts.approvalControl === true && !!approvals;
 
   /**
    * Who is calling, by the same ladder as /v1/tasks: explicit client
@@ -141,6 +153,13 @@ function createGatewayRouter(opts) {
       status: 'ok',
       version: require('../../package.json').version,
       activeTasks: taskManager._activeTaskCount(),
+      // What a caller driving a session may do, so it can tell the user
+      // before it is refused.
+      sessionControl: {
+        enabled: !!opts.sessionControl,
+        permissionModes: [...allowedPermissionModes],
+        approvals: approvalControl,
+      },
     });
   });
 
@@ -469,8 +488,11 @@ function createGatewayRouter(opts) {
     switch (code) {
       case 'instance_not_found': return 404;
       case 'session_busy':
+      case 'takeover_required':
       case 'session_resumed_elsewhere': return 409;
-      case 'no_session': return 400;
+      case 'no_session':
+      case 'invalid_permission_mode':
+      case 'permission_mode_unsupported': return 400;
       case 'agent_not_connected': return 502;
       default: return 500;
     }
@@ -481,6 +503,59 @@ function createGatewayRouter(opts) {
     if (out.status) body.status = out.status;
     if (out.writer) body.writer = out.writer;
     return res.status(controlStatus(out.error)).json(body);
+  }
+
+  /**
+   * The permission mode a caller asked for, checked against what the host
+   * allows. undefined when it asked for none; null after responding.
+   */
+  function requestedPermissionMode(res, body) {
+    if (body.permissionMode === undefined) return undefined;
+    if (!allowedPermissionModes.size) {
+      res.status(403).json({
+        error: 'permission_mode_not_enabled',
+        message: 'This host does not let gateway callers choose a permission mode.',
+      });
+      return null;
+    }
+    if (typeof body.permissionMode !== 'string' || !allowedPermissionModes.has(body.permissionMode)) {
+      res.status(400).json({
+        error: 'permission_mode_not_allowed',
+        message: 'permissionMode must be one of the modes this host allows.',
+        allowed: [...allowedPermissionModes],
+      });
+      return null;
+    }
+    return body.permissionMode;
+  }
+
+  /**
+   * AskUserQuestion answers: question text to the chosen answer. A copy
+   * with only plain string pairs, or null when malformed.
+   */
+  function checkAnswers(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    const keys = Object.keys(raw);
+    if (!keys.length || keys.length > 20) return null;
+    const out = {};
+    for (const k of keys) {
+      const v = raw[k];
+      // Merged into the tool's input: no key that could reach a prototype.
+      if (k === '__proto__' || k === 'constructor' || k === 'prototype') return null;
+      if (k.length > 1000 || typeof v !== 'string' || v.length > MAX_ANSWER_TEXT) return null;
+      out[k] = v;
+    }
+    return out;
+  }
+
+  function capChars(text, max) {
+    const t = String(text == null ? '' : text);
+    return t.length > max ? t.slice(0, max - 3) + '...' : t;
+  }
+
+  /** Whether a gateway caller drives this session (not you, not a campaign). */
+  function heldByGateway(inst) {
+    return typeof inst.heldBy === 'string' && inst.heldBy.indexOf('gateway:') === 0 && inst.canReceivePrompts !== false;
   }
 
   /** Common checks; returns the instance, or null after responding. */
@@ -506,13 +581,18 @@ function createGatewayRouter(opts) {
   }
 
   // POST /v1/instances/:id/takeover: start driving an idle session.
+  // { permissionMode? }: one of the modes the host allows; without it the
+  // session runs as POLPO_GATEWAY_INHERIT_PERMISSION_MODE says.
   router.post('/instances/:id/takeover', controlLimiter, smallJson, async (req, res) => {
     const inst = drivableInstance(req, res);
     if (!inst) return;
+    const permissionMode = requestedPermissionMode(res, req.body || {});
+    if (permissionMode === null) return;
     try {
       const out = await sessionControlCtl.takeover(inst.id, {
         heldBy: 'gateway:' + clientLabelFor(req, req.body),
         inheritPermissionMode,
+        permissionMode,
         serverUrl: 'ws://127.0.0.1:' + req.socket.localPort,
       });
       if (!out.ok) return sendControlFailure(res, out);
@@ -563,6 +643,105 @@ function createGatewayRouter(opts) {
     res.json({ ok: true });
   });
 
+  // POST /v1/instances/:id/permission-mode { permissionMode }: change the
+  // mode of a session the caller drives, between turns. Only modes the
+  // host lists in POLPO_GATEWAY_ALLOWED_PERMISSION_MODES.
+  router.post('/instances/:id/permission-mode', controlLimiter, smallJson, (req, res) => {
+    const inst = drivableInstance(req, res);
+    if (!inst) return;
+    const body = req.body || {};
+    if (body.permissionMode === undefined) return res.status(400).json({ error: 'permission_mode_required' });
+    const mode = requestedPermissionMode(res, body);
+    if (mode === null) return;
+    if (!heldByGateway(inst)) {
+      return res.status(409).json({
+        error: inst.heldBy ? 'held_elsewhere' : 'takeover_required',
+        message: inst.heldBy
+          ? 'This session is driven by ' + inst.heldBy + ', not through the gateway.'
+          : 'polpo is only watching this session. Take it over first, once it is idle.',
+      });
+    }
+    const label = clientLabelFor(req, body);
+    const out = sessionControlCtl.setPermissionMode(inst.id, mode, { by: 'gateway:' + label });
+    if (!out.ok) return sendControlFailure(res, out);
+    log.info('Permission mode of ' + inst.id + ' set to ' + mode + ' by gateway:' + label);
+    res.json({ ok: true, permissionMode: out.permissionMode });
+  });
+
+  // ---- Answering approvals (opt-in) ----
+  //
+  // When the only way to reach you is the agent driving a session (a PA
+  // on Telegram), it puts the session's pending approval to you and
+  // brings your answer back, with your words verbatim. Only for sessions
+  // a gateway caller drives, and only you decide: an agent may not
+  // approve on its own. Off unless the host sets POLPO_GATEWAY_APPROVALS=1.
+  // A campaign's approvals are campaign decisions, answered there.
+
+  // POST /v1/instances/:id/approval
+  //   { toolUseId, answer: approve|reject|answer, text?, answers?, relay: { decidedBy, userMessage } }
+  router.post('/instances/:id/approval', controlLimiter, smallJson, (req, res) => {
+    if (!approvalControl) return res.status(403).json({ error: 'approval_control_not_enabled' });
+    const inst = drivableInstance(req, res);
+    if (!inst) return;
+    if (!heldByGateway(inst)) {
+      return res.status(409).json({
+        error: 'not_held_by_gateway',
+        message: 'Only the approvals of a session a gateway caller drives can be answered here.',
+        heldBy: inst.heldBy || null,
+      });
+    }
+    const body = req.body || {};
+    const relay = checkRelay(body.relay);
+    if (!relay.ok) return res.status(400).json({ error: relay.error, message: relay.message });
+    if (relay.decidedBy !== 'user') {
+      return res.status(403).json({ error: 'agent_may_not_decide', message: 'An approval must be decided by the user.' });
+    }
+    if (typeof body.toolUseId !== 'string' || !body.toolUseId || body.toolUseId.length > 200) {
+      return res.status(400).json({ error: 'invalid_tool_use_id' });
+    }
+    const pending = approvals.current(inst.id);
+    if (!pending) return res.status(409).json({ error: 'no_pending_approval' });
+    if (pending.toolUseId !== body.toolUseId) {
+      return res.status(409).json({
+        error: 'approval_superseded',
+        message: 'The session is waiting on a different approval now; put that one to the user.',
+        pendingApproval: sessionControl.describeApproval(inst.pendingApproval),
+      });
+    }
+    const isQuestion = pending.approvalType === 'question';
+    const valid = isQuestion ? ['answer', 'reject'] : ['approve', 'reject'];
+    if (!valid.includes(body.answer)) {
+      return res.status(400).json({ error: 'invalid_answer', message: 'answer must be one of: ' + valid.join(', ') + '.' });
+    }
+    if (body.text !== undefined && (typeof body.text !== 'string' || body.text.length > MAX_ANSWER_TEXT)) {
+      return res.status(400).json({ error: 'invalid_text' });
+    }
+    let answers = null;
+    if (body.answer === 'answer') {
+      answers = checkAnswers(body.answers);
+      if (!answers) return res.status(400).json({ error: 'invalid_answers', message: 'answers maps each question to the chosen answer.' });
+    }
+
+    const channel = 'gateway:' + clientLabelFor(req, body);
+    const meta = { channel, decidedBy: relay.decidedBy, userMessage: relay.userMessage };
+    const text = typeof body.text === 'string' ? body.text.trim() : '';
+    const tool = (inst.pendingApproval && inst.pendingApproval.tool) || 'a tool call';
+    let settled;
+    if (body.answer === 'approve') settled = approvals.approve(inst.id, meta);
+    else if (body.answer === 'answer') settled = approvals.answer(inst.id, answers, meta);
+    else settled = approvals.reject(inst.id, text ? 'Rejected by the user: ' + text : 'Rejected via Polpo', meta);
+    if (!settled) return res.status(409).json({ error: 'no_pending_approval' });
+
+    const verb = body.answer === 'approve' ? 'Approved' : (body.answer === 'answer' ? 'Answered' : 'Rejected');
+    log.info(verb + ' ' + tool + ' on ' + inst.id + ' through ' + channel + ', relayed from the user');
+    instanceManager.addMessage(inst.id, {
+      role: 'system',
+      content: verb + ' ' + tool + ' through ' + channel + '. The user said: "' + capChars(redact(relay.userMessage), 500) + '"',
+      source: 'polpo',
+    });
+    res.json({ ok: true });
+  });
+
   // POST /v1/sessions/:id/resume: continue a session from the catalogue,
   // including one that is not live right now.
   router.post('/sessions/:id/resume', controlLimiter, smallJson, async (req, res) => {
@@ -575,12 +754,15 @@ function createGatewayRouter(opts) {
     if (!['claude', 'codex', 'gemini', 'opencode', 'pi', 'goose'].includes(agentType)) {
       return res.status(400).json({ error: 'invalid_agent_type' });
     }
+    const permissionMode = requestedPermissionMode(res, body);
+    if (permissionMode === null) return;
     try {
       const out = await sessionControlCtl.resume(req.params.id, {
         agentType,
         cwd: typeof body.cwd === 'string' ? body.cwd : undefined,
         heldBy: 'gateway:' + clientLabelFor(req, body),
         inheritPermissionMode,
+        permissionMode,
         serverUrl: 'ws://127.0.0.1:' + req.socket.localPort,
       });
       if (!out.ok) return sendControlFailure(res, out);

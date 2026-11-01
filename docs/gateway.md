@@ -83,8 +83,13 @@ Per-IP limits are deliberately not used: with a single shared key today, every c
 ### `GET /v1/health`
 
 ```json
-{ "status": "ok", "version": "1.2.0", "activeTasks": 0 }
+{
+  "status": "ok", "version": "1.2.0", "activeTasks": 0,
+  "sessionControl": { "enabled": true, "permissionModes": ["default", "auto"], "approvals": true }
+}
 ```
+
+`sessionControl` says what a caller driving a session may do on this host: whether it may drive one at all, the permission modes it may choose (empty: none), and whether it may answer approvals. See [Driving a session](#driving-a-session).
 
 ### `POST /v1/tasks`
 
@@ -439,7 +444,8 @@ Reading is always available. Driving a session (taking it over and sending it pr
       canReceivePrompts,    // false: polpo is only watching this session
       heldBy,               // "dashboard", "gateway:<client>" or null
       permissionMode,       // Claude's mode while polpo drives it ("auto", ...) or null
-      pendingApproval,      // { toolName, input, ... } or null; input capped at 2000 chars
+      pendingApproval,      // null, or { toolUseId, approvalType, tool, description,
+                            //   command, questions, input }; input capped at 2000 chars
       firstPrompt,          // truncated to 200 chars
       lastActivity,
       lastSeq               // seq of the newest message polpo holds
@@ -491,15 +497,20 @@ Mind instances, mind arms and gateway tasks have their own lifecycles and cannot
 
 **Permission mode.** A Claude session records the permission mode it was used with (`auto`, `acceptEdits`, `plan`, ...). A takeover from the dashboard continues in that mode, so a session you ran in `auto` mode at the desk does not stop to ask the phone about every `git fetch`. A takeover through the gateway does not, unless the host also sets `POLPO_GATEWAY_INHERIT_PERMISSION_MODE=1`: otherwise the caller would get the same automatic approvals you have at your desk. Either way, whatever the mode still asks about goes to the dashboard, and `bypassPermissions` is never carried over. The mode in use is `permissionMode` on the instance.
 
+**Choosing the mode.** When you can only reach the agent driving the session (a PA on Telegram, say), inheriting is no help: a session you started at the desk usually runs in the default mode. The host can instead list the modes a caller may choose, in `POLPO_GATEWAY_ALLOWED_PERMISSION_MODES` (for example `default,auto`). The caller names one in `permissionMode` on `takeover` or `resume`, or changes it between turns with `POST /v1/instances/:id/permission-mode`. `default` means none: every approval goes to polpo. `bypassPermissions` can never be listed; polpo refuses to start if it is, or if the list has a mode it does not know.
+
+**Approvals.** By default, approvals are not forwarded to the caller: if the agent asks for one, it shows up in `pendingApproval` and on the dashboard, where you answer it, and one nobody answers expires after 5 minutes and the agent is told it was denied. With `POLPO_GATEWAY_APPROVALS=1`, the caller may put the approval to you and bring your answer back with `POST /v1/instances/:id/approval`, quoting your words. Approvals of a session a caller drives then wait until they are answered, as a campaign's do, so a chat round trip has time. Only you decide: an answer needs `relay.decidedBy: "user"` with your words in `relay.userMessage`, and names the `toolUseId` you were shown. A campaign's approvals are answered as campaign decisions instead.
+
 #### `POST /v1/instances/:id/takeover`
 
 ```
-→ { instanceId, instance }   // instance: the shape of GET /v1/instances/:id
+{ "permissionMode": "auto" }   // optional: one of POLPO_GATEWAY_ALLOWED_PERMISSION_MODES
+→ { instanceId, instance }     // instance: the shape of GET /v1/instances/:id
 ```
 
 The `instanceId` returned can differ from the one you passed: a discovered session is replaced by one polpo drives. Use the returned id from then on. `instance.heldBy` is `gateway:<client>`, from the `X-Polpo-Client` header.
 
-Errors: 409 `session_busy` (with `status`), 400 `no_session`, 400 `not_a_coding_session`, 404 `instance_not_found`.
+Errors: 409 `session_busy` (with `status`), 400 `no_session`, 400 `not_a_coding_session`, 404 `instance_not_found`, 403 `permission_mode_not_enabled` (the host lists no modes), 400 `permission_mode_not_allowed` (with `allowed`), 400 `permission_mode_unsupported` (not a Claude session).
 
 #### `POST /v1/instances/:id/prompt`
 
@@ -516,18 +527,48 @@ Errors: 400 `invalid_text`, 409 `takeover_required` (polpo is only watching; tak
 
 Stops the turn in progress. `→ { ok: true }`. Errors: 409 `takeover_required`, 502 `agent_not_connected`.
 
+#### `POST /v1/instances/:id/permission-mode`
+
+Changes the permission mode of a session the caller drives. It applies from the next prompt: the running Claude process is let go and the next prompt starts one in the new mode.
+
+```
+{ "permissionMode": "auto" }   // one of POLPO_GATEWAY_ALLOWED_PERMISSION_MODES
+→ { ok: true, permissionMode }  // null for "default"
+```
+
+Errors: 400 `permission_mode_required`, 403 `permission_mode_not_enabled`, 400 `permission_mode_not_allowed` (with `allowed`), 409 `takeover_required`, 409 `held_elsewhere` (you or a campaign drive it), 409 `session_busy` (working or waiting for an approval; change it once idle), 400 `permission_mode_unsupported`.
+
+#### `POST /v1/instances/:id/approval`
+
+Answers the approval a session the caller drives is waiting on, with the user's words. Needs `POLPO_GATEWAY_APPROVALS=1`.
+
+```
+{
+  "toolUseId": "toolu_...",            // pendingApproval.toolUseId you showed the user
+  "answer": "approve",                 // approve | reject; for a question: answer | reject
+  "text": "open a PR instead",         // optional: on reject, passed to the agent as the reason
+  "answers": { "Which database?": "Postgres" },   // answer only: question -> chosen label
+  "relay": { "decidedBy": "user", "userMessage": "<the user's words, verbatim>" }
+}
+→ { ok: true }
+```
+
+What to show the user is in `pendingApproval`: `tool`, `description` and `command` (the whole command, or the plan of a plan review), `questions` with their options for a question, and the start of `input`. The answer and the user's words are written into the session's conversation, so they show on the dashboard.
+
+Errors: 403 `approval_control_not_enabled`, 409 `not_held_by_gateway` (with `heldBy`), 400 `invalid_relay`, 403 `agent_may_not_decide` (`decidedBy: "agent"`), 400 `invalid_tool_use_id`, 409 `no_pending_approval`, 409 `approval_superseded` (the session now waits on another approval, returned in `pendingApproval`: put that one to the user), 400 `invalid_answer`, 400 `invalid_text`, 400 `invalid_answers`.
+
 #### `POST /v1/sessions/:id/resume`
 
 Continues a session from the catalogue, including one that is not running right now.
 
 ```
-{ "agentType": "claude", "cwd": "/optional/fallback" }
+{ "agentType": "claude", "cwd": "/optional/fallback", "permissionMode": "auto" }
 → { instanceId, alreadyRunning }
 ```
 
-`agentType` defaults to `claude`. The working directory recorded in the session wins over `cwd`. Errors: 400 `invalid_session_id`, 400 `invalid_agent_type`, 409 `session_busy`.
+`agentType` defaults to `claude`. The working directory recorded in the session wins over `cwd`. `permissionMode` is optional, as for `takeover`, and applies to Claude only. Errors: 400 `invalid_session_id`, 400 `invalid_agent_type`, 409 `session_busy`, and the `permission_mode_*` errors of `takeover`.
 
-The control routes share a rate limit of 30/min per token. Approvals are not forwarded to the caller: if the agent asks for one, it shows up in `pendingApproval` and on the dashboard, where you answer it. An approval nobody answers expires after 5 minutes and the agent is told it was denied.
+The control routes share a rate limit of 30/min per token. For what happens when the agent asks for an approval, see **Approvals** above.
 
 ### Secrets in session content
 
@@ -783,7 +824,8 @@ The full reference for the response shape, scoring heuristics, and privacy model
   - `bypass`: no permission checks at all (`--dangerously-skip-permissions`). Anyone holding the gateway key can then run any command as the user polpo runs as; polpo warns at startup. Up to and including 1.2.4 this was the only behaviour.
 
   In `auto` and `default`, any approval request fails the task immediately with `approval_required`, so callers must write self-sufficient prompts. An unknown value falls back to `auto`, never to `bypass`. OpenCode, Pi and Goose take no mode from polpo; their own settings apply.
-- **Driving live sessions is opt-in**: `POLPO_GATEWAY_SESSION_CONTROL=1` turns it on. Even then a busy session is read only, a session is never forked, and polpo hands it back as soon as someone writes to it again in VSCode or a terminal. A caller gets the session's own permission mode only with `POLPO_GATEWAY_INHERIT_PERMISSION_MODE=1`.
+- **Driving live sessions is opt-in**: `POLPO_GATEWAY_SESSION_CONTROL=1` turns it on. Even then a busy session is read only, a session is never forked, and polpo hands it back as soon as someone writes to it again in VSCode or a terminal. A caller gets the session's own permission mode only with `POLPO_GATEWAY_INHERIT_PERMISSION_MODE=1`, and chooses one only among `POLPO_GATEWAY_ALLOWED_PERMISSION_MODES`, which can never include `bypassPermissions`.
+- **Relayed approvals are yours**: with `POLPO_GATEWAY_APPROVALS=1` a caller can answer the approvals of the sessions it drives, but only as the user's decision, quoting the user's words, and only for the tool call it names. The quote is a record, not a proof: whoever holds the gateway key can claim you said yes, as they could with any setting that lets the gateway act for you. Leave both settings off unless the key stays with an agent you trust.
 - **Secrets are filtered from session content**: see [Secrets in session content](#secrets-in-session-content). Campaign decisions and the campaign ledger go through the same filter.
 - **Campaigns are directed, not bypassed**: acting on campaigns is opt-in (`POLPO_GATEWAY_CAMPAIGN_CONTROL=1`); a PA can carry your answer to any decision but never approve a campaign file or an agent's approval on its own, nor stop a campaign; gate commands run only after you approve the pinned campaign file, as an argv without a shell.
 - **No filenames in logs**: caller-controlled strings stay out of logs; uploads are recorded by size and sha256 for forensics.
@@ -801,6 +843,8 @@ The full reference for the response shape, scoring heuristics, and privacy model
 | `POLPO_GATEWAY_TASK_PERMISSION_MODE` | `auto` | What a `/v1/tasks` agent may do without approval: `auto`, `default` or `bypass` (see Security Model) |
 | `POLPO_GATEWAY_SESSION_CONTROL` | off | `1` lets callers take over and continue live coding sessions |
 | `POLPO_GATEWAY_INHERIT_PERMISSION_MODE` | off | `1` lets a session taken over through the gateway keep its own permission mode (`auto`, ...) |
+| `POLPO_GATEWAY_ALLOWED_PERMISSION_MODES` | none | Comma list of the modes a caller may choose for a session it drives: `default`, `acceptEdits`, `auto`, `plan`, `dontAsk`. Never `bypassPermissions`; an unknown mode stops polpo from starting |
+| `POLPO_GATEWAY_APPROVALS` | off | `1` lets a caller answer, with your words, the approvals of the sessions it drives; those approvals then wait until answered |
 | `POLPO_GATEWAY_REDACT` | on | `0` stops removing secrets from session content the gateway returns |
 | `POLPO_GATEWAY_CAMPAIGN_CONTROL` | off | `1` lets callers act on campaigns: propose, answer decisions, prompt, run gates, pause, resume, stop |
 | `POLPO_CAMPAIGN_AGENT_MAY` | empty | Decision kinds a PA may decide on its own: any of `question`, `budget`, `resume`. Anything else stops polpo from starting |

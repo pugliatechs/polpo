@@ -24,6 +24,9 @@ const log = makeLogger('api');
 const skillsLog = makeLogger('api:skills');
 
 const MAX_UPLOAD_SIZE = DASHBOARD_MAX_UPLOAD_SIZE; // back-compat local alias
+// How much of a tool's input a pending approval keeps. The gateway shows
+// less (session-control.js caps it after redacting); this only bounds it.
+const APPROVAL_INPUT_KEEP_CHARS = 8000;
 
 /**
  * Resolve a Gemini filename-derived session ID to the real UUID
@@ -101,6 +104,8 @@ const { normalizeTimestamp } = require('./normalize-timestamp');
  * @param {object} [extras.approvals] - shared PendingApprovals
  * @param {object} [extras.campaigns] - CampaignManager (enables /api/campaigns)
  * @param {number} [extras.approvalHoldMs] - see approvals.js
+ * @param {boolean} [extras.gatewayApprovals] - a gateway caller relays the
+ *   approvals of the sessions it drives (POLPO_GATEWAY_APPROVALS=1)
  */
 function createApiRouter(instanceManager, getAuthState, pushManager, outboxManager, getTunnelInfo, sessionController, extras) {
   const router = express.Router();
@@ -122,6 +127,7 @@ function createApiRouter(instanceManager, getAuthState, pushManager, outboxManag
   // How long a campaign approval's request is held before the permission
   // server is told to ask again. Shorter in tests.
   const approvalHoldMs = ext.approvalHoldMs || DEFAULT_HOLD_MS;
+  const gatewayApprovals = ext.gatewayApprovals === true;
 
   // Upload a file attachment from the phone
   router.post('/upload', (req, res) => {
@@ -618,9 +624,16 @@ function createApiRouter(instanceManager, getAuthState, pushManager, outboxManag
       // Show approval banner on phone
       instanceManager.setPendingApproval(instanceId, {
         tool: toolName, description, command, approvalType, questions, planFile,
+        toolUseId: typeof toolUseId === 'string' ? toolUseId : null,
+        // What the gateway shows of the input, cut short here: a Write's
+        // input is a whole file, and this is broadcast to the dashboard.
+        input: toolInput === undefined ? undefined : JSON.stringify(toolInput).slice(0, APPROVAL_INPUT_KEEP_CHARS),
       });
     }
-    const waitOpts = campaignId ? { expiresMs: null, holdMs: approvalHoldMs } : {};
+    // A gateway caller relaying approvals to you over a chat app needs
+    // longer than five minutes: its sessions wait like a campaign's.
+    const relayed = gatewayApprovals && inst && typeof inst.heldBy === 'string' && inst.heldBy.indexOf('gateway:') === 0;
+    const waitOpts = (campaignId || relayed) ? { expiresMs: null, holdMs: approvalHoldMs } : {};
     approvals.wait(instanceId, { toolUseId, toolInput, approvalType }, waitOpts)
       .then((decision) => res.json(decision));
     if (campaignId && !repoll) {

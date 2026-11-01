@@ -54,8 +54,11 @@ describe('PendingApprovals', () => {
     const settled = [];
     a.on('settled', (e) => settled.push(e));
     const old = a.wait('i1', { toolUseId: 'old', toolInput: {} }, { expiresMs: null });
+    // The route shows the new request before waiting on it.
+    im.setPendingApproval('i1', { tool: 'Bash', description: 'the new one' });
     a.wait('i1', { toolUseId: 'new', toolInput: {} }, { expiresMs: null });
     assert.equal((await old).behavior, 'deny', 'an unanswered approval is never allowed');
+    assert.equal(im.get('i1').pendingApproval.description, 'the new one', 'the banner shows the new request');
     assert.equal(settled[0].toolUseId, 'old');
     assert.equal(settled[0].meta.via, 'superseded');
     assert.equal(a.current('i1').toolUseId, 'new');
@@ -153,5 +156,55 @@ describe('Permission server with a held approval', () => {
     im.setAutoApprove('plain-1', true);
     assert.equal((await askThroughMcp('plain-1')).behavior, 'allow');
     assert.equal(campaignCalls.length, 0);
+  });
+});
+
+describe('Approvals of a session a gateway caller drives', () => {
+  let server, url, im, approvals;
+
+  async function start(gatewayApprovals) {
+    im = new InstanceManager();
+    im.register({ id: 'gw-held', name: 'driven by a PA' });
+    im.setControl('gw-held', { heldBy: 'gateway:pa', canReceivePrompts: true });
+    approvals = new PendingApprovals(im);
+    const app = express();
+    app.use(express.json());
+    app.use('/api', createApiRouter(im, () => null, null, null, () => null, null, { approvals, approvalHoldMs: 100, gatewayApprovals }));
+    await new Promise((r) => { server = app.listen(0, '127.0.0.1', r); });
+    url = 'http://127.0.0.1:' + server.address().port;
+  }
+
+  afterEach(async () => {
+    approvals.destroy();
+    await new Promise((r) => server.close(r));
+  });
+
+  function request() {
+    return fetch(url + '/api/permission-request', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ instanceId: 'gw-held', toolUseId: 'tu-1', toolName: 'Bash', toolInput: { command: 'make deploy' } }),
+    }).then((r) => r.json());
+  }
+
+  it('waits for the relayed answer instead of expiring, when the host allows relaying', async () => {
+    await start(true);
+    assert.deepEqual(await request(), { retry: true }, 'held, and asked again');
+    const shown = im.get('gw-held').pendingApproval;
+    assert.equal(shown.toolUseId, 'tu-1');
+    assert.equal(shown.input, '{"command":"make deploy"}');
+    const again = request();
+    approvals.approve('gw-held', { channel: 'gateway:pa' });
+    assert.equal((await again).behavior, 'allow');
+  });
+
+  it('expires as before otherwise', async () => {
+    await start(false);
+    let answered = false;
+    const r = request().then((d) => { answered = true; return d; });
+    await new Promise((res) => setTimeout(res, 250));
+    assert.equal(answered, false, 'no retry: an ordinary five-minute wait');
+    approvals.reject('gw-held', 'no', {});
+    assert.equal((await r).behavior, 'deny');
   });
 });
