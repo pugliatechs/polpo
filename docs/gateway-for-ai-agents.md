@@ -66,6 +66,7 @@ If the base URL you were given ends in `.trycloudflare.com`, the host is reachab
 | Delegate a multi-step *goal* (mind plans + fans out across arms) | `POST /v1/goals` → SSE on `/v1/goals/:id/stream` *(experimental, host must have `POLPO_MIND=1`)* |
 | List active goals / inspect / cancel | `GET /v1/goals`, `GET /v1/goals/:id`, `DELETE /v1/goals/:id` |
 | Get the operator's working-style profile (statistics only, no transcripts) | `GET /v1/profile` |
+| Organize a campaign for a goal the operator gives you (host must have `POLPO_GATEWAY_CAMPAIGN_CONTROL=1`) | 6d: draft it with them, write it with `POST /v1/tasks`, propose it with `POST /v1/campaigns` |
 | Find decisions a campaign waits on, to put to the operator | `GET /v1/decisions?since=<cursor>` |
 | Carry the operator's answer back (host must have `POLPO_GATEWAY_CAMPAIGN_CONTROL=1`) | `POST /v1/campaigns/:id/decisions/:decisionId` |
 
@@ -506,9 +507,49 @@ When to use:
 
 This is *advisory only*. The operator may override any inference at any time, and they always will. Treat the profile as a starting heuristic, not a contract.
 
-## 6d. Carrying campaign decisions (`/v1/decisions`, `/v1/campaigns`)
+## 6d. Campaigns (`/v1/campaigns`, `/v1/decisions`)
 
 A campaign is days of work by one coding session against milestones the operator defined. It waits on **decisions**: approving its campaign file, approving a tool call its agent wants to make. Your job is to be the operator's messenger, not their deputy.
+
+Check `GET /v1/campaigns` first: `control: false` means you can read campaigns but not propose, answer, steer or stop them. Tell the operator the host needs `POLPO_GATEWAY_CAMPAIGN_CONTROL=1`.
+
+### Starting a campaign
+
+When the operator gives you a goal and a repository ("start a campaign to do X in /path/to/repo"), you organize it. They should not have to write anything but their goal and their answers.
+
+1. **Learn the repository.** Run a `POST /v1/tasks` in it (the repository as `cwd`) asking, without changing anything, what the project does, the exact commands that run its tests or build, and which documents describe it.
+2. **Draft the campaign with the operator**, in plain words, not JSON:
+   - the **objective**, one sentence;
+   - **milestones**, 2 to 5 in order, each with an `id` (lowercase letters, digits and dashes, like `m1-parser`), a **goal**, a **gate** and an **acceptance**. The gate is the command polpo runs to test the milestone: a list of arguments run without a shell (`["npm", "test"]`, not `"npm test && ..."`). If no existing command checks a milestone, plan a small script under `tests/gates/` that does. The acceptance is what the operator checks before accepting it;
+   - **constraints** the coding agent must respect;
+   - **read_first**: the files it must read before starting;
+   - **pinned_paths**: the gate scripts and tests, so a weakened gate shows up in the record.
+
+   Ask what you need; change the draft until they say it is right.
+3. **Write it.** A `POST /v1/tasks` in the repository writes `.polpo/campaign.json`, and any gate scripts the plan needs, and changes nothing else:
+   ```json
+   {
+     "version": 1,
+     "name": "<campaign-id: lowercase, digits, dashes>",
+     "objective": "...",
+     "read_first": ["README.md"],
+     "constraints": ["..."],
+     "milestones": [
+       { "id": "m1-...", "goal": "...", "accept": "...",
+         "gate": { "run": ["npm", "test"], "timeout_s": 600 } }
+     ],
+     "pinned_paths": ["tests/gates/"]
+   }
+   ```
+   No other keys at all: polpo refuses unknown ones. `timeout_s` is optional (default 1800, at most 86400). Leave out `budgets`, `stop` and `resume_after_idle_minutes`: they are accepted but not enforced yet. If the task ends in `approval_required`, tell the operator: the host's task mode did not let it write the file.
+4. **Propose it**: `POST /v1/campaigns { "cwd": "<repository>" }`. Leave out `sessionId` to have polpo start a new session when the operator approves; pass one only if they asked to continue a session they named. The response carries the campaign and its `definition` decision.
+
+   Errors: `400 invalid_definition` with `errors` (fix the file with another task and propose again), `404 campaign_file_not_found`, `409 campaign_exists` (that name is taken: pick another name, rewrite, propose again), `400 invalid_cwd`.
+5. **Get it approved.** Put the `definition` decision to the operator as below. polpo renders the file it read, which may differ from your draft: show its text, not your summary, with the first 12 characters of `details.hash`. Nothing runs until they approve, and you never approve it for them.
+
+Then tell them the campaign is active, which milestone it is on, and that the session has been briefed. Its first step is theirs to give, through you (`prompt`, below).
+
+### Carrying decisions
 
 1. **Poll** `GET /v1/decisions?since=<cursor>` (start with no cursor, then pass back the `cursor` you got). `decisions` are new pending ones; `closed` are ones settled since your cursor (answered on the dashboard, say): tell the operator so they do not answer twice.
 2. **Ask.** Send the operator the decision's `text` as it is (plain text, under 3,500 characters, secrets already filtered) with its `options`. You may add a one-line summary, never replace the text.
