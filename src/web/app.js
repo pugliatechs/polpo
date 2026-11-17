@@ -1614,7 +1614,9 @@
   function formatMessage(m) {
     var contentType = m.contentType || 'text';
     var time = m.timestamp ? formatTime(m.timestamp) : '';
-    var timeHtml = time ? '<div class="msg-time">' + time + '</div>' : '';
+    var timeHtml = time
+      ? '<div class="msg-time" title="' + escapeAttr(new Date(m.timestamp).toLocaleString()) + '">' + escapeHtml(time) + '</div>'
+      : '';
 
     // Unified tool block (tool_use + tool_result merged)
     if (contentType === 'tool_block') {
@@ -3662,11 +3664,21 @@
     return escaped;
   }
 
-  function formatTime(ts) {
+  /**
+   * A message's time: the time alone for today, with the day for any
+   * other date, so a session read days later still says when it was.
+   * `now` is for tests.
+   */
+  function formatTime(ts, now) {
     var d = new Date(ts);
+    if (isNaN(d.getTime())) return '';
     var h = d.getHours().toString().padStart(2, '0');
     var m = d.getMinutes().toString().padStart(2, '0');
-    return h + ':' + m;
+    var today = now ? new Date(now) : new Date();
+    if (d.toDateString() === today.toDateString()) return h + ':' + m;
+    var opts = { day: 'numeric', month: 'short' };
+    if (d.getFullYear() !== today.getFullYear()) opts.year = 'numeric';
+    return d.toLocaleDateString(undefined, opts) + ' ' + h + ':' + m;
   }
 
   // ---- Past Sessions ----
