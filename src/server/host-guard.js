@@ -16,16 +16,17 @@
 //
 // The names that pass:
 //   - the loopback names (localhost, 127.0.0.1, ::1);
-//   - this machine's host name, bare and with .local (mDNS); a public DNS
-//     zone cannot hand those names to an attacker's page;
 //   - the --host bind name when it is a name, not an address;
 //   - POLPO_ALLOWED_HOSTS / --allowed-hosts (a Tailscale MagicDNS name,
-//     a reverse proxy's domain);
+//     a reverse proxy's domain, this machine's name);
 //   - the current tunnel host name, set at runtime when the tunnel comes
 //     up and replaced when it rotates.
+//
+// This machine's own name is not on the list by default: a LAN attacker
+// who spoofs mDNS or LLMNR controls what devbox.local resolves to, and
+// could rebind it to 127.0.0.1. The operator adds it if they use it.
 
 const net = require('net');
-const os = require('os');
 
 const LOOPBACK_NAMES = new Set(['localhost', '127.0.0.1', '::1']);
 // A DNS name is at most 253 characters; anything longer is not one.
@@ -98,7 +99,6 @@ function parseAllowedHosts(value) {
  * @param {object} [opts]
  * @param {string[]} [opts.allowedHosts] - extra names (already parsed)
  * @param {string} [opts.bindHost] - the --host value
- * @param {string} [opts.machineName] - defaults to os.hostname()
  */
 function createHostGuard(opts = {}) {
   const allowed = new Set(LOOPBACK_NAMES);
@@ -107,12 +107,6 @@ function createHostGuard(opts = {}) {
     if (n) allowed.add(n);
   };
 
-  const machineName = opts.machineName !== undefined ? opts.machineName : os.hostname();
-  if (machineName) {
-    add(machineName);
-    const bare = hostnameOf(String(machineName));
-    if (bare && !bare.endsWith('.local') && net.isIP(bare) === 0) add(bare + '.local');
-  }
   if (opts.bindHost && net.isIP(opts.bindHost) === 0) add(opts.bindHost);
   for (const name of opts.allowedHosts || []) add(name);
 
@@ -142,7 +136,10 @@ function createHostGuard(opts = {}) {
   // Express middleware: mounted before every route, public ones included.
   function middleware(req, res, next) {
     if (isAllowed(req.headers.host)) return next();
-    res.status(421).json({ error: 'Unexpected Host header' });
+    res.status(421).json({
+      error: 'Unexpected Host header',
+      hint: 'Open polpo by IP address or localhost, or start it with --allowed-hosts <name> (POLPO_ALLOWED_HOSTS).',
+    });
   }
 
   // The same rule for the WebSocket upgrade, run before the upgrade is

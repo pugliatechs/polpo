@@ -188,13 +188,12 @@ Prefer the VPN address over `--host 0.0.0.0`: `0.0.0.0` listens on every network
 ### What Polpo Refuses
 
 - **No auth on a network address.** By default polpo listens on `127.0.0.1` only. With `--host` set to a LAN, VPN or wildcard address it refuses to start without `--auth`, because anyone who reaches the port could create a session, turn on auto-approve and run commands. `--auth none` starts it anyway, with a warning.
-- **Unknown host names (DNS rebinding).** A malicious page can make its own domain resolve to `127.0.0.1` or to your LAN address, so the browser treats polpo as the same origin as the page. Polpo answers `421` to any `Host` header that is not a loopback name, an IP address, this machine's name (bare or `.local`), the `--host` name, a name in `--allowed-hosts` / `POLPO_ALLOWED_HOSTS`, or the current tunnel's name. This applies to every route and to the WebSocket upgrade.
+- **Unknown host names (DNS rebinding).** A malicious page can make its own domain resolve to `127.0.0.1` or to your LAN address, so the browser treats polpo as the same origin as the page. Polpo answers `421` to any `Host` header that is not a loopback name, an IP address, the `--host` name, a name in `--allowed-hosts` / `POLPO_ALLOWED_HOSTS`, or the current tunnel's name. This applies to every route and to the WebSocket upgrade. Opening polpo by this machine's name (`mybox` or `mybox.local`) needs that name in `--allowed-hosts`: on a shared network, mDNS and LLMNR answers can be spoofed.
 - **Cross-origin requests.** Origin header validation on WebSocket and API connections: a page on another origin is refused even when it targets an IP address directly.
-- **`--trust-localhost` with `--tunnel ssh`.** The ssh tunnel is a raw TCP forward, so its traffic arrives from `127.0.0.1` and would skip auth.
 
 ### `--trust-localhost`
 
-`--trust-localhost` lets a browser on this machine open the dashboard at `http://localhost:7890` without logging in, while tunnel and network clients still authenticate. A request counts as local only when it comes from a loopback address, carries no `X-Forwarded-For`, and names a loopback host (`localhost`, `127.0.0.1`, `[::1]`).
+`--trust-localhost` lets a browser on this machine open the dashboard at `http://localhost:7890` without logging in, while tunnel and network clients still authenticate. A request counts as local only when it comes from a loopback address, carries no `X-Forwarded-For`, and names a loopback host (`localhost`, `127.0.0.1`, `[::1]`). Tunnel traffic never counts: every tunnel provider connects to a separate loopback listener whose connections always have to authenticate, whether or not the provider adds `X-Forwarded-For` (ssh and localtunnel forward raw bytes).
 
 It trusts **every program and every account on this machine**: a script, a container with host networking or another user can drive your agents without auth. Use it only on a single-user machine you control.
 

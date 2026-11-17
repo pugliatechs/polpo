@@ -56,8 +56,8 @@ function printHelp() {
                     address needs --auth; polpo refuses to start without it.
     --allowed-hosts <names>  Extra host names the dashboard may be opened
                     under, comma-separated (a Tailscale MagicDNS name, a
-                    reverse proxy's domain). Loopback names, IP addresses,
-                    this machine's name and the tunnel's name always pass.
+                    reverse proxy's domain, this machine's name). Loopback
+                    names, IP addresses and the tunnel's name always pass.
                     Env: POLPO_ALLOWED_HOSTS.
     --tunnel [provider]  Start a tunnel for remote phone access
                          Providers: cloudflared, localtunnel, ngrok, ssh
@@ -74,8 +74,8 @@ function printHelp() {
     --trust-localhost  Skip auth for localhost connections (desktop browser)
                        Tunnel/remote connections still require full auth.
                        Trusts every program and account on this machine.
-                       Refused with --tunnel ssh, whose traffic arrives
-                       from localhost.
+                       Never applies to tunnel traffic, which reaches polpo
+                       on a listener of its own.
     --verbose       Enable verbose logging
     --gateway       Also expose the programmatic /v1 gateway API for
                     external callers. Uses a separate POLPO_GATEWAY_KEY
@@ -192,13 +192,6 @@ async function runServer() {
   // Generate token if auth is enabled and none was provided
   if (authMode && authMode !== 'none' && !token) {
     token = generateToken();
-  }
-
-  // The ssh provider is a raw TCP forward (ssh -R): its requests reach
-  // polpo from 127.0.0.1 with no X-Forwarded-For, so --trust-localhost
-  // would let the whole tunnel in without auth.
-  if (flags['trust-localhost'] && useTunnel && flags.tunnel === 'ssh') {
-    throw new Error('--trust-localhost cannot be used with --tunnel ssh: the tunnel\'s traffic arrives from localhost and would skip auth.');
   }
 
   const { parseAllowedHosts, isLoopbackHost } = require('../src/server/host-guard');
@@ -323,11 +316,15 @@ async function runServer() {
       // line. Only the startup banner is printed plain.
       const tunnelLog = require('../src/util/logger').makeLogger('tunnel');
 
+      // The tunnel dials a listener of its own, which never counts as
+      // localhost, so --trust-localhost cannot let tunnel traffic in.
+      const tunnelPort = await server.openTunnelListener();
+
       const supervisor = new TunnelSupervisor({
         startTunnel,
         tunnelOpts: {
           provider: flags.tunnel,
-          port,
+          port: tunnelPort,
           tunnelHost: flags['tunnel-host'],
           tunnelPort: flags['tunnel-port'] ? parseInt(flags['tunnel-port']) : undefined,
         },

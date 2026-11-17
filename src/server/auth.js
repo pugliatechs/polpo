@@ -256,11 +256,15 @@ function saveTotpSecret(configPath, secret) {
  * reaches the same socket address under its own name, and must not count
  * as the user at the desk.
  *
- * This trusts every program and account on the machine, by design. It
- * cannot tell a raw TCP forward apart either (ssh -R): that is why
- * --trust-localhost is refused with the ssh tunnel.
+ * A connection on the tunnel listener (index.js, openTunnelListener) is
+ * never local, whatever headers it carries: a tunnel provider dials from
+ * 127.0.0.1, and not every one adds X-Forwarded-For (ssh -R and the
+ * localtunnel client forward raw bytes).
+ *
+ * This trusts every program and account on the machine, by design.
  */
 function isLocalhost(req) {
+  if (req.socket && req.socket.polpoTunnel) return false;
   // If a proxy set X-Forwarded-For, the real client is remote
   if (req.headers['x-forwarded-for']) return false;
   if (!isLoopbackHost(req.headers.host)) return false;

@@ -799,6 +799,10 @@ describe('isLocalhost', () => {
     assert.equal(isLocalhost({ ip: '127.0.0.1', headers: { host: 'localhost.attacker.example' }, socket: {} }), false);
   });
 
+  it('returns false for a connection on the tunnel listener, even with a loopback Host and no X-Forwarded-For', () => {
+    assert.equal(isLocalhost({ ip: '127.0.0.1', headers: { host: 'localhost:7890' }, socket: { polpoTunnel: true } }), false);
+  });
+
   it('returns false for a loopback socket addressed by a LAN address or with no Host', () => {
     assert.equal(isLocalhost({ ip: '127.0.0.1', headers: { host: '192.168.1.20:7890' }, socket: {} }), false);
     assert.equal(isLocalhost({ ip: '127.0.0.1', headers: {}, socket: {} }), false);

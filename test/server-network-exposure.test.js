@@ -152,6 +152,24 @@ describe('--trust-localhost under DNS rebinding', () => {
     assert.equal((await request(port, { path: '/api/instances', host: `192.168.1.20:${port}` })).status, 401);
   });
 
+  it('never trusts tunnel traffic, even when the provider adds no X-Forwarded-For (ssh -R, localtunnel)', async () => {
+    const tunnelPort = await srv.openTunnelListener();
+    assert.notEqual(tunnelPort, port);
+    assert.equal(await srv.openTunnelListener(), tunnelPort);
+    // Exactly what a raw forward delivers: a loopback socket, Host localhost, no proxy header.
+    assert.equal((await request(tunnelPort, { path: '/api/instances', host: `localhost:${tunnelPort}` })).status, 401);
+    const ws = await new Promise((resolve) => {
+      const c = new WebSocket(`ws://127.0.0.1:${tunnelPort}/?role=dashboard`, { headers: { Host: `localhost:${tunnelPort}` } });
+      c.on('close', (code) => resolve(code));
+      c.on('error', () => {});
+    });
+    assert.equal(ws, 4001);
+    // The tunnel listener still serves the app for an authenticated caller.
+    assert.equal((await request(tunnelPort, { path: '/api/instances', host: `localhost:${tunnelPort}`, headers: { authorization: 'Bearer secret-token' } })).status, 200);
+    // The main port still trusts the desktop browser.
+    assert.equal((await request(port, { path: '/api/instances', host: `localhost:${port}` })).status, 200);
+  });
+
   it('gives a rebinding page neither the API nor the WebSocket', async () => {
     assert.equal((await request(port, { path: '/api/instances', host: `rebind.attacker.example:${port}` })).status, 421);
     assert.equal(await upgrade(port, { Host: `rebind.attacker.example:${port}` }), 421);
@@ -231,12 +249,6 @@ describe('polpo server command line', () => {
     env: { ...process.env, HOME: sandboxHome },
     encoding: 'utf8',
     timeout: 15000,
-  });
-
-  it('refuses --trust-localhost with the ssh tunnel', () => {
-    const res = run('--tunnel', 'ssh', '--tunnel-host', 'user@example.invalid', '--trust-localhost');
-    assert.equal(res.status, 1);
-    assert.match(res.stderr, /--trust-localhost cannot be used with --tunnel ssh/);
   });
 
   it('refuses a network address without --auth', () => {

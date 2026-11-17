@@ -58,12 +58,14 @@ function setupWebSocket(server, instanceManager, getAuthState, pushManager, outb
     },
   });
   // Further listeners for the same app (index.js: loopback beside a LAN
-  // address). handleUpgrade runs verifyClient as well.
-  for (const extra of opts.extraServers || []) {
+  // address, the tunnel listener). handleUpgrade runs verifyClient as well.
+  function attachServer(extra) {
     extra.on('upgrade', (req, socket, head) => {
       wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
     });
   }
+  for (const extra of opts.extraServers || []) attachServer(extra);
+  wss.attachServer = attachServer;
 
   // Track mobile/browser clients
   const dashboardClients = new Set();

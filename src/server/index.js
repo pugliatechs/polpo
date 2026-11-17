@@ -56,6 +56,17 @@ function rateLimit(windowMs, max) {
 }
 
 const DEFAULT_HOST = '127.0.0.1';
+
+function listenOn(srv, port, host) {
+  return new Promise((resolve, reject) => {
+    const onError = (err) => reject(err);
+    srv.once('error', onError);
+    srv.listen(port, host, () => {
+      srv.removeListener('error', onError);
+      resolve(srv.address());
+    });
+  });
+}
 // Addresses that already cover loopback when polpo listens on them.
 const WILDCARD_HOSTS = new Set(['0.0.0.0', '::']);
 
@@ -98,6 +109,8 @@ function createServer(options = {}) {
   // --host names one LAN or VPN address, that address does not cover
   // loopback, so the same app also listens there.
   const loopbackServer = needsLoopbackListener(host) ? http.createServer(app) : null;
+  // Opened on demand by openTunnelListener().
+  let tunnelListener = null;
   const instanceManager = new InstanceManager();
 
   // DNS rebinding: refuse a Host header polpo does not expect, before any
@@ -428,18 +441,10 @@ function createServer(options = {}) {
 
   return {
     start() {
-      const listen = (srv, p, h) => new Promise((resolve, reject) => {
-        const onError = (err) => reject(err);
-        srv.once('error', onError);
-        srv.listen(p, h, () => {
-          srv.removeListener('error', onError);
-          resolve(srv.address());
-        });
-      });
-      return listen(server, port, host).then(async (addr) => {
+      return listenOn(server, port, host).then(async (addr) => {
         if (loopbackServer) {
           try {
-            await listen(loopbackServer, addr.port, '127.0.0.1');
+            await listenOn(loopbackServer, addr.port, '127.0.0.1');
           } catch (err) {
             server.close();
             throw new Error(`Listening on ${host} worked, but 127.0.0.1:${addr.port} did not (${err.message}). Polpo's own sessions connect there.`);
@@ -474,8 +479,24 @@ function createServer(options = {}) {
         }
         wss.close();
         if (loopbackServer) loopbackServer.close();
+        if (tunnelListener) tunnelListener.close();
         server.close(resolve);
       });
+    },
+    /**
+     * A loopback listener on a free port, for the tunnel provider to dial.
+     * Every connection on it is marked as coming through the tunnel, so
+     * --trust-localhost never applies to it, whether or not the provider
+     * adds X-Forwarded-For. Returns the port; a second call reuses it.
+     */
+    async openTunnelListener() {
+      if (tunnelListener) return tunnelListener.address().port;
+      const srv = http.createServer(app);
+      srv.on('connection', (socket) => { socket.polpoTunnel = true; });
+      wss.attachServer(srv);
+      await listenOn(srv, 0, '127.0.0.1');
+      tunnelListener = srv;
+      return srv.address().port;
     },
     setAuth({ token, mode, totpSecret, trustLocalhost }) {
       if (token !== undefined) {

@@ -42,8 +42,9 @@ Every HTTP route and the WebSocket upgrade first pass the `Host` allow-list (`sr
 These are deliberate. Each says what an operator accepts by choosing it.
 
 - **Loopback is the default.** Polpo listens on `127.0.0.1` unless `--host` says otherwise. Every program and account on the host can reach it there, so auth matters on loopback too, except with `--trust-localhost`.
-- **`--trust-localhost` trusts the whole host.** A request from a loopback address, with no `X-Forwarded-For` and a loopback `Host`, skips auth. Any local program or account gets full control. It is refused with `--tunnel ssh`, whose raw TCP forward makes internet traffic look local.
+- **`--trust-localhost` trusts the whole host.** A request from a loopback address, with no `X-Forwarded-For` and a loopback `Host`, skips auth. Any local program or account gets full control. Tunnel traffic is never local: every provider dials a separate loopback listener whose connections always authenticate, so a provider that adds no `X-Forwarded-For` (ssh, localtunnel) cannot slip in.
 - **`--auth none` on a network address trusts the whole network.** It is refused unless asked for by name, and polpo prints a warning when it is.
+- **This machine's name does not pass the `Host` check by default.** A LAN attacker who spoofs mDNS or LLMNR controls what `mybox.local` resolves to. An operator who opens polpo by name lists it in `--allowed-hosts`.
 - **IP addresses pass the `Host` check.** A page cannot make the browser send `Host: <ip>` except by calling that address directly, and the Origin check refuses that request.
 - **The tunnel's name passes while it is current.** A rotated quick-tunnel name stops passing as soon as a new one replaces it.
 - **Two tokens, one for links and one for agents.** The login token goes in the QR code and phone links, where it can leak (browser history, screenshots, the tunnel provider, which terminates TLS). It only opens the dashboard page, once, and with PIN or TOTP on it leads only to that step. The agent token opens the API and the WebSocket, is never put in a link, and is refused in a URL.
@@ -59,7 +60,7 @@ Open items, so a reviewer does not rediscover them as new:
 
 ## Checks
 
-- `npm test` covers the defences above: `test/host-guard.test.js`, `test/server-network-exposure.test.js` (a real server: bind default, startup refusals, `Host` and Origin checks on HTTP and WebSocket, the tunnel name, `--trust-localhost`), `test/auth.test.js` (including the separation of the login token from the agent token).
+- `npm test` covers the defences above: `test/host-guard.test.js`, `test/server-network-exposure.test.js` (a real server: bind default, startup refusals, `Host` and Origin checks on HTTP and WebSocket, the tunnel name, the tunnel listener, `--trust-localhost`), `test/auth.test.js` (including the separation of the login token from the agent token).
 - CI runs `npm audit` on the runtime dependencies and fails on a critical advisory. Dependabot proposes dependency and GitHub Actions updates every week.
 - CodeQL scans the JavaScript on every push and pull request to `main`, and weekly.
 - Before each minor release, read this page against the code: every entry point, every default, every trust assumption. A review of each change does not catch a wrong default that was there before it.

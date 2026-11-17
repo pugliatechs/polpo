@@ -4,8 +4,7 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { createHostGuard, hostnameOf, isLoopbackHost, parseAllowedHosts } = require('../src/server/host-guard');
 
-// A fixed machine name keeps the tests independent of the host running them.
-const guard = (opts = {}) => createHostGuard({ machineName: 'devbox', ...opts });
+const guard = (opts = {}) => createHostGuard(opts);
 
 describe('hostnameOf', () => {
   it('strips the port, the IPv6 brackets and a trailing dot', () => {
@@ -59,11 +58,15 @@ describe('createHostGuard', () => {
     assert.equal(g.isAllowed('[::1'), false);
   });
 
-  it("lets this machine's name through, bare and with .local", () => {
+  it("refuses this machine's name unless the operator lists it (mDNS and LLMNR can be spoofed)", () => {
+    const os = require('os');
+    const name = os.hostname().toLowerCase();
     const g = guard();
-    assert.equal(g.isAllowed('devbox:7890'), true);
-    assert.equal(g.isAllowed('devbox.local:7890'), true);
-    assert.equal(g.isAllowed('devbox.attacker.example'), false);
+    assert.equal(g.isAllowed(`${name}:7890`), false);
+    assert.equal(g.isAllowed(`${name}.local:7890`), false);
+    const listed = guard({ allowedHosts: [name, `${name}.local`] });
+    assert.equal(listed.isAllowed(`${name}:7890`), true);
+    assert.equal(listed.isAllowed(`${name}.local:7890`), true);
   });
 
   it('lets a --host name and the configured names through', () => {
