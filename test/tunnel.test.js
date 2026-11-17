@@ -1,6 +1,15 @@
 const { describe, it, beforeEach, mock } = require('node:test');
 const assert = require('node:assert/strict');
 
+function hasSsh() {
+  try {
+    return require('child_process').spawnSync('ssh', ['-V'], { encoding: 'utf8' }).status === 0;
+  } catch {
+    return false;
+  }
+}
+
+
 // We test tunnel/index.js by mocking the provider modules.
 // Each provider must expose: name, isAvailable(), start(port, opts)
 
@@ -182,6 +191,19 @@ describe('tunnel providers — isAvailable()', () => {
     assert.equal(ssh.name, 'ssh');
     assert.equal(typeof ssh.isAvailable, 'function');
     assert.equal(typeof ssh.start, 'function');
+  });
+
+  it('ssh builds a command line the real ssh accepts', { skip: !hasSsh() && 'ssh is not installed' }, () => {
+    const { buildArgs } = require('../src/tunnel/ssh');
+    const args = buildArgs(39385, 'user@example.invalid', 80);
+    assert.equal(args[args.length - 1], 'user@example.invalid');
+    // -G resolves and prints the configuration without connecting anywhere.
+    const res = require('child_process').spawnSync('ssh', ['-G', ...args], { encoding: 'utf8', timeout: 10000 });
+    assert.equal(res.status, 0, res.stderr);
+    assert.match(res.stdout, /^serveralivecountmax 3$/m);
+    assert.match(res.stdout, /^serveraliveinterval 30$/m);
+    assert.match(res.stdout, /^exitonforwardfailure yes$/m);
+    assert.match(res.stdout, /^remoteforward 80 \[localhost\]:39385$/m);
   });
 });
 

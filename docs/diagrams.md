@@ -9,11 +9,11 @@ sequenceDiagram
     participant Phone as Phone
 
     Term->>Hub: polpo server --tunnel --auth pin
-    Hub->>Hub: Generate token + PIN
-    Hub->>Term: Print QR code (URL with token baked in)
+    Hub->>Hub: Generate agent token, login token + PIN
+    Hub->>Term: Print QR code (URL with the login token)
     Term->>Term: Display PIN: 4821
-    Phone->>Hub: Scan QR → GET /?token=abc123
-    Hub->>Hub: Burn token (single-use)
+    Phone->>Hub: Scan QR → GET /?token=<login token>
+    Hub->>Hub: Burn login token (single-use, page only)
     Hub->>Phone: Redirect to /auth.html?mode=pin
     Phone->>Hub: POST /api/auth/verify-pin {code: "4821"}
     Hub->>Phone: Set session cookie → dashboard

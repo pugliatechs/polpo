@@ -4,6 +4,7 @@ const {
   AuthState,
   generateToken,
   extractToken,
+  extractLoginToken,
   createSession,
   extractSessionId,
   validateSession,
@@ -99,17 +100,17 @@ describe('extractToken', () => {
     assert.equal(extractToken(req), 'mytoken123');
   });
 
-  it('extracts from query param', () => {
+  it('ignores a token in the query string: a URL ends up in logs and history', () => {
     const req = mockReq({ url: '/page?token=qparam&other=1' });
-    assert.equal(extractToken(req), 'qparam');
+    assert.equal(extractToken(req), null);
   });
 
-  it('extracts from cookie', () => {
+  it('ignores a polpo_token cookie', () => {
     const req = mockReq({ headers: { cookie: 'other=1; polpo_token=cookieval; more=2' } });
-    assert.equal(extractToken(req), 'cookieval');
+    assert.equal(extractToken(req), null);
   });
 
-  it('prioritizes header over query over cookie', () => {
+  it('takes the header even when a query token is present', () => {
     const req = mockReq({
       headers: { authorization: 'Bearer header', cookie: 'polpo_token=cookie' },
       url: '/?token=query',
@@ -120,6 +121,70 @@ describe('extractToken', () => {
   it('returns null when nothing found', () => {
     const req = mockReq();
     assert.equal(extractToken(req), null);
+  });
+});
+
+describe('extractLoginToken', () => {
+  it('reads the token of a QR or phone link from the query string', () => {
+    assert.equal(extractLoginToken(mockReq({ url: '/?token=abc&x=1' })), 'abc');
+  });
+
+  it('ignores the Authorization header and an empty value', () => {
+    assert.equal(extractLoginToken(mockReq({ headers: { authorization: 'Bearer abc' } })), null);
+    assert.equal(extractLoginToken(mockReq({ url: '/?token=' })), null);
+  });
+});
+
+describe('login token and agent token are separate', () => {
+  it('an AuthState with an agent token gets a different, random login token', () => {
+    const a = new AuthState({ token: 'tok' });
+    const b = new AuthState({ token: 'tok' });
+    assert.ok(a.loginToken);
+    assert.notEqual(a.loginToken, 'tok');
+    assert.notEqual(a.loginToken, b.loginToken);
+    assert.equal(new AuthState().loginToken, null);
+  });
+
+  it('the agent token in a link does not open the dashboard page', () => {
+    const state = new AuthState({ token: 'agent-tok', loginToken: 'login-tok' });
+    const mw = createStaticAuthMiddleware(() => state);
+    const res = mockRes();
+    let nextCalled = false;
+    mw(mockReq({ url: '/?token=agent-tok', path: '/' }), res, () => { nextCalled = true; });
+    assert.equal(nextCalled, false);
+    assert.equal(state.tokenBurned, false);
+  });
+
+  it('the login token opens neither the API nor the WebSocket, before or after its burn', () => {
+    for (const mode of [null, 'pin', 'paranoid']) {
+      const state = new AuthState({ token: 'agent-tok', loginToken: 'login-tok', mode });
+      const api = createAuthMiddleware(() => state);
+      for (const burned of [false, true]) {
+        if (burned) burnToken(state);
+        for (const req of [
+          mockReq({ url: '/api/instances?token=login-tok', path: '/api/instances' }),
+          mockReq({ headers: { authorization: 'Bearer login-tok' } }),
+        ]) {
+          const res = mockRes();
+          let nextCalled = false;
+          api(req, res, () => { nextCalled = true; });
+          assert.equal(nextCalled, false, `mode=${mode} burned=${burned}`);
+          assert.equal(res.statusCode, 401);
+          assert.equal(validateWsAuth(state, req), false);
+        }
+      }
+    }
+  });
+
+  it('the agent token in the query string opens neither the API nor the WebSocket', () => {
+    const state = new AuthState({ token: 'agent-tok', mode: 'paranoid' });
+    const api = createAuthMiddleware(() => state);
+    const req = mockReq({ url: '/api/instances?token=agent-tok', path: '/api/instances' });
+    const res = mockRes();
+    let nextCalled = false;
+    api(req, res, () => { nextCalled = true; });
+    assert.equal(nextCalled, false);
+    assert.equal(validateWsAuth(state, mockReq({ url: '/?role=agent&token=agent-tok' })), false);
   });
 });
 
@@ -337,7 +402,7 @@ describe('createStaticAuthMiddleware', () => {
   });
 
   it('burns token and creates session (no MFA)', (_, done) => {
-    const state = new AuthState({ token: 'tok' });
+    const state = new AuthState({ token: 'agent-tok', loginToken: 'tok' });
     const mw = createStaticAuthMiddleware(() => state);
     const req = mockReq({ url: '/?token=tok', path: '/' });
     const res = mockRes();
@@ -385,7 +450,7 @@ describe('createStaticAuthMiddleware', () => {
   });
 
   it('redirects to auth page for MFA after burn', () => {
-    const state = new AuthState({ token: 'tok', mode: 'pin' });
+    const state = new AuthState({ token: 'agent-tok', loginToken: 'tok', mode: 'pin' });
     const mw = createStaticAuthMiddleware(() => state);
     const req = mockReq({ url: '/?token=tok', path: '/' });
     const res = mockRes();
@@ -410,7 +475,7 @@ describe('createStaticAuthMiddleware', () => {
   });
 
   it('redirects on burned token second use and un-burns for re-scan', () => {
-    const state = new AuthState({ token: 'tok' });
+    const state = new AuthState({ token: 'agent-tok', loginToken: 'tok' });
     const mw = createStaticAuthMiddleware(() => state);
     // First use: burns token, creates session
     const req1 = mockReq({ url: '/?token=tok', path: '/' });
@@ -431,7 +496,7 @@ describe('createStaticAuthMiddleware', () => {
   });
 
   it('allows access with session cookie after token burn', (_, done) => {
-    const state = new AuthState({ token: 'tok' });
+    const state = new AuthState({ token: 'agent-tok', loginToken: 'tok' });
     const mw = createStaticAuthMiddleware(() => state);
     // Burn the token first
     const req1 = mockReq({ url: '/?token=tok', path: '/' });
@@ -487,10 +552,16 @@ describe('validateWsAuth', () => {
     assert.equal(validateWsAuth(state, req), true);
   });
 
-  it('passes with valid agent token in query', () => {
+  it('passes with the agent token as a Bearer header', () => {
+    const state = new AuthState({ token: 'tok' });
+    const req = mockReq({ url: '/?role=agent', headers: { authorization: 'Bearer tok' } });
+    assert.equal(validateWsAuth(state, req), true);
+  });
+
+  it('refuses the agent token in the query string', () => {
     const state = new AuthState({ token: 'tok' });
     const req = mockReq({ url: '/?role=agent&token=tok' });
-    assert.equal(validateWsAuth(state, req), true);
+    assert.equal(validateWsAuth(state, req), false);
   });
 
   it('rejects with no credentials', () => {
@@ -509,7 +580,7 @@ describe('validateWsAuth', () => {
 
 describe('full auth flow: token → burn → PIN → session', () => {
   it('complete PIN flow produces valid session', () => {
-    const state = new AuthState({ token: 'tok', mode: 'pin' });
+    const state = new AuthState({ token: 'agent-tok', loginToken: 'tok', mode: 'pin' });
     state.pin = '9876';
 
     // Step 1: static middleware burns token, redirects to PIN page
@@ -543,7 +614,7 @@ describe('full auth flow: token → burn → PIN → session', () => {
 
   it('complete TOTP flow produces valid session', () => {
     const secret = generateTotpSecret();
-    const state = new AuthState({ token: 'tok', mode: 'paranoid', totpSecret: secret });
+    const state = new AuthState({ token: 'agent-tok', loginToken: 'tok', mode: 'paranoid', totpSecret: secret });
 
     // Step 1: burn token
     const staticMw = createStaticAuthMiddleware(() => state);
@@ -697,15 +768,15 @@ describe('timingSafeEqual', () => {
 
 describe('isLocalhost', () => {
   it('returns true for 127.0.0.1', () => {
-    assert.equal(isLocalhost({ ip: '127.0.0.1', headers: {}, socket: {} }), true);
+    assert.equal(isLocalhost({ ip: '127.0.0.1', headers: { host: 'localhost:7890' }, socket: {} }), true);
   });
 
   it('returns true for ::1', () => {
-    assert.equal(isLocalhost({ ip: '::1', headers: {}, socket: {} }), true);
+    assert.equal(isLocalhost({ ip: '::1', headers: { host: '[::1]:7890' }, socket: {} }), true);
   });
 
   it('returns true for ::ffff:127.0.0.1', () => {
-    assert.equal(isLocalhost({ ip: '::ffff:127.0.0.1', headers: {}, socket: {} }), true);
+    assert.equal(isLocalhost({ ip: '::ffff:127.0.0.1', headers: { host: '127.0.0.1:7890' }, socket: {} }), true);
   });
 
   it('returns false for external IPs', () => {
@@ -714,13 +785,27 @@ describe('isLocalhost', () => {
   });
 
   it('falls back to socket.remoteAddress', () => {
-    assert.equal(isLocalhost({ headers: {}, socket: { remoteAddress: '127.0.0.1' } }), true);
+    assert.equal(isLocalhost({ headers: { host: 'localhost' }, socket: { remoteAddress: '127.0.0.1' } }), true);
     assert.equal(isLocalhost({ headers: {}, socket: { remoteAddress: '10.0.0.1' } }), false);
   });
 
   it('returns false when X-Forwarded-For is set (tunnel/proxy)', () => {
     assert.equal(isLocalhost({ ip: '127.0.0.1', headers: { 'x-forwarded-for': '203.0.113.50' }, socket: {} }), false);
     assert.equal(isLocalhost({ ip: '::1', headers: { 'x-forwarded-for': '10.0.0.1' }, socket: {} }), false);
+  });
+
+  it('returns false for a loopback socket under a name that is not loopback (DNS rebinding)', () => {
+    assert.equal(isLocalhost({ ip: '127.0.0.1', headers: { host: 'rebind.attacker.example:7890' }, socket: {} }), false);
+    assert.equal(isLocalhost({ ip: '127.0.0.1', headers: { host: 'localhost.attacker.example' }, socket: {} }), false);
+  });
+
+  it('returns false for a connection on the tunnel listener, even with a loopback Host and no X-Forwarded-For', () => {
+    assert.equal(isLocalhost({ ip: '127.0.0.1', headers: { host: 'localhost:7890' }, socket: { polpoTunnel: true } }), false);
+  });
+
+  it('returns false for a loopback socket addressed by a LAN address or with no Host', () => {
+    assert.equal(isLocalhost({ ip: '127.0.0.1', headers: { host: '192.168.1.20:7890' }, socket: {} }), false);
+    assert.equal(isLocalhost({ ip: '127.0.0.1', headers: {}, socket: {} }), false);
   });
 });
 
@@ -730,7 +815,7 @@ describe('trustLocalhost', () => {
   it('auth middleware allows localhost when trustLocalhost is true', () => {
     const state = new AuthState({ token: generateToken(), trustLocalhost: true });
     const mw = createAuthMiddleware(() => state);
-    const req = mockReq({ ip: '127.0.0.1' });
+    const req = mockReq({ ip: '127.0.0.1', headers: { host: 'localhost:7890' } });
     const res = mockRes();
     let called = false;
     mw(req, res, () => { called = true; });
@@ -740,7 +825,7 @@ describe('trustLocalhost', () => {
   it('auth middleware blocks localhost when trustLocalhost is false', () => {
     const state = new AuthState({ token: generateToken(), trustLocalhost: false });
     const mw = createAuthMiddleware(() => state);
-    const req = mockReq({ ip: '127.0.0.1' });
+    const req = mockReq({ ip: '127.0.0.1', headers: { host: 'localhost:7890' } });
     const res = mockRes();
     let called = false;
     mw(req, res, () => { called = true; });
@@ -761,13 +846,30 @@ describe('trustLocalhost', () => {
 
   it('validateWsAuth allows localhost WebSocket when trustLocalhost is true', () => {
     const state = new AuthState({ token: generateToken(), trustLocalhost: true });
-    const req = mockReq({ ip: '::1' });
+    const req = mockReq({ ip: '::1', headers: { host: '[::1]:7890' } });
     assert.equal(validateWsAuth(state, req), true);
+  });
+
+  it('auth middleware asks a rebinding page on a loopback socket to log in', () => {
+    const state = new AuthState({ token: generateToken(), trustLocalhost: true });
+    const mw = createAuthMiddleware(() => state);
+    const req = mockReq({ ip: '127.0.0.1', headers: { host: 'rebind.attacker.example:7890' } });
+    const res = mockRes();
+    let called = false;
+    mw(req, res, () => { called = true; });
+    assert.equal(called, false);
+    assert.equal(res.statusCode, 401);
+  });
+
+  it('validateWsAuth refuses a rebinding page on a loopback socket', () => {
+    const state = new AuthState({ token: generateToken(), trustLocalhost: true });
+    const req = mockReq({ ip: '127.0.0.1', headers: { host: 'rebind.attacker.example:7890' } });
+    assert.equal(validateWsAuth(state, req), false);
   });
 
   it('validateWsAuth blocks localhost WebSocket when trustLocalhost is false', () => {
     const state = new AuthState({ token: generateToken(), trustLocalhost: false });
-    const req = mockReq({ ip: '::1' });
+    const req = mockReq({ ip: '::1', headers: { host: '[::1]:7890' } });
     assert.equal(validateWsAuth(state, req), false);
   });
 });

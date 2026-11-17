@@ -45,6 +45,16 @@ polpo gateway                # alias for the above (forward-compat, may go headl
 
 The `--gateway` flag is purely additive — every other flag (`--tunnel`, `--auth=paranoid`, `--trust-localhost`, etc.) works alongside it.
 
+### Callers on another machine
+
+Polpo listens on `127.0.0.1` by default, so a caller on another machine needs `--host` with the address it connects to, for example the host's VPN address:
+
+```bash
+polpo server --gateway --host 100.64.0.5 --auth paranoid
+```
+
+`--auth` is required there even though `/v1` has its own key: the dashboard shares the port, and polpo refuses to open it on a network address without authentication. A caller that connects by name rather than by IP (`pc-laptop.vpn` in the fan-out example below) needs that name in `--allowed-hosts` or `POLPO_ALLOWED_HOSTS`; any other name gets `421`, the DNS rebinding defence described in the README's Security section.
+
 ## Authentication
 
 `/v1/*` always requires:

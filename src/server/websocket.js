@@ -18,12 +18,58 @@ const { SessionController, transcriptActivity, readTranscriptTail } = require('.
 // larger is not a real count and is dropped.
 const MAX_BACKGROUND_TASKS = 1000;
 
-function setupWebSocket(server, instanceManager, getAuthState, pushManager, outboxManager, sessionController) {
+/**
+ * Decide on an upgrade before it is accepted.
+ *
+ * Host first: a DNS rebinding page sends a Host polpo does not expect
+ * (see host-guard.js). Then Origin: browsers always send it on a
+ * WebSocket upgrade, and a page at https://evil.com opening
+ * ws://localhost:7890 has an Origin that does not match the Host.
+ * Non-browser clients (agents) send no Origin and pass this step.
+ * Authentication runs afterwards, on the accepted connection, so the
+ * close codes the clients know (4001) stay as they are.
+ */
+function checkUpgrade(req, hostGuard) {
+  if (hostGuard && !hostGuard.allowsUpgrade(req)) {
+    return { ok: false, code: 421, message: 'Unexpected Host header' };
+  }
+  const origin = req.headers['origin'];
+  if (origin) {
+    let originHost;
+    try {
+      originHost = new URL(origin).host;
+    } catch {
+      return { ok: false, code: 403, message: 'Invalid origin' };
+    }
+    if (originHost !== req.headers['host']) {
+      return { ok: false, code: 403, message: 'Origin not allowed' };
+    }
+  }
+  return { ok: true };
+}
+
+function setupWebSocket(server, instanceManager, getAuthState, pushManager, outboxManager, sessionController, opts = {}) {
   // Prompts from the dashboard go through the same controller as the
   // HTTP API and the gateway; index.js passes the shared instance.
   const controller = sessionController || new SessionController({ instanceManager, outboxManager, getAuthState });
 
-  const wss = new WebSocket.Server({ server });
+  const wss = new WebSocket.Server({
+    server,
+    verifyClient: (info, done) => {
+      const verdict = checkUpgrade(info.req, opts.hostGuard);
+      if (verdict.ok) done(true);
+      else done(false, verdict.code, verdict.message);
+    },
+  });
+  // Further listeners for the same app (index.js: loopback beside a LAN
+  // address, the tunnel listener). handleUpgrade runs verifyClient as well.
+  function attachServer(extra) {
+    extra.on('upgrade', (req, socket, head) => {
+      wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+    });
+  }
+  for (const extra of opts.extraServers || []) attachServer(extra);
+  wss.attachServer = attachServer;
 
   // Track mobile/browser clients
   const dashboardClients = new Set();
@@ -461,26 +507,7 @@ function setupWebSocket(server, instanceManager, getAuthState, pushManager, outb
   gooseScanner.start();
 
   wss.on('connection', (ws, req) => {
-    // CSRF protection: validate Origin header for browser connections.
-    // Browsers always send Origin on WebSocket upgrades. A malicious page
-    // at https://evil.com opening ws://localhost:7890 will have Origin
-    // "https://evil.com" which won't match Host "localhost:7890".
-    // Non-browser clients (agents) don't send Origin, so they pass through.
-    const origin = req.headers['origin'];
-    if (origin) {
-      const host = req.headers['host'];
-      try {
-        const originHost = new URL(origin).host;
-        if (originHost !== host) {
-          ws.close(4003, 'Origin not allowed');
-          return;
-        }
-      } catch {
-        ws.close(4003, 'Invalid origin');
-        return;
-      }
-    }
-
+    // Host and Origin were checked before the upgrade (checkUpgrade).
     const authState = typeof getAuthState === 'function' ? getAuthState() : getAuthState;
     if (!validateWsAuth(authState, req)) {
       ws.close(4001, 'Unauthorized');
@@ -673,4 +700,4 @@ function handleAgentMessage(instanceId, msg, instanceManager, activeWatchers) {
   }
 }
 
-module.exports = { setupWebSocket };
+module.exports = { setupWebSocket, checkUpgrade };

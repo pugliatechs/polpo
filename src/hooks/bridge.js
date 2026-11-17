@@ -152,10 +152,8 @@ function connectWebSocket() {
   if (!instanceId) return;
 
   let wsUrl = `${config.serverUrl}?role=agent&instanceId=${instanceId}`;
-  if (config.token) {
-    wsUrl += `&token=${encodeURIComponent(config.token)}`;
-  }
-  ws = new WebSocket(wsUrl);
+  // The token goes in a header: a URL ends up in logs.
+  ws = new WebSocket(wsUrl, config.token ? { headers: { Authorization: `Bearer ${config.token}` } } : undefined);
 
   ws.on('open', () => {
     log(`Connected to hub (instance ${instanceId})`);

@@ -56,7 +56,15 @@ function printHelp() {
 
   SERVER OPTIONS
     --port <n>      Port to listen on (default: 7890)
-    --host <addr>   Host to bind to (default: 0.0.0.0)
+    --host <addr>   Address to listen on (default: 127.0.0.1, this machine only).
+                    For a phone on LAN or VPN, give the VPN address (for example
+                    the Tailscale IP) or 0.0.0.0 for every network. A network
+                    address needs --auth; polpo refuses to start without it.
+    --allowed-hosts <names>  Extra host names the dashboard may be opened
+                    under, comma-separated (a Tailscale MagicDNS name, a
+                    reverse proxy's domain, this machine's name). Loopback
+                    names, IP addresses and the tunnel's name always pass.
+                    Env: POLPO_ALLOWED_HOSTS.
     --tunnel [provider]  Start a tunnel for remote phone access
                          Providers: cloudflared, localtunnel, ngrok, ssh
                          Omit provider to auto-detect (tries cloudflared, then localtunnel)
@@ -66,9 +74,14 @@ function printHelp() {
                       token    — Single-use URL token only (default for tunnels)
                       pin      — Token + 4-digit PIN displayed in terminal
                       paranoid — Token + TOTP via authenticator app
+                      none     - No auth, also on a network address. Anyone
+                                 who reaches the port can run commands here.
     --token <tok>   Use a specific token instead of auto-generating one
     --trust-localhost  Skip auth for localhost connections (desktop browser)
-                       Tunnel/remote connections still require full auth
+                       Tunnel/remote connections still require full auth.
+                       Trusts every program and account on this machine.
+                       Never applies to tunnel traffic, which reaches polpo
+                       on a listener of its own.
     --verbose       Enable verbose logging
     --gateway       Also expose the programmatic /v1 gateway API for
                     external callers. Uses a separate POLPO_GATEWAY_KEY
@@ -162,8 +175,10 @@ function printHelp() {
     polpo server --tunnel ssh --tunnel-host user@myserver.com --tunnel-port 8080
 
   MOBILE ACCESS
-    Once the server is running, open http://<your-computer-ip>:7890
-    on your phone's browser (must be on the same network).
+    By default polpo listens on this machine only. For a phone on the
+    same network or VPN, start it with --host and --auth, for example
+      polpo server --host 100.64.0.5 --auth pin
+    and open http://<that-address>:7890 on the phone.
 
     With --tunnel, a public URL and QR code are displayed for scanning
     from any network (no VPN/LAN required).
@@ -189,6 +204,11 @@ async function runServer() {
     token = generateToken();
   }
 
+  const { parseAllowedHosts, isLoopbackHost } = require('../src/server/host-guard');
+  const allowedHosts = flags['allowed-hosts'] !== undefined
+    ? parseAllowedHosts(flags['allowed-hosts'])
+    : undefined;
+
   const authOpts = {};
   if (token) {
     authOpts.token = token;
@@ -202,7 +222,9 @@ async function runServer() {
 
   const server = createServer({
     port: parseInt(flags.port) || 7890,
-    host: flags.host || '0.0.0.0',
+    host: typeof flags.host === 'string' ? flags.host : undefined,
+    allowedHosts,
+    allowUnauthenticatedNetwork: authMode === 'none',
     verbose: !!flags.verbose,
     auth: Object.keys(authOpts).length > 0 ? authOpts : undefined,
     gateway: gatewayEnabled ? {} : undefined,
@@ -252,6 +274,18 @@ async function runServer() {
 
   await server.start();
 
+  // A link for the phone: it carries the single-use login token, which
+  // only opens the dashboard page, never the agent token.
+  const phoneLink = (base) => {
+    const loginToken = server.authState.loginToken;
+    return loginToken ? `${base}?token=${encodeURIComponent(loginToken)}` : base;
+  };
+
+  const networkHost = !isLoopbackHost(server.host);
+  if (networkHost && !token) {
+    console.log(`  ⚠️  No authentication on ${server.host} (--auth none): anyone who can reach this port can run commands on this machine.\n`);
+  }
+
   if (flags['trust-localhost']) {
     console.log('  🏠 Localhost trusted — desktop browser at http://localhost:' + (parseInt(flags.port) || 7890) + ' (no auth)');
   }
@@ -292,11 +326,15 @@ async function runServer() {
       // line. Only the startup banner is printed plain.
       const tunnelLog = require('../src/util/logger').makeLogger('tunnel');
 
+      // The tunnel dials a listener of its own, which never counts as
+      // localhost, so --trust-localhost cannot let tunnel traffic in.
+      const tunnelPort = await server.openTunnelListener();
+
       const supervisor = new TunnelSupervisor({
         startTunnel,
         tunnelOpts: {
           provider: flags.tunnel,
-          port,
+          port: tunnelPort,
           tunnelHost: flags['tunnel-host'],
           tunnelPort: flags['tunnel-port'] ? parseInt(flags['tunnel-port']) : undefined,
         },
@@ -334,7 +372,7 @@ async function runServer() {
           tunnelLog.info(`Auth enabled (mode: ${authMode || 'token'})`);
           if (authMode === 'pin') tunnelLog.info(`PIN: ${server.authState.pin}`);
         }
-        displayQR(token ? `${url}?token=${token}` : url);
+        displayQR(phoneLink(url));
 
         // Tell any connected dashboard to re-render its Mobile Setup QR.
         if (typeof server.broadcastToDashboards === 'function') {
@@ -357,7 +395,8 @@ async function runServer() {
       // delay, so the reason comes first in the log.
       supervisor.on('start-failed', ({ error }) => {
         tunnelLog.warn(`Tunnel failed: ${error}`);
-        tunnelLog.warn('Retrying in the background; the URL and QR code will be printed here when it comes up. The server is reachable on LAN meanwhile.');
+        tunnelLog.warn('Retrying in the background; the URL and QR code will be printed here when it comes up.' +
+          (networkHost ? ' The server is reachable on LAN meanwhile.' : ''));
       });
 
       // The tunnel died, or was found connected to nothing. Stop handing
@@ -388,11 +427,8 @@ async function runServer() {
         announcedUrl = true;
         tunnel = { url: supervisor.url, close: () => supervisor.stop() };
 
-        // Build URL with token baked in for QR code
-        let tunnelUrl = tunnel.url;
-        if (token) {
-          tunnelUrl += `?token=${token}`;
-        }
+        // The QR carries the login token, never the agent token
+        const tunnelUrl = phoneLink(tunnel.url);
 
         console.log(`  🌐 Tunnel active: ${tunnel.url}`);
         if (token) {
@@ -410,30 +446,32 @@ async function runServer() {
       // provider name, a module failing to load): start() no longer
       // rejects on a failed attempt, it retries.
       require('../src/util/logger').makeLogger('tunnel').error(`Tunnel failed: ${err.message}`);
-      console.log('  Server is still running on LAN.\n');
+      console.log(networkHost ? '  Server is still running on LAN.\n' : '  Server is still running on this machine.\n');
     }
   }
 
-  // Print local network addresses for convenience
-  if (!tunnel) {
+  // Print the addresses a phone can use. On loopback there are none: the
+  // tunnel, when there is one, is the way in.
+  if (!tunnel && networkHost) {
     try {
       const os = require('os');
-      const nets = os.networkInterfaces();
       const addresses = [];
-      for (const name of Object.keys(nets)) {
-        for (const net of nets[name]) {
-          if (net.family === 'IPv4' && !net.internal) {
-            addresses.push(net.address);
+      if (server.host === '0.0.0.0' || server.host === '::') {
+        const nets = os.networkInterfaces();
+        for (const name of Object.keys(nets)) {
+          for (const net of nets[name]) {
+            if (net.family === 'IPv4' && !net.internal) {
+              addresses.push(net.address);
+            }
           }
         }
+      } else {
+        addresses.push(server.host.includes(':') ? `[${server.host}]` : server.host);
       }
       if (addresses.length > 0) {
         console.log('  📱 Open on your phone (same network):');
         addresses.forEach((addr) => {
-          const url = token
-            ? `http://${addr}:${port}?token=${token}`
-            : `http://${addr}:${port}`;
-          console.log(`     ${url}`);
+          console.log(`     ${phoneLink(`http://${addr}:${port}`)}`);
         });
         if (token && authMode === 'pin') {
           console.log(`\n  🔑 PIN: ${server.authState.pin}`);
@@ -448,7 +486,8 @@ async function runServer() {
   // Print token for agent/bridge connections
   if (token) {
     console.log(`  🔑 Agent token: ${token}`);
-    console.log('     Pass to agents: polpo session --server ws://host:port --token <token>\n');
+    console.log('     Pass to agents: polpo session --server ws://host:port --token <token>');
+    console.log('     Agents send it as an Authorization header. It is not the token in the phone link.\n');
   }
 
   // Write server info to a well-known file so bridges can auto-discover the token

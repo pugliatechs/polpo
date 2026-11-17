@@ -113,10 +113,8 @@ class CodexAgent {
     if (!this.instanceId) throw new Error('Must register before connecting');
 
     let wsUrl = `${this.serverUrl}?role=agent&instanceId=${this.instanceId}`;
-    if (this.token) {
-      wsUrl += `&token=${encodeURIComponent(this.token)}`;
-    }
-    this.ws = new WebSocket(wsUrl);
+    // The token goes in a header: a URL ends up in logs.
+    this.ws = new WebSocket(wsUrl, this.token ? { headers: { Authorization: `Bearer ${this.token}` } } : undefined);
 
     this.ws.on('open', () => {
       this._log('Connected to hub');

@@ -22,3 +22,8 @@ jobs:
 
       - name: Run tests
         run: npm test
+
+      # Runtime dependencies only. Fails on a critical advisory; the known
+      # high ones (localtunnel's axios) are listed in docs/security.md.
+      - name: Audit dependencies
+        run: npm audit --omit=dev --audit-level=critical

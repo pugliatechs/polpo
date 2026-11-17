@@ -119,7 +119,7 @@ describe('GET /api/qr-codes', () => {
 
   it('returns the tunnel QR when trust-localhost ON + tunnel active', async () => {
     const app = mountApi({
-      authState: { trustLocalhost: true, token: 'tok-xyz' },
+      authState: { trustLocalhost: true, token: 'agent-secret', loginToken: 'tok-xyz' },
       tunnelInfo: { url: 'https://wise-orange-eagle.trycloudflare.com', provider: 'cloudflared' },
     });
     const { srv, port } = await startListening(app);
@@ -130,8 +130,9 @@ describe('GET /api/qr-codes', () => {
       assert.equal(body.qrs.length, 1);
       assert.equal(body.qrs[0].kind, 'tunnel');
       assert.equal(body.qrs[0].provider, 'cloudflared');
-      // URL should be the tunnel URL with token appended
+      // The tunnel URL with the login token, never the agent token
       assert.match(body.qrs[0].url, /^https:\/\/wise-orange-eagle\.trycloudflare\.com\?token=tok-xyz$/);
+      assert.doesNotMatch(JSON.stringify(body), /agent-secret/);
       assert.match(body.qrs[0].svg, /^<svg/);
     } finally {
       srv.close();

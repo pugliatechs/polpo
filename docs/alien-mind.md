@@ -483,7 +483,7 @@ from `InstanceManager.getAll()` and from the dashboard's live instance events.
 They stay fully addressable by id, because the runner drives them that way.
 
 Without that, the reasoner appears in the sidebar as a session, counts toward
-`/health`, and worse, is offered to the planner as an idle arm it could assign
+the instance list, and worse, is offered to the planner as an idle arm it could assign
 work to.
 
 ## Reasoner configuration

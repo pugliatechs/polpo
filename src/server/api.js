@@ -182,6 +182,14 @@ function createApiRouter(instanceManager, getAuthState, pushManager, outboxManag
     res.sendFile(filePath);
   });
 
+  // Version for the dashboard header and About box. Behind auth, unlike
+  // /health: it tells an outsider which known bugs this polpo has.
+  router.get('/version', (req, res) => {
+    const { version } = require('../../package.json');
+    res.set('Cache-Control', 'no-store');
+    res.json({ version });
+  });
+
   // ---- Mobile setup QR codes (localhost-only, trust-localhost-gated) ----
   //
   // When an operator runs polpo with `--trust-localhost`, they're saying
@@ -236,7 +244,9 @@ function createApiRouter(instanceManager, getAuthState, pushManager, outboxManag
     // dashboard token in a query string so the phone browser auto-auths.
     const tunnelInfo = typeof getTunnelInfo === 'function' ? getTunnelInfo() : null;
     if (tunnelInfo && tunnelInfo.url) {
-      const token = authState.token || null;
+      // The login token, never the agent token: this link ends up in a
+      // phone's history and passes through the tunnel provider.
+      const token = authState.loginToken || null;
       const url = token ? `${tunnelInfo.url}?token=${encodeURIComponent(token)}` : tunnelInfo.url;
       try {
         const svg = await qrcode.toString(url, { type: 'svg', margin: 1, width: 240 });

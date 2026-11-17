@@ -10,6 +10,7 @@ const { CampaignManager } = require('../campaign');
 const { parseAgentMay } = require('../campaign/decisions');
 const {
   AuthState,
+  generateToken,
   createAuthMiddleware,
   createStaticAuthMiddleware,
   validateSession,
@@ -19,6 +20,7 @@ const {
   verifyTotp,
 } = require('./auth');
 const { PushManager } = require('./push');
+const { createHostGuard, isLoopbackHost, parseAllowedHosts } = require('./host-guard');
 const { makeLogger } = require('../util/logger');
 
 const log = makeLogger('polpo');
@@ -56,18 +58,67 @@ function rateLimit(windowMs, max) {
   };
 }
 
+const DEFAULT_HOST = '127.0.0.1';
+
+function listenOn(srv, port, host) {
+  return new Promise((resolve, reject) => {
+    const onError = (err) => reject(err);
+    srv.once('error', onError);
+    srv.listen(port, host, () => {
+      srv.removeListener('error', onError);
+      resolve(srv.address());
+    });
+  });
+}
+// Addresses that already cover loopback when polpo listens on them.
+const WILDCARD_HOSTS = new Set(['0.0.0.0', '::']);
+
+function needsLoopbackListener(host) {
+  return !isLoopbackHost(host) && !WILDCARD_HOSTS.has(String(host));
+}
+
 function createServer(options = {}) {
-  const port = options.port || process.env.POLPO_PORT || 7890;
-  const host = options.host || process.env.POLPO_HOST || '0.0.0.0';
+  // 0 is a real value (any free port), so only a missing port falls back.
+  const port = options.port !== undefined && options.port !== null
+    ? options.port
+    : (process.env.POLPO_PORT || 7890);
+  // Loopback by default: the tunnels dial localhost, and a LAN or VPN
+  // address is something the operator asks for with --host.
+  const host = options.host || process.env.POLPO_HOST || DEFAULT_HOST;
   const verbose = options.verbose || false;
 
   // Auth state — can be updated after creation (e.g. after tunnel starts)
   const authState = new AuthState(options.auth || {});
   const getAuthState = () => authState;
 
+  // Anyone who can reach the port can drive the agents, so a network
+  // address without auth is refused unless the operator said so with
+  // `--auth none`.
+  if (!isLoopbackHost(host) && !authState.enabled && !options.allowUnauthenticatedNetwork) {
+    throw new Error(
+      `Refusing to listen on ${host} without authentication: anyone who can reach it could run commands on this machine. ` +
+      'Add --auth token (or pin, paranoid), or pass --auth none to accept that risk.'
+    );
+  }
+
+  const hostGuard = createHostGuard({
+    allowedHosts: options.allowedHosts || parseAllowedHosts(process.env.POLPO_ALLOWED_HOSTS),
+    bindHost: host,
+  });
+
   const app = express();
   const server = http.createServer(app);
+  // Polpo's own sessions, hooks and bridges connect to 127.0.0.1. When
+  // --host names one LAN or VPN address, that address does not cover
+  // loopback, so the same app also listens there.
+  const loopbackServer = needsLoopbackListener(host) ? http.createServer(app) : null;
+  // Opened on demand by openTunnelListener().
+  let tunnelListener = null;
   const instanceManager = new InstanceManager();
+
+  // DNS rebinding: refuse a Host header polpo does not expect, before any
+  // route runs, public ones included.
+  app.use(hostGuard.middleware);
 
   app.use(express.json({ limit: '15mb' }));
 
@@ -111,10 +162,12 @@ function createServer(options = {}) {
 
   // --- Public routes (before auth) ---
 
-  // Health check
+  // Health check. Public, so it says only that polpo is up: the version
+  // would tell a scanner which known bugs apply, and the session count
+  // whether someone is using it. The dashboard reads the version from
+  // /api/version, behind auth.
   app.get('/health', (req, res) => {
-    const { version: pkgVersion } = require('../../package.json');
-    res.json({ status: 'ok', version: pkgVersion, instances: instanceManager.getAll().length });
+    res.json({ status: 'ok' });
   });
 
   // Auth mode endpoint (public, no auth required)
@@ -394,7 +447,10 @@ function createServer(options = {}) {
   });
 
   // WebSocket
-  const wss = setupWebSocket(server, instanceManager, getAuthState, pushManager, outboxManager, sessionController);
+  const wss = setupWebSocket(server, instanceManager, getAuthState, pushManager, outboxManager, sessionController, {
+    hostGuard,
+    extraServers: loopbackServer ? [loopbackServer] : [],
+  });
 
   // Campaign changes reach the dashboard live; a new decision also goes
   // to the phone as a push notification.
@@ -438,14 +494,24 @@ function createServer(options = {}) {
 
   return {
     start() {
-      return new Promise((resolve) => {
-        server.listen(port, host, () => {
-          const addr = server.address();
-          const { version: pkgVersion } = require('../../package.json');
-          console.log(`\n  🐙 Polpo v${pkgVersion} running on http://${host}:${addr.port}`);
+      return listenOn(server, port, host).then(async (addr) => {
+        if (loopbackServer) {
+          try {
+            await listenOn(loopbackServer, addr.port, '127.0.0.1');
+          } catch (err) {
+            server.close();
+            throw new Error(`Listening on ${host} worked, but 127.0.0.1:${addr.port} did not (${err.message}). Polpo's own sessions connect there.`);
+          }
+        }
+        const { version: pkgVersion } = require('../../package.json');
+        console.log(`\n  🐙 Polpo v${pkgVersion} running on http://${host}:${addr.port}`);
+        if (loopbackServer) console.log(`     Also on http://127.0.0.1:${addr.port} for polpo's own sessions`);
+        if (isLoopbackHost(host)) {
+          console.log('     Listening on this machine only. For a phone on LAN or VPN, start with --host <address> and --auth.\n');
+        } else {
           console.log(`     Open this URL on your phone (same network)\n`);
-          resolve(addr);
-        });
+        }
+        return addr;
       });
     },
     stop() {
@@ -458,6 +524,7 @@ function createServer(options = {}) {
       }
       return new Promise((resolve) => {
         if (wss.scanner) wss.scanner.stop();
+        if (wss.codexScanner) wss.codexScanner.stop();
         if (wss.geminiScanner) wss.geminiScanner.stop();
         if (wss.opencodeScanner) wss.opencodeScanner.stop();
         if (wss.piScanner) wss.piScanner.stop();
@@ -466,11 +533,33 @@ function createServer(options = {}) {
           client.terminate();
         }
         wss.close();
+        if (loopbackServer) loopbackServer.close();
+        if (tunnelListener) tunnelListener.close();
         server.close(resolve);
       });
     },
+    /**
+     * A loopback listener on a free port, for the tunnel provider to dial.
+     * Every connection on it is marked as coming through the tunnel, so
+     * --trust-localhost never applies to it, whether or not the provider
+     * adds X-Forwarded-For. Returns the port; a second call reuses it.
+     */
+    async openTunnelListener() {
+      if (tunnelListener) return tunnelListener.address().port;
+      const srv = http.createServer(app);
+      srv.on('connection', (socket) => { socket.polpoTunnel = true; });
+      wss.attachServer(srv);
+      await listenOn(srv, 0, '127.0.0.1');
+      tunnelListener = srv;
+      return srv.address().port;
+    },
     setAuth({ token, mode, totpSecret, trustLocalhost }) {
-      if (token !== undefined) authState.token = token;
+      if (token !== undefined) {
+        authState.token = token;
+        // A new agent token gets a fresh, unused login token with it.
+        authState.loginToken = token ? generateToken() : null;
+        authState.tokenBurned = false;
+      }
       if (mode !== undefined) authState.mode = mode;
       if (totpSecret !== undefined) authState.totpSecret = totpSecret;
       if (trustLocalhost !== undefined) authState.trustLocalhost = trustLocalhost;
@@ -489,6 +578,9 @@ function createServer(options = {}) {
         provider: info.provider ? String(info.provider) : null,
         startedAt: info.startedAt || Date.now(),
       } : null;
+      // The tunnel forwards its public host name in the Host header, so
+      // that name, and only the current one, must pass the Host check.
+      hostGuard.setTunnelUrl(tunnelInfo ? tunnelInfo.url : null);
     },
     getTunnelInfo() {
       return tunnelInfo ? Object.assign({}, tunnelInfo) : null;
@@ -515,6 +607,10 @@ function createServer(options = {}) {
     get authState() {
       return authState;
     },
+    get hostGuard() {
+      return hostGuard;
+    },
+    host,
     get gateway() {
       return gatewayState;
     },

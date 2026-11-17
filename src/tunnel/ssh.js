@@ -12,6 +12,25 @@ function isAvailable() {
   }
 }
 
+/**
+ * The ssh command line for the reverse tunnel. Options come before the
+ * destination, as ssh(1) documents them. ServerAliveCountMax (not
+ * "ServerAliveCountInterval", which ssh rejects as a bad option and exits)
+ * drops the tunnel after 3 unanswered keepalives, 90 s with the 30 s
+ * interval.
+ */
+function buildArgs(port, tunnelHost, tunnelPort) {
+  return [
+    '-N',
+    '-R', `${tunnelPort}:localhost:${port}`,
+    '-o', 'StrictHostKeyChecking=accept-new',
+    '-o', 'ServerAliveInterval=30',
+    '-o', 'ServerAliveCountMax=3',
+    '-o', 'ExitOnForwardFailure=yes',
+    tunnelHost,
+  ];
+}
+
 function start(port, opts = {}) {
   const tunnelHost = opts.tunnelHost;
   if (!tunnelHost) {
@@ -21,15 +40,7 @@ function start(port, opts = {}) {
   const tunnelPort = opts.tunnelPort || 80;
 
   return new Promise((resolve, reject) => {
-    const child = spawn('ssh', [
-      '-N',
-      '-R', `${tunnelPort}:localhost:${port}`,
-      tunnelHost,
-      '-o', 'StrictHostKeyChecking=accept-new',
-      '-o', 'ServerAliveInterval=30',
-      '-o', 'ServerAliveCountInterval=3',
-      '-o', 'ExitOnForwardFailure=yes',
-    ], {
+    const child = spawn('ssh', buildArgs(port, tunnelHost, tunnelPort), {
       stdio: ['inherit', 'ignore', 'pipe'], // inherit stdin for passphrase prompts
     });
 
@@ -84,4 +95,4 @@ function killChild(child) {
   }, 5000);
 }
 
-module.exports = { name, isAvailable, start };
+module.exports = { name, isAvailable, start, buildArgs };
