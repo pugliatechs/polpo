@@ -105,11 +105,16 @@ node bin/polpo.js session --resume <session-id>
 
 ### 4. Open on Your Phone
 
-Navigate to `http://<your-computer-ip>:7890` on your phone's browser.
+By default polpo listens on this machine only (`127.0.0.1`). Reach it from your phone through a tunnel (`--tunnel`), or start it on your VPN or LAN address with auth and open that address:
+
+```bash
+node bin/polpo.js server --host <vpn-address> --auth pin
+# then open http://<vpn-address>:7890 on the phone
+```
 
 The dashboard shows active sessions, past session history, and lets you send prompts, watch tool calls, approve or reject actions, and abort tasks.
 
-> **Security**: Running on localhost alone does not protect you. Use `--tunnel` with auth for internet access, or connect via VPN for private access. Read the [Security](#security) section before exposing Polpo to any network.
+> **Security**: anyone who can reach polpo can run commands on your machine through its agents. Use `--tunnel` with auth for internet access, or `--host` with auth for a VPN. Read the [Security](#security) section before exposing Polpo to any network.
 
 ## Features
 
@@ -168,16 +173,30 @@ polpo server --tunnel --auth paranoid
 
 **Option B: VPN to your machine (no public exposure)**
 
-Connect your phone to the same network as your machine via a VPN (WireGuard, Tailscale, ZeroTier, etc.), then access Polpo directly at `http://<machine-ip>:7890`. No tunnel, no public URL. The connection stays private within your VPN.
+Connect your phone to your machine over a VPN (WireGuard, Tailscale, ZeroTier, etc.), start polpo on the machine's **VPN address** with auth, and open `http://<vpn-address>:7890` on the phone. No tunnel, no public URL.
 
 ```bash
-# Start without tunnel - accessible only on local/VPN network
-polpo server
+# Listen on the VPN address only (for example the Tailscale IP), with auth
+polpo server --host 100.64.0.5 --auth pin
+
+# Opening it by its MagicDNS name? Allow that name too
+polpo server --host 100.64.0.5 --auth pin --allowed-hosts mybox.tail1234.ts.net
 ```
 
-### Why Localhost Is Not Enough
+Prefer the VPN address over `--host 0.0.0.0`: `0.0.0.0` listens on every network the machine joins, including café, hotel and event Wi-Fi. When `--host` names one address, polpo also listens on `127.0.0.1`, where its own sessions and hooks connect.
 
-Running on `localhost` does not make Polpo safe. A malicious webpage you visit in your browser can open a WebSocket to `ws://localhost:7890` and read all session data (tool calls, file contents, API keys) via a CSRF attack. Polpo mitigates this with **Origin header validation** on both WebSocket and API connections: the server rejects any request whose Origin doesn't match its own host. This blocks cross-origin attacks from malicious pages while allowing legitimate connections from the Polpo dashboard and agents.
+### What Polpo Refuses
+
+- **No auth on a network address.** By default polpo listens on `127.0.0.1` only. With `--host` set to a LAN, VPN or wildcard address it refuses to start without `--auth`, because anyone who reaches the port could create a session, turn on auto-approve and run commands. `--auth none` starts it anyway, with a warning.
+- **Unknown host names (DNS rebinding).** A malicious page can make its own domain resolve to `127.0.0.1` or to your LAN address, so the browser treats polpo as the same origin as the page. Polpo answers `421` to any `Host` header that is not a loopback name, an IP address, this machine's name (bare or `.local`), the `--host` name, a name in `--allowed-hosts` / `POLPO_ALLOWED_HOSTS`, or the current tunnel's name. This applies to every route and to the WebSocket upgrade.
+- **Cross-origin requests.** Origin header validation on WebSocket and API connections: a page on another origin is refused even when it targets an IP address directly.
+- **`--trust-localhost` with `--tunnel ssh`.** The ssh tunnel is a raw TCP forward, so its traffic arrives from `127.0.0.1` and would skip auth.
+
+### `--trust-localhost`
+
+`--trust-localhost` lets a browser on this machine open the dashboard at `http://localhost:7890` without logging in, while tunnel and network clients still authenticate. A request counts as local only when it comes from a loopback address, carries no `X-Forwarded-For`, and names a loopback host (`localhost`, `127.0.0.1`, `[::1]`).
+
+It trusts **every program and every account on this machine**: a script, a container with host networking or another user can drive your agents without auth. Use it only on a single-user machine you control.
 
 ### Auth Modes
 
@@ -222,8 +241,8 @@ polpo server --tunnel --auth pin
 # Tunnel with TOTP
 polpo server --tunnel --auth paranoid
 
-# LAN/VPN with manual auth
-polpo server --auth token
+# LAN/VPN: listen on the VPN address, with auth
+polpo server --host 100.64.0.5 --auth token
 
 # Agents pass the token
 polpo session --server ws://host:7890 --token <token>
@@ -266,7 +285,7 @@ node bin/polpo.js server --tunnel ssh --tunnel-host user@myserver.com --tunnel-p
 
 Auto-detect tries cloudflared first, then falls back to localtunnel. ngrok and SSH require explicit `--tunnel <provider>` since they need configuration.
 
-If the tunnel fails, the server still runs normally on LAN.
+If the tunnel fails, the server keeps running on the addresses it listens on (this machine only, unless `--host` says otherwise) and retries the tunnel in the background.
 
 A tunnel that fails to start is retried in the background with backoff, and the URL and QR code are printed as soon as it comes up. The same applies if a running tunnel dies later. The log line says why an attempt failed, taken from the provider's own output, for example:
 
@@ -755,7 +774,8 @@ Connect to `ws://<host>:<port>?role=agent&instanceId=<id>` as an agent.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `POLPO_PORT` | `7890` | Server port |
-| `POLPO_HOST` | `0.0.0.0` | Server bind address |
+| `POLPO_HOST` | `127.0.0.1` | Server bind address. A non-loopback address needs `--auth` |
+| `POLPO_ALLOWED_HOSTS` | (none) | Extra host names the dashboard may be opened under, comma-separated (`--allowed-hosts`) |
 | `POLPO_SERVER` | `ws://127.0.0.1:7890` | Hub URL (used by session, agent, bridge) |
 | `POLPO_TOKEN` | (none) | Auth token for agents/bridges |
 | `POLPO_NAME` | auto from directory | Display name for the instance |

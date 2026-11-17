@@ -33,6 +33,7 @@ This tag shows up in the operator's dashboard so they can see which agents (your
 
 Failure modes you must handle:
 - `401 unauthorized` — key missing or wrong; surface a clean error to the user, don't retry
+- `421` with `Unexpected Host header`: the host name in your base URL is not one polpo accepts (its DNS rebinding defence). Use the host's IP address, or ask the operator to add the name to `--allowed-hosts`; don't retry unchanged
 - `429 rate_limited` — back off using the `Retry-After` header
 - `429 search_in_progress` — another search is already running on this host; wait ~1 s and retry
 - `503 *_not_supported` — the feature isn't enabled on this host; pick a different path

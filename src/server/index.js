@@ -16,6 +16,7 @@ const {
   verifyTotp,
 } = require('./auth');
 const { PushManager } = require('./push');
+const { createHostGuard, isLoopbackHost, parseAllowedHosts } = require('./host-guard');
 const { makeLogger } = require('../util/logger');
 
 const log = makeLogger('polpo');
@@ -53,18 +54,54 @@ function rateLimit(windowMs, max) {
   };
 }
 
+const DEFAULT_HOST = '127.0.0.1';
+// Addresses that already cover loopback when polpo listens on them.
+const WILDCARD_HOSTS = new Set(['0.0.0.0', '::']);
+
+function needsLoopbackListener(host) {
+  return !isLoopbackHost(host) && !WILDCARD_HOSTS.has(String(host));
+}
+
 function createServer(options = {}) {
-  const port = options.port || process.env.POLPO_PORT || 7890;
-  const host = options.host || process.env.POLPO_HOST || '0.0.0.0';
+  // 0 is a real value (any free port), so only a missing port falls back.
+  const port = options.port !== undefined && options.port !== null
+    ? options.port
+    : (process.env.POLPO_PORT || 7890);
+  // Loopback by default: the tunnels dial localhost, and a LAN or VPN
+  // address is something the operator asks for with --host.
+  const host = options.host || process.env.POLPO_HOST || DEFAULT_HOST;
   const verbose = options.verbose || false;
 
   // Auth state — can be updated after creation (e.g. after tunnel starts)
   const authState = new AuthState(options.auth || {});
   const getAuthState = () => authState;
 
+  // Anyone who can reach the port can drive the agents, so a network
+  // address without auth is refused unless the operator said so with
+  // `--auth none`.
+  if (!isLoopbackHost(host) && !authState.enabled && !options.allowUnauthenticatedNetwork) {
+    throw new Error(
+      `Refusing to listen on ${host} without authentication: anyone who can reach it could run commands on this machine. ` +
+      'Add --auth token (or pin, paranoid), or pass --auth none to accept that risk.'
+    );
+  }
+
+  const hostGuard = createHostGuard({
+    allowedHosts: options.allowedHosts || parseAllowedHosts(process.env.POLPO_ALLOWED_HOSTS),
+    bindHost: host,
+  });
+
   const app = express();
   const server = http.createServer(app);
+  // Polpo's own sessions, hooks and bridges connect to 127.0.0.1. When
+  // --host names one LAN or VPN address, that address does not cover
+  // loopback, so the same app also listens there.
+  const loopbackServer = needsLoopbackListener(host) ? http.createServer(app) : null;
   const instanceManager = new InstanceManager();
+
+  // DNS rebinding: refuse a Host header polpo does not expect, before any
+  // route runs, public ones included.
+  app.use(hostGuard.middleware);
 
   app.use(express.json({ limit: '15mb' }));
 
@@ -353,7 +390,10 @@ function createServer(options = {}) {
   });
 
   // WebSocket
-  const wss = setupWebSocket(server, instanceManager, getAuthState, pushManager, outboxManager, sessionController);
+  const wss = setupWebSocket(server, instanceManager, getAuthState, pushManager, outboxManager, sessionController, {
+    hostGuard,
+    extraServers: loopbackServer ? [loopbackServer] : [],
+  });
 
   // Alien Mind meta-agent (opt-in: POLPO_MIND=1). When --gateway is on
   // it was already created above. This block is the dashboard-only path.
@@ -385,14 +425,32 @@ function createServer(options = {}) {
 
   return {
     start() {
-      return new Promise((resolve) => {
-        server.listen(port, host, () => {
-          const addr = server.address();
-          const { version: pkgVersion } = require('../../package.json');
-          console.log(`\n  🐙 Polpo v${pkgVersion} running on http://${host}:${addr.port}`);
-          console.log(`     Open this URL on your phone (same network)\n`);
-          resolve(addr);
+      const listen = (srv, p, h) => new Promise((resolve, reject) => {
+        const onError = (err) => reject(err);
+        srv.once('error', onError);
+        srv.listen(p, h, () => {
+          srv.removeListener('error', onError);
+          resolve(srv.address());
         });
+      });
+      return listen(server, port, host).then(async (addr) => {
+        if (loopbackServer) {
+          try {
+            await listen(loopbackServer, addr.port, '127.0.0.1');
+          } catch (err) {
+            server.close();
+            throw new Error(`Listening on ${host} worked, but 127.0.0.1:${addr.port} did not (${err.message}). Polpo's own sessions connect there.`);
+          }
+        }
+        const { version: pkgVersion } = require('../../package.json');
+        console.log(`\n  🐙 Polpo v${pkgVersion} running on http://${host}:${addr.port}`);
+        if (loopbackServer) console.log(`     Also on http://127.0.0.1:${addr.port} for polpo's own sessions`);
+        if (isLoopbackHost(host)) {
+          console.log('     Listening on this machine only. For a phone on LAN or VPN, start with --host <address> and --auth.\n');
+        } else {
+          console.log(`     Open this URL on your phone (same network)\n`);
+        }
+        return addr;
       });
     },
     stop() {
@@ -403,6 +461,7 @@ function createServer(options = {}) {
       }
       return new Promise((resolve) => {
         if (wss.scanner) wss.scanner.stop();
+        if (wss.codexScanner) wss.codexScanner.stop();
         if (wss.geminiScanner) wss.geminiScanner.stop();
         if (wss.opencodeScanner) wss.opencodeScanner.stop();
         if (wss.piScanner) wss.piScanner.stop();
@@ -411,6 +470,7 @@ function createServer(options = {}) {
           client.terminate();
         }
         wss.close();
+        if (loopbackServer) loopbackServer.close();
         server.close(resolve);
       });
     },
@@ -434,6 +494,9 @@ function createServer(options = {}) {
         provider: info.provider ? String(info.provider) : null,
         startedAt: info.startedAt || Date.now(),
       } : null;
+      // The tunnel forwards its public host name in the Host header, so
+      // that name, and only the current one, must pass the Host check.
+      hostGuard.setTunnelUrl(tunnelInfo ? tunnelInfo.url : null);
     },
     getTunnelInfo() {
       return tunnelInfo ? Object.assign({}, tunnelInfo) : null;
@@ -460,6 +523,10 @@ function createServer(options = {}) {
     get authState() {
       return authState;
     },
+    get hostGuard() {
+      return hostGuard;
+    },
+    host,
     get gateway() {
       return gatewayState;
     },

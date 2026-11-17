@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const url = require('url');
 const fs = require('fs');
 const path = require('path');
+const { isLoopbackHost } = require('./host-guard');
 
 // ---- AuthState ----
 
@@ -239,10 +240,20 @@ function saveTotpSecret(configPath, secret) {
  * Tunnels (cloudflared, ngrok, etc.) proxy from 127.0.0.1 but set
  * X-Forwarded-For to the real client IP. If that header is present,
  * the request came through a proxy and is NOT a direct localhost client.
+ *
+ * The Host header must also be a loopback name. A browser that opened
+ * localhost, 127.0.0.1 or [::1] sends exactly that; a DNS rebinding page
+ * reaches the same socket address under its own name, and must not count
+ * as the user at the desk.
+ *
+ * This trusts every program and account on the machine, by design. It
+ * cannot tell a raw TCP forward apart either (ssh -R): that is why
+ * --trust-localhost is refused with the ssh tunnel.
  */
 function isLocalhost(req) {
   // If a proxy set X-Forwarded-For, the real client is remote
   if (req.headers['x-forwarded-for']) return false;
+  if (!isLoopbackHost(req.headers.host)) return false;
 
   const ip = req.ip || req.socket.remoteAddress || '';
   return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';

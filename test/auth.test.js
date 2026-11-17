@@ -697,15 +697,15 @@ describe('timingSafeEqual', () => {
 
 describe('isLocalhost', () => {
   it('returns true for 127.0.0.1', () => {
-    assert.equal(isLocalhost({ ip: '127.0.0.1', headers: {}, socket: {} }), true);
+    assert.equal(isLocalhost({ ip: '127.0.0.1', headers: { host: 'localhost:7890' }, socket: {} }), true);
   });
 
   it('returns true for ::1', () => {
-    assert.equal(isLocalhost({ ip: '::1', headers: {}, socket: {} }), true);
+    assert.equal(isLocalhost({ ip: '::1', headers: { host: '[::1]:7890' }, socket: {} }), true);
   });
 
   it('returns true for ::ffff:127.0.0.1', () => {
-    assert.equal(isLocalhost({ ip: '::ffff:127.0.0.1', headers: {}, socket: {} }), true);
+    assert.equal(isLocalhost({ ip: '::ffff:127.0.0.1', headers: { host: '127.0.0.1:7890' }, socket: {} }), true);
   });
 
   it('returns false for external IPs', () => {
@@ -714,7 +714,7 @@ describe('isLocalhost', () => {
   });
 
   it('falls back to socket.remoteAddress', () => {
-    assert.equal(isLocalhost({ headers: {}, socket: { remoteAddress: '127.0.0.1' } }), true);
+    assert.equal(isLocalhost({ headers: { host: 'localhost' }, socket: { remoteAddress: '127.0.0.1' } }), true);
     assert.equal(isLocalhost({ headers: {}, socket: { remoteAddress: '10.0.0.1' } }), false);
   });
 
@@ -730,7 +730,7 @@ describe('trustLocalhost', () => {
   it('auth middleware allows localhost when trustLocalhost is true', () => {
     const state = new AuthState({ token: generateToken(), trustLocalhost: true });
     const mw = createAuthMiddleware(() => state);
-    const req = mockReq({ ip: '127.0.0.1' });
+    const req = mockReq({ ip: '127.0.0.1', headers: { host: 'localhost:7890' } });
     const res = mockRes();
     let called = false;
     mw(req, res, () => { called = true; });
@@ -740,7 +740,7 @@ describe('trustLocalhost', () => {
   it('auth middleware blocks localhost when trustLocalhost is false', () => {
     const state = new AuthState({ token: generateToken(), trustLocalhost: false });
     const mw = createAuthMiddleware(() => state);
-    const req = mockReq({ ip: '127.0.0.1' });
+    const req = mockReq({ ip: '127.0.0.1', headers: { host: 'localhost:7890' } });
     const res = mockRes();
     let called = false;
     mw(req, res, () => { called = true; });
@@ -761,13 +761,40 @@ describe('trustLocalhost', () => {
 
   it('validateWsAuth allows localhost WebSocket when trustLocalhost is true', () => {
     const state = new AuthState({ token: generateToken(), trustLocalhost: true });
-    const req = mockReq({ ip: '::1' });
+    const req = mockReq({ ip: '::1', headers: { host: '[::1]:7890' } });
     assert.equal(validateWsAuth(state, req), true);
+  });
+
+  it('auth middleware asks a rebinding page on a loopback socket to log in', () => {
+    const state = new AuthState({ token: generateToken(), trustLocalhost: true });
+    const mw = createAuthMiddleware(() => state);
+    const req = mockReq({ ip: '127.0.0.1', headers: { host: 'rebind.attacker.example:7890' } });
+    const res = mockRes();
+    let called = false;
+    mw(req, res, () => { called = true; });
+    assert.equal(called, false);
+    assert.equal(res.statusCode, 401);
+  });
+
+  it('validateWsAuth refuses a rebinding page on a loopback socket', () => {
+    const state = new AuthState({ token: generateToken(), trustLocalhost: true });
+    const req = mockReq({ ip: '127.0.0.1', headers: { host: 'rebind.attacker.example:7890' } });
+    assert.equal(validateWsAuth(state, req), false);
   });
 
   it('validateWsAuth blocks localhost WebSocket when trustLocalhost is false', () => {
     const state = new AuthState({ token: generateToken(), trustLocalhost: false });
-    const req = mockReq({ ip: '::1' });
+    const req = mockReq({ ip: '::1', headers: { host: '[::1]:7890' } });
     assert.equal(validateWsAuth(state, req), false);
+  });
+
+  it('returns false for a loopback socket under a name that is not loopback (DNS rebinding)', () => {
+    assert.equal(isLocalhost({ ip: '127.0.0.1', headers: { host: 'rebind.attacker.example:7890' }, socket: {} }), false);
+    assert.equal(isLocalhost({ ip: '127.0.0.1', headers: { host: 'localhost.attacker.example' }, socket: {} }), false);
+  });
+
+  it('returns false for a loopback socket addressed by a LAN address or with no Host', () => {
+    assert.equal(isLocalhost({ ip: '127.0.0.1', headers: { host: '192.168.1.20:7890' }, socket: {} }), false);
+    assert.equal(isLocalhost({ ip: '127.0.0.1', headers: {}, socket: {} }), false);
   });
 });
