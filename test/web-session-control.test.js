@@ -44,3 +44,34 @@ describe('dashboard: who drives a session', () => {
     assert.match(js, /inst\.heldBy\.indexOf\('gateway:'\) === 0/);
   });
 });
+
+describe('dashboard: opening a past session', () => {
+  const fn = (name) => {
+    const i = js.indexOf('  function ' + name + '(');
+    assert.ok(i !== -1, 'missing: ' + name);
+    return js.slice(i, js.indexOf('\n  }\n', i));
+  };
+
+  it('shows the session with a spinner before anything has loaded', () => {
+    const resume = fn('resumeSession');
+    assert.ok(resume.indexOf('showResumeLoading(project)') < resume.indexOf('authFetch('), 'spinner first, then the requests');
+    assert.match(resume, /class="inline-spinner"/, 'and on the card that was clicked');
+    assert.match(fn('showResumeLoading'), /showLoading\(\$conversation, 'Loading session\.\.\.'\)/);
+  });
+
+  it('fetches only the last page of history, and older pages on scroll', () => {
+    const resume = fn('resumeSession');
+    assert.match(resume, /\/history\?tail=' \+ HISTORY_PAGE_SIZE/);
+    assert.ok(!/\/history'\)/.test(resume), 'never the whole history');
+    assert.match(resume, /inst\._loadedFrom = total - messages\.length/);
+    assert.match(resume, /inst\._historyLoaded = true/, 'so opening it does not fetch the page again');
+  });
+
+  it('does not pull you back to it once you moved on, and says when it fails', () => {
+    const resume = fn('resumeSession');
+    assert.match(resume, /token === pendingResume && activeInstanceId === null/);
+    assert.match(resume, /if \(stillWanted\(\)\) openDetail/);
+    assert.match(resume, /showResumeFailed\('The session did not start in time/);
+    assert.match(resume, /showResumeFailed\('Could not open this session: '/);
+  });
+});

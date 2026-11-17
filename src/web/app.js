@@ -4019,18 +4019,29 @@
     resumeSession(sessionId, cwd, project, agentType);
   }
 
+  // The past session being opened, so a slow resume that finishes after
+  // you moved on does not pull you back to it.
+  var pendingResume = 0;
+
   function resumeSession(sessionId, cwd, project, agentType) {
+    var token = ++pendingResume;
     // Show loading state on the card
     var card = $sessionsList.querySelector('[data-session-id="' + sessionId + '"]');
     if (card) {
       card.classList.add('resuming');
-      card.innerHTML = '<div class="card-top"><span class="card-name">' + escapeHtml(project) + '</span><span class="badge badge-busy">loading...</span></div>';
+      card.innerHTML = '<div class="card-top"><span class="card-name">' + escapeHtml(project) + '</span>' +
+        '<span class="badge badge-busy"><span class="inline-spinner"></span> loading</span></div>';
     }
+    // Switch to it at once: resuming starts an agent and reads the
+    // transcript, which takes a few seconds on a long session.
+    showResumeLoading(project);
 
-    // Fetch history and resume in parallel
-    var historyPromise = authFetch('/api/sessions/' + sessionId + '/history')
+    // Only the last page: older messages load as you scroll up, as for
+    // any other session. The whole history of a long session is slow to
+    // fetch and slower to render.
+    var historyPromise = authFetch('/api/sessions/' + sessionId + '/history?tail=' + HISTORY_PAGE_SIZE)
       .then(function (r) { return r.json(); })
-      .catch(function () { return []; });
+      .catch(function () { return null; });
 
     var resumePromise = authFetch('/api/sessions/' + sessionId + '/resume', {
       method: 'POST',
@@ -4042,21 +4053,30 @@
 
     Promise.all([historyPromise, resumePromise])
     .then(function (results) {
-      var history = results[0];
+      var page = results[0];
       var resumeResult = results[1];
+      var stillWanted = function () { return token === pendingResume && activeInstanceId === null; };
 
       if (resumeResult.instanceId) {
         // Wait for the instance to appear, then inject history and open
         var tryOpen = function (attempts) {
           if (instances.has(resumeResult.instanceId)) {
             var inst = instances.get(resumeResult.instanceId);
-            // Prepend history before any new messages
-            if (history.length > 0) {
-              inst.conversation = history.concat(inst.conversation || []);
+            var messages = page && Array.isArray(page.messages) ? page.messages : [];
+            if (messages.length > 0) {
+              var total = page.total || messages.length;
+              // Prepend history before any new messages
+              inst.conversation = messages.concat(inst.conversation || []);
+              inst._historyLen = total;
+              inst._totalMessages = total;
+              inst._loadedFrom = total - messages.length;
+              inst._historyLoaded = true;
             }
-            openDetail(resumeResult.instanceId);
+            if (stillWanted()) openDetail(resumeResult.instanceId);
           } else if (attempts > 0) {
             setTimeout(function () { tryOpen(attempts - 1); }, 500);
+          } else if (stillWanted()) {
+            showResumeFailed('The session did not start in time. Try again from the list.');
           }
         };
         tryOpen(6);
@@ -4065,8 +4085,28 @@
           card.classList.remove('resuming');
           card.innerHTML = '<div class="card-top"><span class="card-name">' + escapeHtml(project) + '</span><span class="badge badge-disconnected">error</span></div>';
         }
+        if (stillWanted()) showResumeFailed('Could not open this session: ' + resumeResult.error);
       }
     });
+  }
+
+  /** The detail panel while a past session opens: its name and a spinner. */
+  function showResumeLoading(project) {
+    if (typeof closeConvSearch === 'function') closeConvSearch();
+    activeInstanceId = null;
+    if (isDesktop()) {
+      highlightSelectedCard(null);
+    } else {
+      $viewList.classList.add('hidden');
+      $viewDetail.classList.remove('hidden');
+    }
+    $detailName.textContent = truncate(project || 'Session', 80);
+    $detailName.classList.remove('detail-name-loading');
+    showLoading($conversation, 'Loading session...');
+  }
+
+  function showResumeFailed(text) {
+    $conversation.innerHTML = '<div class="loading-message loading-failed">' + escapeHtml(text) + '</div>';
   }
 
   function timeAgo(ts) {

@@ -613,6 +613,10 @@ main {
   font-size: 13px;
 }
 
+.loading-message.loading-failed::before {
+  display: none;
+}
+
 .loading-message::before {
   content: '';
   display: inline-block;
