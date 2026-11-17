@@ -183,6 +183,8 @@ class GatewayTaskManager extends EventEmitter {
       captureArtifacts: args.captureArtifacts,
       requesterFingerprint: requesterFingerprint,
       status: 'starting',
+      // Background tasks the agent is waiting on; 0 while it is working.
+      backgroundTasks: 0,
       output: '',
       result: null,
       error: null,
@@ -231,6 +233,7 @@ class GatewayTaskManager extends EventEmitter {
       cwd: t.cwd,
       prompt: t.prompt,
       status: t.status,
+      backgroundTasks: t.backgroundTasks || 0,
       output: t.output,
       result: t.result,
       error: t.error,
@@ -245,6 +248,7 @@ class GatewayTaskManager extends EventEmitter {
    * Subscribe to live events for a task. Returns an unsubscribe function.
    * Callback receives { type, data } where type is one of:
    *   - 'chunk'    : { text }
+   *   - 'background' : { tasks }  (agent waits on N background tasks; 0 = continuing)
    *   - 'approval' : { request }  (always followed by task failure)
    *   - 'done'     : { result, output, durationMs }
    *   - 'error'    : { message }
@@ -438,6 +442,14 @@ class GatewayTaskManager extends EventEmitter {
         // gateway needs an authoritative buffer for the final result snapshot.
         task.output += (task.output ? '\n' : '') + text;
         this._fanout(task, 'chunk', { text });
+      },
+      onBackground: (count) => {
+        // The agent ended a turn with background work still running and
+        // will continue when it finishes; the task stays running. Tells a
+        // caller why the stream goes quiet, and when it picks up again.
+        task.backgroundTasks = count;
+        log.info('task=' + task.id + ' background_tasks=' + count);
+        this._fanout(task, 'background', { tasks: count });
       },
       onApproval: (approvalReq) => {
         // Surface to subscribers before the runner finalises with

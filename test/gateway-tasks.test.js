@@ -432,6 +432,33 @@ describe('GatewayTaskManager: lifecycle', () => {
     assert.ok(events[2].data.output.includes('chunk 1'));
   });
 
+  it('stays running while the agent waits on background work, then completes', async () => {
+    const { taskId } = await tm.createTask({ agentType: 'claude', cwd: '/tmp', prompt: 'x' });
+    const events = [];
+    tm.subscribe(taskId, (e) => events.push(e));
+    const aid = tm.getTask(taskId).agentInstanceId;
+
+    im.updateStatus(aid, 'busy');
+    im.addMessage(aid, { role: 'assistant', content: 'launched' });
+    im.emit('instance:status', { id: aid, status: 'idle', backgroundTasks: 2 });
+    let snap = tm.getTask(taskId);
+    assert.equal(snap.status, 'running');
+    assert.equal(snap.backgroundTasks, 2);
+
+    im.updateStatus(aid, 'busy');
+    assert.equal(tm.getTask(taskId).backgroundTasks, 0);
+    im.addMessage(aid, { role: 'assistant', content: 'found it' });
+    im.updateStatus(aid, 'idle');
+
+    snap = tm.getTask(taskId);
+    assert.equal(snap.status, 'completed');
+    assert.equal(snap.output, 'launched\nfound it');
+    assert.deepEqual(events.map((e) => e.type), ['chunk', 'background', 'background', 'chunk', 'done']);
+    assert.deepEqual(events[1].data, { tasks: 2 });
+    assert.deepEqual(events[2].data, { tasks: 0 });
+    assert.ok(events[4].data.output.includes('found it'));
+  });
+
   it('fails closed with approval_required on approval requests', async () => {
     const { taskId } = await tm.createTask({ agentType: 'claude', cwd: '/tmp', prompt: 'x' });
     const aid = tm.getTask(taskId).agentInstanceId;

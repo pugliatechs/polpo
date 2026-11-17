@@ -359,3 +359,28 @@ describe('InstanceManager: internal instances', () => {
     assert.deepEqual(mgr.getAll(), []);
   });
 });
+
+describe('InstanceManager.updateStatus background work', () => {
+  function withEvents() {
+    const im = new InstanceManager();
+    const events = [];
+    im.on('instance:status', (e) => events.push(e));
+    im.register({ id: 'a1', name: 'Task' });
+    return { im, events };
+  }
+
+  it('puts the count of background tasks on the status event', () => {
+    const { im, events } = withEvents();
+    im.updateStatus('a1', 'idle', { backgroundTasks: 2 });
+    assert.equal(events.pop().backgroundTasks, 2);
+  });
+
+  it('leaves it out when there is none, or it is not a count', () => {
+    const { im, events } = withEvents();
+    im.updateStatus('a1', 'idle', { backgroundTasks: 0 });
+    im.updateStatus('a1', 'idle', { backgroundTasks: -1 });
+    im.updateStatus('a1', 'idle', { backgroundTasks: 1.5 });
+    im.updateStatus('a1', 'idle', { backgroundTasks: '3' });
+    for (const e of events) assert.equal('backgroundTasks' in e, false);
+  });
+});

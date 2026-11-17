@@ -165,11 +165,14 @@ Returns a Server-Sent Events stream. Event types, in order of emission:
 
 ```
 event: chunk        data: { "text": "..." }              ← assistant output (zero or more)
+event: background   data: { "tasks": N }                 ← agent waits on N background tasks (0: it continues)
 event: approval     data: { "request": {...} }           ← always followed by error
 event: artifacts    data: [{name,size,mediaType}, ...]   ← only if captureArtifacts: true
 event: done         data: { "result":{...}, "output":"...", "durationMs":N, "artifacts":[...] }
 event: error        data: { "message": "..." }
 ```
+
+A Claude agent that ends a turn with background work still running (a backgrounded command, a background sub-agent) has not finished: it continues on its own when that work is done. The task stays `running` and the agent alive until the agent is idle with nothing left in the background, within the task's `timeoutMs`. `background` events mark the wait. Other agent types do not report background work and end at their first idle as before.
 
 Comment lines like `: ping` arrive every 15 s to keep proxies from killing the connection — ignore them. The stream closes after `done` or `error`.
 
@@ -187,6 +190,7 @@ Snapshot of the task state. Safe to poll instead of streaming.
   "cwd":             "/...",
   "prompt":          "...",
   "status":          "starting" | "running" | "completed" | "failed" | "cancelled",
+  "backgroundTasks": 0,
   "output":          "accumulated assistant text",
   "result":          { "success": true, "summary": "trailing 2 KB of output" } | null,
   "error":           "timeout" | "approval_required" | ... | null,
@@ -196,6 +200,8 @@ Snapshot of the task state. Safe to poll instead of streaming.
   "durationMs":      45000
 }
 ```
+
+`backgroundTasks` is the number of background tasks the agent is waiting on, 0 while it works. On a task that timed out it says how much was still running.
 
 ### `DELETE /v1/tasks/:id`
 

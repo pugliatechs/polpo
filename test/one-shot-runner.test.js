@@ -494,3 +494,167 @@ describe('OneShotAgentRunner: bounded in-session turns', () => {
     assert.equal(res.turns, 2);
   });
 });
+
+describe('OneShotAgentRunner: background work', () => {
+  let im, runner, agents;
+
+  beforeEach(() => {
+    im = createMockIM();
+    agents = [];
+    runner = new OneShotAgentRunner({
+      instanceManager: im,
+      hubPort: 7890,
+      createAgent: (type, opts) => {
+        const a = createFakeAgent(im, type, opts);
+        agents.push(a);
+        return a;
+      },
+      waitForSocket: async () => {},
+    });
+  });
+
+  afterEach(() => runner.destroy());
+
+  const tick = () => new Promise((r) => setImmediate(r));
+
+  // The mock's updateStatus drops meta, so emit the hub's event directly.
+  const idle = (id, backgroundTasks) => {
+    const event = { id, status: 'idle' };
+    if (backgroundTasks) event.backgroundTasks = backgroundTasks;
+    im.emit('instance:status', event);
+  };
+
+  function start(opts) {
+    let id = null;
+    const counts = [];
+    const p = runner.run(Object.assign({
+      agentType: 'claude', cwd: '/tmp', prompt: 'research this',
+      name: 'Task', source: 'gateway:test',
+      onSpawn: (agentInstanceId) => { id = agentInstanceId; },
+      onBackground: (n) => counts.push(n),
+    }, opts));
+    return { promise: p, id: () => id, counts };
+  }
+
+  it('keeps the agent alive and returns the turn it takes when the work finishes', async () => {
+    const run = start({});
+    await tick();
+    const id = run.id();
+    let done = false;
+    run.promise.then(() => { done = true; });
+
+    im.updateStatus(id, 'busy');
+    im.addMessage(id, { role: 'assistant', content: 'Started two searches, will report.' });
+    idle(id, 2);
+    await tick();
+    assert.equal(done, false, 'the run must not end while background work runs');
+    assert.equal(agents[0].stopped, false, 'the agent must not be stopped');
+
+    im.updateStatus(id, 'busy');   // the agent continues on its own
+    im.addMessage(id, { role: 'assistant', content: 'Both searches found X.' });
+    idle(id, 0);
+
+    const res = await run.promise;
+    assert.equal(res.status, 'completed');
+    assert.equal(res.output, 'Started two searches, will report.\nBoth searches found X.');
+    assert.equal(res.turns, 1);
+    assert.equal(res.backgroundTasks, 0);
+    assert.deepEqual(run.counts, [2, 0]);
+    assert.equal(agents[0].stopped, true);
+  });
+
+  it('waits through several late turns until nothing is left', async () => {
+    const run = start({});
+    await tick();
+    const id = run.id();
+    im.updateStatus(id, 'busy');
+    idle(id, 2);
+    im.updateStatus(id, 'busy');
+    im.addMessage(id, { role: 'assistant', content: 'first done' });
+    idle(id, 1);
+    im.updateStatus(id, 'busy');
+    im.addMessage(id, { role: 'assistant', content: 'second done' });
+    idle(id);
+    const res = await run.promise;
+    assert.equal(res.status, 'completed');
+    assert.equal(res.output, 'first done\nsecond done');
+    assert.deepEqual(run.counts, [2, 0, 1, 0]);
+  });
+
+  it('keeps waiting when only the count changes', async () => {
+    const run = start({});
+    await tick();
+    const id = run.id();
+    let done = false;
+    run.promise.then(() => { done = true; });
+    im.updateStatus(id, 'busy');
+    idle(id, 3);
+    idle(id, 1);
+    await tick();
+    assert.equal(done, false);
+    runner.cancel(id);
+    const res = await run.promise;
+    assert.equal(res.status, 'cancelled');
+    assert.equal(res.backgroundTasks, 1);
+  });
+
+  it('ends the run when the work is gone without a follow-up', async () => {
+    // The process exited, or the tasks were stopped: nothing will come.
+    const run = start({});
+    await tick();
+    const id = run.id();
+    im.updateStatus(id, 'busy');
+    im.addMessage(id, { role: 'assistant', content: 'launched' });
+    idle(id, 1);
+    idle(id);
+    const res = await run.promise;
+    assert.equal(res.status, 'completed');
+    assert.equal(res.output, 'launched');
+  });
+
+  it('still times out, keeping what the agent said and how much it was waiting on', async () => {
+    const run = start({ timeoutMs: 40 });
+    await tick();
+    const id = run.id();
+    im.updateStatus(id, 'busy');
+    im.addMessage(id, { role: 'assistant', content: 'launched' });
+    idle(id, 2);
+    const res = await run.promise;
+    assert.equal(res.status, 'failed');
+    assert.equal(res.error, 'timeout');
+    assert.equal(res.output, 'launched');
+    assert.equal(res.backgroundTasks, 2);
+  });
+
+  it('asks the caller about the turn only once the late turn is in', async () => {
+    const seen = [];
+    const run = start({
+      maxTurns: 3,
+      onTurnEnd: (t) => { seen.push(t.output); return null; },
+    });
+    await tick();
+    const id = run.id();
+    im.updateStatus(id, 'busy');
+    im.addMessage(id, { role: 'assistant', content: 'launched' });
+    idle(id, 1);
+    await tick();
+    assert.equal(seen.length, 0, 'not while the agent waits on its work');
+    im.updateStatus(id, 'busy');
+    im.addMessage(id, { role: 'assistant', content: 'result' });
+    idle(id);
+    await run.promise;
+    assert.deepEqual(seen, ['launched\nresult']);
+  });
+
+  it('does not wait when the agent reports no background work', async () => {
+    const run = start({});
+    await tick();
+    const id = run.id();
+    im.updateStatus(id, 'busy');
+    im.addMessage(id, { role: 'assistant', content: 'done' });
+    idle(id, 0);
+    const res = await run.promise;
+    assert.equal(res.status, 'completed');
+    assert.deepEqual(run.counts, []);
+  });
+});

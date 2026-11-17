@@ -57,6 +57,7 @@ The mind and the gateway are two callers of the **same** primitive — `OneShotA
 - arming a per-run timeout *before* sending the prompt (so a hung start still trips)
 - sending the prompt with optional pre-staged attachments
 - routing the `instance:status` / `instance:message` / `instance:approval` events that come back
+- waiting, within the same timeout, when an agent goes idle with background work still running: it continues on its own when that work finishes, and the run ends only once it is idle with nothing left in the background
 - aborting and stopping the agent at terminal state (success, timeout, approval-required, external cancel)
 - unregistering the instance and resolving the run with a captured result snapshot
 

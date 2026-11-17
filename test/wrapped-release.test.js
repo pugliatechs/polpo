@@ -159,3 +159,100 @@ describe('WrappedAgent permission mode', () => {
     agent.stop();
   });
 });
+
+/**
+ * Background work the CLI reports (background_tasks_changed) and the turn
+ * it starts on its own when that work finishes (task_notification). The
+ * sequences below are what claude 2.1.301 emits in stream-json mode.
+ */
+describe('WrappedAgent background tasks', () => {
+  function agentWithHub() {
+    const agent = new WrappedAgent({ cwd: os.tmpdir() });
+    agent.instanceId = 'test-wrapped-background';
+    const sent = [];
+    agent._sendToHub = (m) => sent.push(m);
+    agent._log = () => {};
+    agent.claude = { stdin: { writable: false } };   // a live process
+    return { agent, sent };
+  }
+
+  const changed = (...tasks) => ({ type: 'system', subtype: 'background_tasks_changed', tasks });
+  const bash = (id, extra) => Object.assign({ task_id: id, task_type: 'local_bash', description: 'd' }, extra);
+  const notification = (id) => ({ type: 'system', subtype: 'task_notification', task_id: id, status: 'completed' });
+  const result = (text) => ({ type: 'result', subtype: 'success', result: text });
+  const statuses = (sent) => sent.filter((m) => m.type === 'status');
+
+  it('reports background work with the idle, then the turn that follows it', () => {
+    const { agent, sent } = agentWithHub();
+    agent.busy = true;
+    agent._handleClaudeMessage(changed(bash('b1')));
+    agent._handleClaudeMessage(result('launched'));
+    agent._handleClaudeMessage(notification('b1'));
+    agent._handleClaudeMessage(changed());
+    agent._handleClaudeMessage(result('finished'));
+
+    assert.deepEqual(statuses(sent).map((m) => [m.status, m.backgroundTasks]), [
+      ['idle', 1],
+      ['busy', undefined],
+      ['idle', 0],
+    ]);
+  });
+
+  it('leaves out watchers and tasks a tool call waits for', () => {
+    const { agent, sent } = agentWithHub();
+    agent._handleClaudeMessage(changed(
+      bash('w1', { ambient: true }),
+      bash('a1', { awaited: true }),
+      bash('b1'),
+    ));
+    agent._handleClaudeMessage(result('ok'));
+    assert.equal(statuses(sent).at(-1).backgroundTasks, 1);
+  });
+
+  it('replaces the set on every change instead of adding to it', () => {
+    const { agent, sent } = agentWithHub();
+    agent._handleClaudeMessage(changed(bash('b1'), bash('b2')));
+    agent._handleClaudeMessage(changed(bash('b2')));
+    agent._handleClaudeMessage(result('ok'));
+    assert.equal(statuses(sent).at(-1).backgroundTasks, 1);
+  });
+
+  it('does not start a turn for a notification nothing follows', () => {
+    // Foreground commands get notifications too; so do watchers.
+    const { agent, sent } = agentWithHub();
+    agent._handleClaudeMessage(changed(bash('w1', { ambient: true })));
+    agent._handleClaudeMessage(notification('fg1'));
+    agent._handleClaudeMessage(notification('w1'));
+    assert.equal(agent.busy, false);
+    assert.equal(statuses(sent).length, 0);
+  });
+
+  it('counts a task whose notification comes after it left the set', () => {
+    const { agent } = agentWithHub();
+    agent._handleClaudeMessage(changed(bash('b1')));
+    agent._handleClaudeMessage(changed());
+    agent._handleClaudeMessage(notification('b1'));
+    assert.equal(agent.busy, true);
+  });
+
+  it('does nothing for a notification that arrives mid-turn', () => {
+    // The CLI folds it into the turn already running.
+    const { agent, sent } = agentWithHub();
+    agent.busy = true;
+    agent._handleClaudeMessage(changed(bash('b1')));
+    agent._handleClaudeMessage(notification('b1'));
+    assert.equal(statuses(sent).length, 0);
+  });
+
+  it('forgets the work of a process that is gone', () => {
+    const { agent, sent } = agentWithHub();
+    agent._handleClaudeMessage(changed(bash('b1')));
+    agent.claude = { kill: () => {} };
+    agent.releaseProcess();
+    agent.claude = { stdin: { writable: false } };
+    agent._handleClaudeMessage(notification('b1'));
+    agent._handleClaudeMessage(result('ok'));
+    assert.equal(agent.busy, false);
+    assert.equal(statuses(sent).at(-1).backgroundTasks, 0);
+  });
+});

@@ -8,6 +8,12 @@
  * reuse, no multi-turn conversation. Higher-level orchestration (a
  * gateway task, a mind goal) composes runs.
  *
+ * An agent that goes idle with background work still running (claude
+ * reports it: a backgrounded command, a background agent) has not given
+ * its final answer: it continues on its own when that work finishes.
+ * The run waits for that, within the same deadline, and the turn ends
+ * only when the agent is idle with nothing left in the background.
+ *
  * Why this shape:
  *   - Single execution mechanism makes hardening (timeout, approval
  *     fail-closed, structured logs, source tags) apply uniformly.
@@ -112,6 +118,9 @@ class OneShotAgentRunner extends EventEmitter {
    * @param {function(string)} [opts.onStatus]  called on status transitions
    *                                            (`'running'` on first busy)
    * @param {function(string)} [opts.onChunk]   called for each assistant chunk
+   * @param {function(number)} [opts.onBackground] called with the number of
+   *   background tasks when the agent goes idle with some still running
+   *   and the run waits for them, then with 0 when the agent continues
    * @param {function(object)} [opts.onApproval] called when the agent requests approval
    * @param {function(object)} [opts.onTerminal] called SYNCHRONOUSLY inside the
    *   terminal-state transition, immediately before the run promise resolves.
@@ -199,6 +208,8 @@ class OneShotAgentRunner extends EventEmitter {
       onStatus: typeof opts.onStatus === 'function' ? opts.onStatus : null,
       onTerminal: typeof opts.onTerminal === 'function' ? opts.onTerminal : null,
       onTurnEnd: typeof opts.onTurnEnd === 'function' ? opts.onTurnEnd : null,
+      onBackground: typeof opts.onBackground === 'function' ? opts.onBackground : null,
+      backgroundTasks: 0,  // while status is 'background'
       maxTurns: maxTurns,
       turns: 0,
       turnStart: 0,   // offset into `output` where the current turn began
@@ -286,18 +297,55 @@ class OneShotAgentRunner extends EventEmitter {
   _routeStatus(data) {
     const r = this._runs.get(data && data.id);
     if (!r) return;
+    const backgroundTasks = Number.isInteger(data.backgroundTasks) && data.backgroundTasks > 0
+      ? data.backgroundTasks
+      : 0;
     // 'awaiting_turn' is a follow-up that has been sent but whose
     // agent has not gone busy yet. Treating it like 'starting' keeps a
     // stray idle event from being read as the turn already finishing.
-    if ((r.status === 'starting' || r.status === 'awaiting_turn') && data.status === 'busy') {
+    // 'background' is an agent waiting on its own background work; busy
+    // means that work finished and the agent is continuing.
+    if ((r.status === 'starting' || r.status === 'awaiting_turn' || r.status === 'background')
+        && data.status === 'busy') {
       const first = r.status === 'starting';
+      const resumed = r.status === 'background';
       r.status = 'running';
+      r.backgroundTasks = 0;
       if (first && r.onStatus) { try { r.onStatus('running'); } catch {} }
+      if (resumed && r.onBackground) { try { r.onBackground(0); } catch {} }
     } else if (r.status === 'running' && data.status === 'idle') {
       r.lastStopReason = typeof data.stopReason === 'string' ? data.stopReason : null;
       if (r.lastStopReason === 'refusal') r.refusals += 1;
+      if (backgroundTasks > 0) {
+        this._waitForBackground(r, backgroundTasks);
+        return;
+      }
+      this._endTurn(r);
+    } else if (r.status === 'background' && data.status === 'idle') {
+      // Idle again without having continued: the count changed, or the
+      // work is gone without a follow-up (the process exited, the tasks
+      // were stopped). With nothing left there is nothing to wait for.
+      if (backgroundTasks > 0) {
+        r.backgroundTasks = backgroundTasks;
+        return;
+      }
+      r.backgroundTasks = 0;
       this._endTurn(r);
     }
+  }
+
+  /**
+   * The agent ended its turn but left background work running. Its
+   * answer so far ("I started three searches, I will report back") is
+   * not the answer: when that work finishes it continues by itself in a
+   * new turn. Keep the agent alive and let that turn finish the job;
+   * the run deadline and cancel() still apply. The caller's own turn
+   * logic (onTurnEnd) sees the wait as part of the same turn.
+   */
+  _waitForBackground(record, count) {
+    record.status = 'background';
+    record.backgroundTasks = count;
+    if (record.onBackground) { try { record.onBackground(count); } catch {} }
   }
 
   /**
@@ -426,6 +474,9 @@ class OneShotAgentRunner extends EventEmitter {
       // null when the agent type does not report it (only claude does).
       stopReason: record.lastStopReason || null,
       refusals: record.refusals || 0,
+      // Above zero only when the run ended (timeout, cancel) while the
+      // agent was still waiting on its background work.
+      backgroundTasks: record.backgroundTasks || 0,
     };
 
     // Drop the record from the live map; further events for this agent

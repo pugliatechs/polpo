@@ -121,6 +121,10 @@ class InstanceManager extends EventEmitter {
    *   when it knows. Carried on the status event so a listener can tell
    *   an agent that finished ('end_turn') from one a guardrail stopped
    *   ('refusal'): both arrive as a plain 'idle' otherwise.
+   * @param {?number} [meta.backgroundTasks] - background work the agent
+   *   still has running. Above zero on an idle, the agent will continue
+   *   on its own when that work finishes; a caller waiting for its final
+   *   answer must not stop it yet.
    */
   updateStatus(id, status, meta) {
     const instance = this.instances.get(id);
@@ -129,8 +133,12 @@ class InstanceManager extends EventEmitter {
       instance.lastActivity = Date.now();
       const stopReason = meta && typeof meta.stopReason === 'string' ? meta.stopReason : null;
       if (status === 'idle') instance.lastStopReason = stopReason;
+      const backgroundTasks = meta && Number.isInteger(meta.backgroundTasks) && meta.backgroundTasks >= 0
+        ? meta.backgroundTasks
+        : null;
       const event = { id, status };
       if (stopReason) event.stopReason = stopReason;
+      if (backgroundTasks) event.backgroundTasks = backgroundTasks;
       this.emit('instance:status', event);
     }
   }

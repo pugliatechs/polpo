@@ -177,6 +177,7 @@ Events arrive in this strict order:
 
 ```
 event: chunk        data: { "text": "..." }                  # zero or more, assistant output
+event: background   data: { "tasks": N }                     # agent waits on N background tasks; 0 = it continues
 event: approval     data: { "request": {...} }               # ALWAYS followed by event: error
 event: artifacts    data: [{ name, size, mediaType }, ...]   # only if captureArtifacts=true
 event: done         data: { "result":{...}, "output":"...", "durationMs":N, "artifacts":[...] }
@@ -184,6 +185,12 @@ event: error        data: { "message": "..." }
 ```
 
 The stream closes after `done` OR `error`. `: ping` comment lines arrive every 15 s — ignore them.
+
+### Background work
+
+A Claude agent may start work in the background (a backgrounded command, a background sub-agent) and end its turn with something like "I started three searches, I will report back". That is not its answer. Polpo keeps the task `running` and the agent alive, and the agent continues on its own when the work finishes; the task completes only when the agent is idle with nothing left in the background. `done` then carries everything it said, the follow-up included.
+
+While it waits you get `event: background` with `{ "tasks": N }`, and the stream may go quiet for a while; `{ "tasks": 0 }` means it has picked up again. `GET /v1/tasks/:id` shows the same count in `backgroundTasks`. The wait counts against `timeoutMs`, so give work you expect to run in the background a timeout that covers it. A task that times out while waiting fails with `timeout`, and its snapshot still has the `output` it produced and the `backgroundTasks` it was waiting on.
 
 If you missed the stream (network dropped, you connected late), poll `GET /v1/tasks/:id` instead — you'll get the terminal state back as long as the task is still within its 5 min TTL.
 

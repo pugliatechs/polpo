@@ -14,6 +14,10 @@ const { PiJsonlAdapter } = require('./pi-jsonl-adapter');
 const { GooseScanner } = require('./goose-scanner');
 const { SessionController, transcriptActivity, readTranscriptTail } = require('./session-control');
 
+// Upper bound on the background-task count an agent may report; anything
+// larger is not a real count and is dropped.
+const MAX_BACKGROUND_TASKS = 1000;
+
 function setupWebSocket(server, instanceManager, getAuthState, pushManager, outboxManager, sessionController) {
   // Prompts from the dashboard go through the same controller as the
   // HTTP API and the gateway; index.js passes the shared instance.
@@ -631,7 +635,13 @@ function handleAgentMessage(instanceId, msg, instanceManager, activeWatchers) {
         const stopReason = typeof msg.stopReason === 'string' && /^[a-z_]{1,32}$/.test(msg.stopReason)
           ? msg.stopReason
           : null;
-        instanceManager.updateStatus(instanceId, msg.status, { stopReason });
+        // How much background work the agent still has running; a small
+        // non-negative integer or nothing.
+        const backgroundTasks = Number.isInteger(msg.backgroundTasks)
+          && msg.backgroundTasks >= 0 && msg.backgroundTasks <= MAX_BACKGROUND_TASKS
+          ? msg.backgroundTasks
+          : null;
+        instanceManager.updateStatus(instanceId, msg.status, { stopReason, backgroundTasks });
       }
       break;
     case 'message':

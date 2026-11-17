@@ -71,6 +71,18 @@ class WrappedAgent {
     this.claudeSessionId = null;
     this.busy = false;
     this.outputBuffer = '';
+    // Background work (a backgrounded Bash command, a background agent)
+    // the CLI reports as still running, from its background_tasks_changed
+    // messages. When it finishes, the CLI starts a turn on its own to
+    // report on it, so a caller that ends the run at the first idle loses
+    // that report. Watchers (ambient) and tasks a tool call waits for
+    // (awaited) never produce such a turn, so they are left out.
+    this._backgroundTasks = new Set();
+    // Every task id ever counted above for the current process. A
+    // finishing task can leave the set before or after its notification,
+    // and foreground commands get notifications too, so this is what
+    // tells a notification that will start a turn from one that will not.
+    this._followUpTaskIds = new Set();
 
     // Permission server path for MCP-based approval
     this.permissionServerPath = path.join(__dirname, 'permission-server.js');
@@ -146,7 +158,11 @@ class WrappedAgent {
 
     this.ws.on('open', () => {
       this._log('Connected to hub');
-      this._sendToHub({ type: 'status', status: this.busy ? 'busy' : 'idle' });
+      this._sendToHub({
+        type: 'status',
+        status: this.busy ? 'busy' : 'idle',
+        backgroundTasks: this._backgroundTasks.size,
+      });
     });
 
     this.ws.on('message', (raw) => {
@@ -260,6 +276,9 @@ class WrappedAgent {
       env,
     });
     this.claude = proc;
+    // The CLI reports background tasks per process and sends nothing at
+    // startup, so a new process starts from an empty set.
+    this._resetBackgroundTasks();
 
     // Parse stdout as newline-delimited JSON
     const rl = readline.createInterface({ input: proc.stdout });
@@ -293,6 +312,7 @@ class WrappedAgent {
       if (this._released.has(proc)) return;
       this.claude = null;
       this.busy = false;
+      this._resetBackgroundTasks();
       this._sendToHub({ type: 'status', status: 'idle' });
       this._sendToHub({
         type: 'output',
@@ -345,6 +365,26 @@ class WrappedAgent {
               contentType: 'json',
             },
           });
+        } else if (msg.subtype === 'background_tasks_changed') {
+          // The full live set after each change: replace, never merge.
+          const next = new Set();
+          for (const t of Array.isArray(msg.tasks) ? msg.tasks : []) {
+            if (!t || typeof t.task_id !== 'string' || !t.task_id) continue;
+            if (t.ambient === true || t.awaited === true) continue;
+            next.add(t.task_id);
+            this._followUpTaskIds.add(t.task_id);
+          }
+          this._backgroundTasks = next;
+        } else if (msg.subtype === 'task_notification') {
+          // A background task finished. If the agent is idle, the CLI now
+          // starts a turn of its own to report on it; mark it busy so the
+          // hub, and a runner waiting on that turn, see it begin. One that
+          // finishes mid-turn is folded into that turn, nothing to do.
+          if (!this.busy && this.claude
+              && typeof msg.task_id === 'string' && this._followUpTaskIds.has(msg.task_id)) {
+            this.busy = true;
+            this._sendToHub({ type: 'status', status: 'busy' });
+          }
         }
         break;
       }
@@ -426,7 +466,14 @@ class WrappedAgent {
           || this._lastStopReason
           || null;
         this._lastStopReason = null;
-        this._sendToHub({ type: 'status', status: 'idle', stopReason: stopReason });
+        // A non-zero count means this turn is not the agent's last word:
+        // it will continue on its own when that work finishes.
+        this._sendToHub({
+          type: 'status',
+          status: 'idle',
+          stopReason: stopReason,
+          backgroundTasks: this._backgroundTasks.size,
+        });
         if (msg.result) {
           this._sendToHub({
             type: 'message',
@@ -633,6 +680,7 @@ class WrappedAgent {
     this._released.add(proc);
     this.claude = null;
     this.busy = false;
+    this._resetBackgroundTasks();
     this._sendToHub({ type: 'status', status: 'idle' });
     proc.kill('SIGTERM');
   }
@@ -655,6 +703,11 @@ class WrappedAgent {
     clearTimeout(this.reconnectTimer);
     if (this.claude) this.claude.kill('SIGTERM');
     if (this.ws) this.ws.close();
+  }
+
+  _resetBackgroundTasks() {
+    this._backgroundTasks = new Set();
+    this._followUpTaskIds = new Set();
   }
 
   _log(msg) {
