@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.2.5](https://github.com/pugliatechs/polpo/compare/v1.2.4...v1.2.5) (2026-11-17)
+
+
+### Bug Fixes
+
+* **auth:** keep the agent token out of links, and refuse it in a URL ([10c27ba](https://github.com/pugliatechs/polpo/commit/10c27ba17a45d02d0a3ada60926b0c02660ea78a))
+* **deps:** update ws, body-parser, proxy-addr, qs and follow-redirects within their ranges ([229f673](https://github.com/pugliatechs/polpo/commit/229f673a54cb577ee0f4f902567c2fa082595d5f))
+* **gateway:** run gateway tasks in auto mode instead of with no permission checks ([70343de](https://github.com/pugliatechs/polpo/commit/70343de180734f41060e1904d20802199e97e88c))
+* **server:** give tunnels a listener of their own, and stop trusting the machine name ([c6f6f4c](https://github.com/pugliatechs/polpo/commit/c6f6f4cdc1f1def721cb8a7153d6162dfa2489c6))
+* **server:** keep the version and session count off the public health check ([ec0a11e](https://github.com/pugliatechs/polpo/commit/ec0a11e2018b1b25aa3a41b723e909db831817f1))
+* **server:** listen on loopback by default and refuse DNS rebinding ([eb19b12](https://github.com/pugliatechs/polpo/commit/eb19b12092a93a0263db033bfb324f317d422b08))
+* **sessions:** keep a session's permission mode, and filter secrets from the gateway ([f60f97d](https://github.com/pugliatechs/polpo/commit/f60f97d5b519acc59d90f125501b7a82902dd842))
+* **tunnel:** make --tunnel ssh start at all ([c026741](https://github.com/pugliatechs/polpo/commit/c026741002f0128b6abec56790d816e381bb9a82))
+
 ## [1.2.4](https://github.com/pugliatechs/polpo/compare/v1.2.3...v1.2.4) (2026-10-10)
 
 
