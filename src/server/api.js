@@ -217,7 +217,9 @@ function createApiRouter(instanceManager, getAuthState, pushManager, outboxManag
     // dashboard token in a query string so the phone browser auto-auths.
     const tunnelInfo = typeof getTunnelInfo === 'function' ? getTunnelInfo() : null;
     if (tunnelInfo && tunnelInfo.url) {
-      const token = authState.token || null;
+      // The login token, never the agent token: this link ends up in a
+      // phone's history and passes through the tunnel provider.
+      const token = authState.loginToken || null;
       const url = token ? `${tunnelInfo.url}?token=${encodeURIComponent(token)}` : tunnelInfo.url;
       try {
         const svg = await qrcode.toString(url, { type: 'svg', margin: 1, width: 240 });

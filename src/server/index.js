@@ -7,6 +7,7 @@ const { setupWebSocket } = require('./websocket');
 const { SessionController } = require('./session-control');
 const {
   AuthState,
+  generateToken,
   createAuthMiddleware,
   createStaticAuthMiddleware,
   validateSession,
@@ -475,7 +476,12 @@ function createServer(options = {}) {
       });
     },
     setAuth({ token, mode, totpSecret, trustLocalhost }) {
-      if (token !== undefined) authState.token = token;
+      if (token !== undefined) {
+        authState.token = token;
+        // A new agent token gets a fresh, unused login token with it.
+        authState.loginToken = token ? generateToken() : null;
+        authState.tokenBurned = false;
+      }
       if (mode !== undefined) authState.mode = mode;
       if (totpSecret !== undefined) authState.totpSecret = totpSecret;
       if (trustLocalhost !== undefined) authState.trustLocalhost = trustLocalhost;

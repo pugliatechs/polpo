@@ -271,6 +271,13 @@ async function runServer() {
 
   await server.start();
 
+  // A link for the phone: it carries the single-use login token, which
+  // only opens the dashboard page, never the agent token.
+  const phoneLink = (base) => {
+    const loginToken = server.authState.loginToken;
+    return loginToken ? `${base}?token=${encodeURIComponent(loginToken)}` : base;
+  };
+
   const networkHost = !isLoopbackHost(server.host);
   if (networkHost && !token) {
     console.log(`  ⚠️  No authentication on ${server.host} (--auth none): anyone who can reach this port can run commands on this machine.\n`);
@@ -358,7 +365,7 @@ async function runServer() {
           tunnelLog.info(`Auth enabled (mode: ${authMode || 'token'})`);
           if (authMode === 'pin') tunnelLog.info(`PIN: ${server.authState.pin}`);
         }
-        displayQR(token ? `${url}?token=${token}` : url);
+        displayQR(phoneLink(url));
 
         // Tell any connected dashboard to re-render its Mobile Setup QR.
         if (typeof server.broadcastToDashboards === 'function') {
@@ -413,11 +420,8 @@ async function runServer() {
         announcedUrl = true;
         tunnel = { url: supervisor.url, close: () => supervisor.stop() };
 
-        // Build URL with token baked in for QR code
-        let tunnelUrl = tunnel.url;
-        if (token) {
-          tunnelUrl += `?token=${token}`;
-        }
+        // The QR carries the login token, never the agent token
+        const tunnelUrl = phoneLink(tunnel.url);
 
         console.log(`  🌐 Tunnel active: ${tunnel.url}`);
         if (token) {
@@ -460,10 +464,7 @@ async function runServer() {
       if (addresses.length > 0) {
         console.log('  📱 Open on your phone (same network):');
         addresses.forEach((addr) => {
-          const url = token
-            ? `http://${addr}:${port}?token=${token}`
-            : `http://${addr}:${port}`;
-          console.log(`     ${url}`);
+          console.log(`     ${phoneLink(`http://${addr}:${port}`)}`);
         });
         if (token && authMode === 'pin') {
           console.log(`\n  🔑 PIN: ${server.authState.pin}`);
@@ -478,7 +479,8 @@ async function runServer() {
   // Print token for agent/bridge connections
   if (token) {
     console.log(`  🔑 Agent token: ${token}`);
-    console.log('     Pass to agents: polpo session --server ws://host:port --token <token>\n');
+    console.log('     Pass to agents: polpo session --server ws://host:port --token <token>');
+    console.log('     Agents send it as an Authorization header. It is not the token in the phone link.\n');
   }
 
   // Write server info to a well-known file so bridges can auto-discover the token

@@ -150,6 +150,52 @@ describe('--trust-localhost under DNS rebinding', () => {
   });
 });
 
+describe('the token in the QR link is not the agent token', () => {
+  let srv;
+  let port;
+  const agentToken = 'agent-token-for-test';
+
+  before(async () => {
+    srv = createServer({ port: 0, auth: { token: agentToken, mode: 'paranoid', totpSecret: 'JBSWY3DPEHPK3PXP' } });
+    port = (await quiet(() => srv.start())).port;
+  });
+  after(async () => { await srv.stop(); });
+
+  const remote = { 'x-forwarded-for': '203.0.113.9' };
+  const wsWith = (urlSuffix, headers) => new Promise((resolve) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/?role=dashboard${urlSuffix}`, { headers: { ...remote, ...headers } });
+    ws.on('message', () => { ws.close(); resolve('open'); });
+    ws.on('close', (code) => resolve(code));
+    ws.on('error', () => {});
+  });
+
+  it('the phone link opens the TOTP page once, and never the API or the WebSocket', async () => {
+    const login = srv.authState.loginToken;
+    assert.ok(login);
+    assert.notEqual(login, agentToken);
+    const page = await request(port, { path: `/?token=${login}`, headers: remote });
+    assert.equal(page.status, 302);
+    assert.equal(srv.authState.tokenBurned, true);
+    for (const urlPath of [`/api/instances?token=${login}`]) {
+      assert.equal((await request(port, { path: urlPath, headers: remote })).status, 401);
+    }
+    assert.equal((await request(port, { path: '/api/instances', headers: { ...remote, authorization: `Bearer ${login}` } })).status, 401);
+    assert.equal(await wsWith(`&token=${login}`, {}), 4001);
+  });
+
+  it('the agent token works only as a header', async () => {
+    assert.equal((await request(port, { path: '/api/instances', headers: { ...remote, authorization: `Bearer ${agentToken}` } })).status, 200);
+    assert.equal((await request(port, { path: `/api/instances?token=${agentToken}`, headers: remote })).status, 401);
+    assert.equal(await wsWith('', { authorization: `Bearer ${agentToken}` }), 'open');
+    assert.equal(await wsWith(`&token=${agentToken}`, {}), 4001);
+  });
+
+  it('the agent token in a link does not open the dashboard page either', async () => {
+    const res = await request(port, { path: `/?token=${agentToken}`, headers: remote });
+    assert.notEqual(res.status, 200);
+  });
+});
+
 describe('a single network address also listens on loopback', () => {
   const lan = Object.values(os.networkInterfaces()).flat()
     .find((n) => n && n.family === 'IPv4' && !n.internal);

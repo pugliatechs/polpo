@@ -214,11 +214,11 @@ Auth is **auto-enabled** when using `--tunnel`. For LAN or VPN deployments, you 
   <img src="assets/auth.jpeg" alt="TOTP authentication page" width="300">
 </p>
 
-- **Token**: A `crypto.randomBytes(32)` base64url token is baked into the QR code URL. It is single-use — after the first scan, it is burned and cannot be reused.
+- **Login token**: a `crypto.randomBytes(32)` base64url token in the QR code and phone links. It only opens the dashboard page, once: after the first scan it is burned. With PIN or TOTP on, it only leads to that second step. The API and the WebSocket never accept it.
 - **PIN**: A 4-digit PIN is displayed in the terminal. After scanning the QR code, the phone must enter the PIN. After 3 failed attempts, a new PIN is generated.
 - **TOTP**: Uses RFC 6238 TOTP with a persistent secret stored in `~/.config/polpo/totp.json`. On first run, the secret and `otpauth://` URI are displayed. Add it to any authenticator app.
 - **Sessions**: After authentication, a session cookie (`polpo_session`, HttpOnly, SameSite) is set. Subsequent requests use the cookie.
-- **Agents**: Agents and hooks use the raw token via `Authorization: Bearer <token>` header — the token is not burned for agent connections.
+- **Agent token**: a separate token, printed as "Agent token" and written to `~/.config/polpo/server.json` (mode 0600) for bridges. Agents and hooks send it as an `Authorization: Bearer` header, on HTTP and on the WebSocket; polpo refuses it in a URL. It never appears in a link, so a leaked QR code does not give the API.
 
 ### Built-in Protections
 
@@ -767,7 +767,7 @@ Stable, machine-facing API. See [docs/gateway.md](docs/gateway.md) for the full 
 
 Connect to `ws://<host>:<port>?role=dashboard` for real-time updates.
 
-Connect to `ws://<host>:<port>?role=agent&instanceId=<id>` as an agent.
+Connect to `ws://<host>:<port>?role=agent&instanceId=<id>` as an agent, sending the agent token as an `Authorization: Bearer <token>` header. A token in the URL is refused.
 
 ## Configuration
 

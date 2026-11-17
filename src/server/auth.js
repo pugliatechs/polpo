@@ -6,9 +6,23 @@ const { isLoopbackHost } = require('./host-guard');
 
 // ---- AuthState ----
 
+// Two secrets, kept apart on purpose:
+//
+//   token       the agent token. Polpo's own sessions, hooks, bridges and
+//               external agents send it as `Authorization: Bearer`. It is
+//               never put in a URL, and it opens the API and the WebSocket.
+//   loginToken  the token in the QR code and the phone links. It can only
+//               open the dashboard page, once (burnToken), and with PIN or
+//               TOTP on it only leads to that second step. The API and the
+//               WebSocket do not accept it.
+//
+// They used to be one value, so the link in the QR code (browser history,
+// screenshots, the tunnel provider that terminates TLS) gave the whole API
+// without PIN or TOTP, even after the page had burned it.
 class AuthState {
   constructor(options = {}) {
     this.token = options.token || null;
+    this.loginToken = options.loginToken || (this.token ? generateToken() : null);
     this.mode = options.mode || null; // null | 'pin' | 'paranoid'
     this.totpSecret = options.totpSecret || null;
     this.trustLocalhost = options.trustLocalhost !== undefined ? options.trustLocalhost : false;
@@ -36,24 +50,20 @@ function generateToken() {
   return crypto.randomBytes(32).toString('base64url');
 }
 
+/** The agent token: only from `Authorization: Bearer`, never from a URL. */
 function extractToken(req) {
-  // 1. Authorization: Bearer <token>
   const authHeader = req.headers['authorization'] || '';
   if (authHeader.startsWith('Bearer ')) {
     return authHeader.slice(7);
   }
-  // 2. ?token=<token> query param
-  const parsed = url.parse(req.url, true);
-  if (parsed.query.token) {
-    return parsed.query.token;
-  }
-  // 3. Cookie: polpo_token=<token>
-  const cookieHeader = req.headers.cookie || '';
-  const match = cookieHeader.match(/(?:^|;\s*)polpo_token=([^;]+)/);
-  if (match) {
-    return match[1];
-  }
   return null;
+}
+
+/** The login token from a QR or phone link (`?token=`). */
+function extractLoginToken(req) {
+  const parsed = url.parse(req.url || '', true);
+  const value = parsed.query.token;
+  return typeof value === 'string' && value !== '' ? value : null;
 }
 
 // ---- Sessions ----
@@ -272,7 +282,8 @@ function createAuthMiddleware(getAuthState) {
     // Session cookie (MFA-authenticated dashboard)
     if (validateSession(state, req)) return next();
 
-    // Bearer token (agents/scripts — not burned for agent use)
+    // Agent token, as a Bearer header only. The login token in the QR
+    // link is not accepted here.
     const provided = extractToken(req);
     if (provided && isAgentToken(state, provided)) return next();
 
@@ -299,9 +310,9 @@ function createStaticAuthMiddleware(getAuthState) {
     // Valid session
     if (validateSession(state, req)) return next();
 
-    // Token in URL (first access from QR code)
-    const provided = extractToken(req);
-    if (provided && !state.tokenBurned && timingSafeEqual(provided, state.token)) {
+    // Login token in the URL (first access from the QR code)
+    const provided = extractLoginToken(req);
+    if (provided && !state.tokenBurned && timingSafeEqual(provided, state.loginToken)) {
       const pin = burnToken(state);
 
       if (state.mfaEnabled) {
@@ -341,9 +352,9 @@ function validateWsAuth(authState, req) {
   // Session cookie (dashboard after MFA)
   if (validateSession(authState, req)) return true;
 
-  // Agent token (agents use the raw token, not sessions)
-  const parsed = url.parse(req.url, true);
-  const provided = parsed.query.token;
+  // Agent token, as a Bearer header on the upgrade request. Browsers
+  // cannot set one; the dashboard authenticates with its session cookie.
+  const provided = extractToken(req);
   if (provided && isAgentToken(authState, provided)) return true;
 
   return false;
@@ -366,6 +377,7 @@ module.exports = {
   AuthState,
   generateToken,
   extractToken,
+  extractLoginToken,
   createSession,
   extractSessionId,
   validateSession,
