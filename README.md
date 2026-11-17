@@ -222,7 +222,10 @@ Auth is **auto-enabled** when using `--tunnel`. For LAN or VPN deployments, you 
 
 ### Built-in Protections
 
+The threat model behind these is in [docs/security.md](docs/security.md). To report a vulnerability, see [SECURITY.md](SECURITY.md).
+
 - **CSRF (Cross-Site Request Forgery)**: Origin header validation on WebSocket and API endpoints. Cross-origin requests from malicious pages are rejected.
+- **DNS rebinding**: a `Host` allow-list on every route and on the WebSocket upgrade (see [What Polpo Refuses](#what-polpo-refuses)).
 - **Command injection**: All CLI invocations use `execFile` (not `exec`). Arguments are passed as arrays, never shell-concatenated.
 - **Path traversal**: File access endpoints validate resolved paths stay within expected directories. Search skips symbolic links and validates `realpath` against expected base directories.
 - **XSS (Cross-Site Scripting)**: All user and agent content is escaped via `escapeHtml()` before rendering. SVG uploads are force-downloaded, not served inline.
