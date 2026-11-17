@@ -27,7 +27,7 @@
     "localtunnel": "^2.0.2",
     "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0",
-    "uuid": "^9.0.0",
+    "uuid": "^14.0.3",
     "web-push": "^3.6.7",
     "ws": "^8.16.0"
   }
