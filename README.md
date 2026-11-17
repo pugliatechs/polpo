@@ -746,7 +746,8 @@ Skills are stored at `~/.agents/skills/` and symlinked into `~/.claude/skills/` 
 | POST | `/api/skills/install` | Install a skill |
 | DELETE | `/api/skills/:name` | Remove a skill |
 | GET | `/api/skills/:name/content` | Get skill SKILL.md content |
-| GET | `/health` | Health check |
+| GET | `/health` | Health check: `{"status":"ok"}` only, no auth |
+| GET | `/api/version` | Polpo version (behind auth) |
 
 #### Gateway (`/v1/*`, opt-in via `--gateway`, Bearer auth)
 

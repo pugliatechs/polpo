@@ -14,7 +14,7 @@ const { GooseAgent } = require('../src/agent/goose-agent');
  * Every agent must carry its origin tag INTO registration.
  *
  * The tag ('mind:<goal>', 'gateway:<client>', 'mind-reasoner') decides
- * whether an instance is shown as a session, counted in /health, and
+ * whether an instance is shown as a session, listed in getAll(), and
  * offered to the planner as an arm. instanceManager.register() emits
  * instance:registered synchronously, so a source applied after the fact
  * is invisible to every listener of that event: the dashboard adds the

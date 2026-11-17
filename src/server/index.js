@@ -146,10 +146,12 @@ function createServer(options = {}) {
 
   // --- Public routes (before auth) ---
 
-  // Health check
+  // Health check. Public, so it says only that polpo is up: the version
+  // would tell a scanner which known bugs apply, and the session count
+  // whether someone is using it. The dashboard reads the version from
+  // /api/version, behind auth.
   app.get('/health', (req, res) => {
-    const { version: pkgVersion } = require('../../package.json');
-    res.json({ status: 'ok', version: pkgVersion, instances: instanceManager.getAll().length });
+    res.json({ status: 'ok' });
   });
 
   // Auth mode endpoint (public, no auth required)

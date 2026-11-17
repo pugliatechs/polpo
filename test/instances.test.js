@@ -290,7 +290,7 @@ describe('InstanceManager: internal instances', () => {
   // The mind's reasoner runs on the shared one-shot runner, so it
   // registers a real instance like any arm. It is machinery, not a
   // session: listing it puts a phantom card in the dashboard sidebar,
-  // inflates the /health instance count, and offers the planner its own
+  // inflates the instance list, and offers the planner its own
   // reasoning process as an arm it could assign work to.
   function registerAll() {
     mgr.register({ id: 'u1', name: 'User session' });

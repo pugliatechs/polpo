@@ -163,6 +163,14 @@ function createApiRouter(instanceManager, getAuthState, pushManager, outboxManag
     res.sendFile(filePath);
   });
 
+  // Version for the dashboard header and About box. Behind auth, unlike
+  // /health: it tells an outsider which known bugs this polpo has.
+  router.get('/version', (req, res) => {
+    const { version } = require('../../package.json');
+    res.set('Cache-Control', 'no-store');
+    res.json({ version });
+  });
+
   // ---- Mobile setup QR codes (localhost-only, trust-localhost-gated) ----
   //
   // When an operator runs polpo with `--trust-localhost`, they're saying

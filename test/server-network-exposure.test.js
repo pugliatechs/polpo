@@ -87,6 +87,14 @@ describe('Host check on a running server', () => {
   });
   after(async () => { await srv.stop(); });
 
+  it('/health says only that polpo is up; the version is behind auth', async () => {
+    const health = await request(port, { host: `127.0.0.1:${port}` });
+    assert.deepEqual(JSON.parse(health.body), { status: 'ok' });
+    const version = await request(port, { path: '/api/version', host: `127.0.0.1:${port}` });
+    assert.equal(version.status, 200);
+    assert.match(JSON.parse(version.body).version, /^\d+\.\d+\.\d+/);
+  });
+
   it('serves loopback names and literal addresses', async () => {
     for (const host of [`localhost:${port}`, `127.0.0.1:${port}`, `[::1]:${port}`, `192.168.1.20:${port}`]) {
       assert.equal((await request(port, { host })).status, 200, host);
@@ -181,6 +189,11 @@ describe('the token in the QR link is not the agent token', () => {
     }
     assert.equal((await request(port, { path: '/api/instances', headers: { ...remote, authorization: `Bearer ${login}` } })).status, 401);
     assert.equal(await wsWith(`&token=${login}`, {}), 4001);
+  });
+
+  it('keeps the version from an unauthenticated caller', async () => {
+    assert.equal((await request(port, { path: '/api/version', headers: remote })).status, 401);
+    assert.deepEqual(JSON.parse((await request(port, { headers: remote })).body), { status: 'ok' });
   });
 
   it('the agent token works only as a header', async () => {
