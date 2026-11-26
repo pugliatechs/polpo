@@ -530,6 +530,25 @@ The `instanceId` returned can differ from the one you passed: a discovered sessi
 
 Errors: 409 `session_busy` (with `status`), 400 `no_session`, 400 `not_a_coding_session`, 404 `instance_not_found`, 403 `permission_mode_not_enabled` (the host lists no modes), 400 `permission_mode_not_allowed` (with `allowed`), 400 `permission_mode_unsupported` (not a Claude session).
 
+#### `POST /v1/instances`
+
+Starts a new session the caller drives, held by it from the start (`heldBy: gateway:<client>`) under the same rules as a takeover. Unlike a `/v1/tasks` run it does not end when the agent needs someone: it waits for the approval or the next prompt, so it suits interactive work driven from a chat app.
+
+```
+{
+  "agentType": "claude",              // optional, default claude
+  "cwd": "/abs/path",                 // required: an existing directory, checked as for /v1/tasks
+  "prompt": "...",                    // optional: sent once the agent is connected
+  "model": "...",                     // optional
+  "permissionMode": "default",        // optional: one of POLPO_GATEWAY_ALLOWED_PERMISSION_MODES
+  "title": "Order on the portal",     // optional: the dashboard card's title
+  "browser": { "sites": ["portal.example.it"] }   // optional: see Browser sessions
+}
+→ 201 { instanceId, queued, instance }
+```
+
+Errors: 503 `session_control_not_enabled`, 400 `cwd_*`, `invalid_prompt`, `invalid_title`, `invalid_model`, `invalid_agentType`, the `permission_mode_*` errors of `takeover`, 403 `browser_not_enabled`, 400 `invalid_browser`, 400 `invalid_browser_sites`, 400 `browser_auto_mode`, 400 `browser_unsupported`, and 502 `agent_not_connected` (with `instanceId`) when the session started but the first prompt could not be delivered.
+
 #### `POST /v1/instances/:id/prompt`
 
 ```
@@ -587,6 +606,43 @@ Continues a session from the catalogue, including one that is not running right 
 `agentType` defaults to `claude`. The working directory recorded in the session wins over `cwd`. `permissionMode` is optional, as for `takeover`, and applies to Claude only. Errors: 400 `invalid_session_id`, 400 `invalid_agent_type`, 409 `session_busy`, and the `permission_mode_*` errors of `takeover`.
 
 The control routes share a rate limit of 30/min per token. For what happens when the agent asks for an approval, see **Approvals** above.
+
+### Browser sessions
+
+With `POLPO_GATEWAY_BROWSER=1`, a caller can start a session whose agent works in your Chrome through Claude in Chrome, on sites it names: `POST /v1/instances` with `browser: { sites: [...] }`. It needs `POLPO_GATEWAY_SESSION_CONTROL=1` and `POLPO_GATEWAY_APPROVALS=1`, since every commit outside a grant is put to you; without them polpo warns at startup and browser sessions stay off. The agent uses your Chrome profile, so it is logged in wherever you are. It works in its own tab group and sees only those tabs.
+
+Only these sessions get `--chrome`. Gateway tasks, mind arms and sessions taken over or resumed never do.
+
+**What polpo enforces.** The agent is told the rules, but they hold whatever it does. The session runs with an `ask` permission rule for the whole Claude in Chrome server and each of its tools, so every browser call reaches polpo's approval handler first, in every permission mode, including tools a later extension adds. Without that rule the CLI's `auto` mode would let the browser tools through without asking. polpo allows the three tab tools (`tabs_context_mcp`, `tabs_create_mcp`, `tabs_close_mcp`) at once. polpo then decides on the call, and on each action of a `browser_batch` one by one; the strictest wins.
+
+| Call | polpo's decision |
+|---|---|
+| Reading, finding, screenshots, scrolling, waiting, hovering, filling a field, typing without a newline | Allowed if the tab shows one of the session's sites (or a blank tab); refused otherwise |
+| `navigate` to a URL | Allowed only to the session's sites, over http or https, without a user name or password in the URL |
+| A click, a key press, a drag, text typed with a newline, `navigate` back or forward | A commit: allowed inside a grant on that site, otherwise put to you as an approval with what it does and the page it is on |
+| `javascript_tool`, `file_upload`, `upload_image`, `shortcuts_*`, `read_network_requests`, `read_console_messages`, `gif_creator`, `resize_window` | Refused unless the site file's `allowTools` lists them; then each call is put to you, grant or not |
+| `select_browser`, `switch_browser`, `list_connected_browsers` | Always refused: they can leave the tab group or this machine |
+
+polpo follows the page each tab shows from the "Tab Context" block that ends every browser tool result, and from the navigations it allowed. After a navigation, a click or a key the page is unknown until that call's result reports it, and an unknown page is not covered by a grant: a site can redirect anywhere. In a batch, an action on a tab that an earlier navigation or click in the same batch acted on is refused; the agent sends it as a separate call. A successful result with no readable Tab Context makes every page unknown. Auto-approve on the dashboard never covers browser calls. A browser session cannot run in `auto` mode: polpo guards the browser tools only, and `auto` would run Bash and the other tools without asking. It also runs with `--strict-mcp-config`, so your own MCP servers stay out of a session driven from outside.
+
+**Grants.** Before committing a form the agent fills it, takes a screenshot and calls `polpo_request_browser_grant` with the site, the purpose, its steps and the minutes it needs. polpo checks the screenshot is one the browser tool saved (a JPEG or PNG in `<tmpdir>/claude-chrome-screenshots-*/`, owned by your user, not a link) and puts the plan to you as an approval of type `browser_plan`. The caller fetches the image from `GET /v1/instances/:id/approval/screenshot` (`/api/instances/:id/approval/screenshot` on the dashboard) and relays your answer as for any approval. Approved, commits on that site go through without asking, for the minutes shown (at most `POLPO_BROWSER_GRANT_MAX_MINUTES`) counted from your approval. A grant ends when it expires, or on abort, release or the end of the session.
+
+**Site levels.** `~/.config/polpo/browser-sites.json` (or `POLPO_BROWSER_SITES_FILE`), mode 0600:
+
+```json
+{
+  "sites": { "portal.example.it": "every-commit", "httpbin.org": "free" },
+  "allowTools": ["file_upload"]
+}
+```
+
+`plan` (the default for a site not listed) works as above. `free` lets commits through without asking. `every-commit` puts every commit to you and grants none. A site file that others can read or write, that is a link, or that has an unknown key, level or tool, stops polpo at startup. It is read again for each new session.
+
+**What it does not cover.** The guard governs the browser tools. A plan is approved from its screenshot and steps; what the site does with a click is the site's. A redirect that lands after a result is noticed at the next one. The agent is told never to type credentials and to stop when a site logs it out, but polpo cannot tell a password field from another field: every commit you are asked about says what it does and where. What it does is the agent's own summary of the click, which nothing checks; the page is polpo's. Read both before approving.
+
+#### `GET /v1/instances/:id/approval/screenshot`
+
+The screenshot of the browser plan the session waits on, as `image/jpeg` or `image/png`. 404 `no_pending_screenshot` when no plan is pending. Same checks as `/approval`: 403 `approval_control_not_enabled`, 409 `not_held_by_gateway`.
 
 ### Secrets in session content
 
@@ -844,6 +900,7 @@ The full reference for the response shape, scoring heuristics, and privacy model
   In `auto` and `default`, any approval request fails the task immediately with `approval_required`, so callers must write self-sufficient prompts. An unknown value falls back to `auto`, never to `bypass`. OpenCode, Pi and Goose take no mode from polpo; their own settings apply.
 - **Driving live sessions is opt-in**: `POLPO_GATEWAY_SESSION_CONTROL=1` turns it on. Even then a busy session is read only, a session is never forked, and polpo hands it back as soon as someone writes to it again in VSCode or a terminal. A caller gets the session's own permission mode only with `POLPO_GATEWAY_INHERIT_PERMISSION_MODE=1`, and chooses one only among `POLPO_GATEWAY_ALLOWED_PERMISSION_MODES`, which can never include `bypassPermissions`.
 - **Relayed approvals are yours**: with `POLPO_GATEWAY_APPROVALS=1` a caller can answer the approvals of the sessions it drives, but only as the user's decision, quoting the user's words, and only for the tool call it names. The quote is a record, not a proof: whoever holds the gateway key can claim you said yes, as they could with any setting that lets the gateway act for you. Leave both settings off unless the key stays with an agent you trust.
+- **Browser sessions are opt-in and guarded**: `POLPO_GATEWAY_BROWSER=1`, with session control and relayed approvals, lets a caller start a session that works in your Chrome on the sites it names. polpo, not the agent, decides on every browser call: free reading and filling on those sites only, commits put to you unless you approved a plan with its screenshot, no JavaScript, uploads or network reading unless your site file allows them, never `auto` mode. See [Browser sessions](#browser-sessions).
 - **Secrets are filtered from session content**: see [Secrets in session content](#secrets-in-session-content). Campaign decisions and the campaign ledger go through the same filter.
 - **Campaigns are directed, not bypassed**: acting on campaigns is opt-in (`POLPO_GATEWAY_CAMPAIGN_CONTROL=1`); a PA can carry your answer to any decision but never approve a campaign file or an agent's approval on its own, nor stop a campaign; gate commands run only after you approve the pinned campaign file, as an argv without a shell.
 - **No filenames in logs**: caller-controlled strings stay out of logs; uploads are recorded by size and sha256 for forensics.
@@ -863,6 +920,10 @@ The full reference for the response shape, scoring heuristics, and privacy model
 | `POLPO_GATEWAY_INHERIT_PERMISSION_MODE` | off | `1` lets a session taken over through the gateway keep its own permission mode (`auto`, ...) |
 | `POLPO_GATEWAY_ALLOWED_PERMISSION_MODES` | none | Comma list of the modes a caller may choose for a session it drives: `default`, `acceptEdits`, `auto`, `plan`, `dontAsk`. Never `bypassPermissions`; an unknown mode stops polpo from starting |
 | `POLPO_GATEWAY_APPROVALS` | off | `1` lets a caller answer, with your words, the approvals of the sessions it drives; those approvals then wait until answered |
+| `POLPO_GATEWAY_BROWSER` | off | `1` lets a caller start browser sessions in your Chrome (needs `POLPO_GATEWAY_SESSION_CONTROL=1` and `POLPO_GATEWAY_APPROVALS=1`) |
+| `POLPO_BROWSER_SITES_FILE` | `~/.config/polpo/browser-sites.json` | Per-site commit levels and the tools you unlock; mode 0600, a bad file stops polpo |
+| `POLPO_BROWSER_GRANT_MAX_MINUTES` | 15 | Longest grant a browser plan can get, 1 to 60 |
+| `POLPO_BROWSER_SCREENSHOT_MAX_BYTES` | 5 × 1024 × 1024 | Largest screenshot a browser plan may attach |
 | `POLPO_GATEWAY_REDACT` | on | `0` stops removing secrets from session content the gateway returns |
 | `POLPO_GATEWAY_CAMPAIGN_CONTROL` | off | `1` lets callers act on campaigns: propose, answer decisions, prompt, run gates, pause, resume, stop |
 | `POLPO_CAMPAIGN_AGENT_MAY` | empty | Decision kinds a PA may decide on its own: any of `question`, `budget`, `resume`. Anything else stops polpo from starting |

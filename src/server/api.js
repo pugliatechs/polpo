@@ -8,6 +8,8 @@ const { scanSessions, loadHistory, resolveSessionCwd } = require('./sessions');
 const { createAgent } = require('../agent/agent-factory');
 const { SessionController } = require('./session-control');
 const { PendingApprovals, DEFAULT_HOLD_MS } = require('./approvals');
+const { CHROME_PREFIX, GRANT_TOOL } = require('./browser-guard');
+const { readScreenshot } = require('./browser-screenshot');
 const { campaignErrorStatus } = require('../campaign');
 const {
   UPLOAD_DIR,
@@ -106,6 +108,8 @@ const { normalizeTimestamp } = require('./normalize-timestamp');
  * @param {number} [extras.approvalHoldMs] - see approvals.js
  * @param {boolean} [extras.gatewayApprovals] - a gateway caller relays the
  *   approvals of the sessions it drives (POLPO_GATEWAY_APPROVALS=1)
+ * @param {object} [extras.browserGuard] - BrowserGuard of browser sessions
+ * @param {number} [extras.screenshotMaxBytes] - cap on a plan's screenshot
  */
 function createApiRouter(instanceManager, getAuthState, pushManager, outboxManager, getTunnelInfo, sessionController, extras) {
   const router = express.Router();
@@ -128,6 +132,42 @@ function createApiRouter(instanceManager, getAuthState, pushManager, outboxManag
   // server is told to ask again. Shorter in tests.
   const approvalHoldMs = ext.approvalHoldMs || DEFAULT_HOLD_MS;
   const gatewayApprovals = ext.gatewayApprovals === true;
+  const browserGuard = ext.browserGuard || null;
+  const screenshotMaxBytes = ext.screenshotMaxBytes || undefined;
+
+  /** How long an approval of this instance waits: held when relayed. */
+  function waitOptsFor(inst, campaignId) {
+    const relayed = gatewayApprovals && inst && typeof inst.heldBy === 'string' && inst.heldBy.indexOf('gateway:') === 0;
+    return (campaignId || relayed) ? { expiresMs: null, holdMs: approvalHoldMs } : {};
+  }
+
+  // Browser plan requests waiting on the user: requestId -> { instanceId,
+  // host, minutes }. The grant starts when the user approves, not when
+  // the agent's next poll comes back.
+  const grantRequests = new Map();
+  // Browser calls put to the user: toolUseId -> { instanceId, tabs }. On
+  // approval the guard forgets those tabs' pages; on rejection nothing ran.
+  const browserAsks = new Map();
+  if (browserGuard) {
+    approvals.on('settled', ({ instanceId, toolUseId, decision }) => {
+      const ask = browserAsks.get(toolUseId);
+      if (ask && ask.instanceId === instanceId) {
+        browserAsks.delete(toolUseId);
+        if (decision && decision.behavior === 'allow') browserGuard.committed(instanceId, ask.tabs);
+      }
+      const rec = grantRequests.get(toolUseId);
+      if (!rec || rec.instanceId !== instanceId) return;
+      if (decision && decision.behavior === 'allow') {
+        rec.expiresAt = browserGuard.grant(instanceId, rec.host, rec.minutes);
+        log.info(`browser: grant on ${rec.host} for ${rec.minutes} min approved for ${instanceId}`);
+      }
+      browserGuard.clearPendingPlan(instanceId, toolUseId);
+    });
+    instanceManager.on('instance:disconnected', (inst) => {
+      for (const [id, rec] of grantRequests) if (rec.instanceId === inst.id) grantRequests.delete(id);
+      for (const [id, ask] of browserAsks) if (ask.instanceId === inst.id) browserAsks.delete(id);
+    });
+  }
 
   // Upload a file attachment from the phone
   router.post('/upload', (req, res) => {
@@ -548,6 +588,30 @@ function createApiRouter(instanceManager, getAuthState, pushManager, outboxManag
     const { instanceId, toolUseId, toolName, toolInput } = req.body;
     if (!instanceId) return res.status(400).json({ error: 'instanceId required' });
 
+    // Browser tools: polpo's guard decides first, and auto-approve never
+    // covers them, on a repoll either. A repoll of an approval already put
+    // to the user goes straight back to waiting.
+    const isBrowserTool = typeof toolName === 'string' && toolName.indexOf(CHROME_PREFIX) === 0;
+    let browserAsk = null;
+    if (isBrowserTool && !approvals.isRepoll(instanceId, toolUseId)) {
+      if (!browserGuard || !browserGuard.has(instanceId)) {
+        return res.json({ behavior: 'deny', message: 'Browser tools are not enabled for this session.' });
+      }
+      const verdict = browserGuard.decide(instanceId, toolName, toolInput);
+      if (verdict.verdict === 'allow') return res.json({ behavior: 'allow', updatedInput: toolInput });
+      if (verdict.verdict === 'deny') {
+        log.info(`browser: refused ${toolName.slice(CHROME_PREFIX.length)} on ${instanceId}`);
+        return res.json({ behavior: 'deny', message: verdict.message });
+      }
+      browserAsk = verdict;
+      if (typeof toolUseId === 'string' && toolUseId) browserAsks.set(toolUseId, { instanceId, tabs: verdict.touchedTabs || [] });
+    }
+    // polpo's own grant tool is pre-allowed; if the CLI asks anyway, it
+    // carries its own approval.
+    if (toolName === GRANT_TOOL && browserGuard && browserGuard.has(instanceId)) {
+      return res.json({ behavior: 'allow', updatedInput: toolInput });
+    }
+
     // Auto-approve: return immediately without involving the phone
     // Plans and questions are always shown for review, even with auto-approve on
     const isPlan = toolName === 'ExitPlanMode' || toolName === 'EnterPlanMode';
@@ -556,7 +620,7 @@ function createApiRouter(instanceManager, getAuthState, pushManager, outboxManag
     // A campaign's approvals always reach you: auto-approve would make it
     // a bypassed campaign.
     const campaignId = campaigns ? campaigns.campaignForInstance(instanceId) : null;
-    if (inst && inst.autoApprove && !isPlan && !isQuestion && !campaignId) {
+    if (inst && inst.autoApprove && !isPlan && !isQuestion && !campaignId && !isBrowserTool) {
       return res.json({ behavior: 'allow', updatedInput: toolInput });
     }
 
@@ -566,7 +630,10 @@ function createApiRouter(instanceManager, getAuthState, pushManager, outboxManag
     let approvalType = 'tool'; // 'tool' | 'plan' | 'question'
     let planFile = null;
     let questions = null;
-    if (toolName === 'Bash' || toolName === 'bash') {
+    if (browserAsk) {
+      description = browserAsk.description;
+      command = (browserAsk.details || []).join('\n');
+    } else if (toolName === 'Bash' || toolName === 'bash') {
       command = (toolInput && toolInput.command) || '';
       description = command
         ? `Run: ${command.length > 120 ? command.slice(0, 120) + '...' : command}`
@@ -642,8 +709,7 @@ function createApiRouter(instanceManager, getAuthState, pushManager, outboxManag
     }
     // A gateway caller relaying approvals to you over a chat app needs
     // longer than five minutes: its sessions wait like a campaign's.
-    const relayed = gatewayApprovals && inst && typeof inst.heldBy === 'string' && inst.heldBy.indexOf('gateway:') === 0;
-    const waitOpts = (campaignId || relayed) ? { expiresMs: null, holdMs: approvalHoldMs } : {};
+    const waitOpts = waitOptsFor(inst, campaignId);
     approvals.wait(instanceId, { toolUseId, toolInput, approvalType }, waitOpts)
       .then((decision) => res.json(decision));
     if (campaignId && !repoll) {
@@ -651,6 +717,99 @@ function createApiRouter(instanceManager, getAuthState, pushManager, outboxManag
         toolUseId, tool: toolName, description, command, approvalType, questions, toolInput,
       });
     }
+  });
+
+  // ---- Browser plans (polpo_request_browser_grant) ----
+  //
+  // The agent of a browser session asks the user to approve a plan on one
+  // site, with a screenshot of the filled page. Approved, commits on that
+  // site go through for the minutes granted, counted from the approval.
+  // Held like a relayed approval: it waits for the user however long it
+  // takes, with the permission server asking again every few minutes.
+  const GRANT_REQUEST_RE = /^grant-[a-f0-9]{24}$/;
+  const MAX_PURPOSE_CHARS = 500;
+  const MAX_STEPS = 20;
+  const MAX_STEP_CHARS = 300;
+
+  function grantAnswer(res, rec, decision) {
+    if (decision && decision.retry === true) return res.json({ retry: true });
+    grantRequests.delete(rec.requestId);
+    if (decision && decision.behavior === 'allow' && rec.expiresAt) {
+      return res.json({
+        granted: true,
+        message: 'Granted: commits on ' + rec.host + ' are allowed until ' + new Date(rec.expiresAt).toISOString()
+          + ' (' + rec.minutes + ' minutes from the user\'s approval). Do only the steps you listed. If the page changed '
+          + 'since your screenshot, or the site logged you out, do not commit: take a fresh screenshot and request a new grant.',
+      });
+    }
+    const why = decision && typeof decision.message === 'string' ? decision.message : 'Rejected';
+    return res.json({
+      granted: false,
+      message: 'No grant: ' + why + '. Do not commit anything on ' + rec.host + '. Each commit you still make is put to the user on its own.',
+    });
+  }
+
+  router.post('/browser-grant', async (req, res) => {
+    const b = req.body || {};
+    const refuse = (message) => res.status(400).json({ granted: false, message });
+    if (!browserGuard) return refuse('This host does not run browser sessions.');
+    const instanceId = typeof b.instanceId === 'string' ? b.instanceId : '';
+    const inst = instanceManager.get(instanceId);
+    if (!inst || !browserGuard.has(instanceId)) return refuse('This session has no browser.');
+    const requestId = typeof b.requestId === 'string' && GRANT_REQUEST_RE.test(b.requestId) ? b.requestId : null;
+    if (!requestId) return refuse('Malformed request.');
+    const campaignId = campaigns ? campaigns.campaignForInstance(instanceId) : null;
+
+    // Asking again about the plan already put to the user.
+    const pending = grantRequests.get(requestId);
+    if (pending && pending.instanceId === instanceId) {
+      if (!approvals.isRepoll(instanceId, requestId)) {
+        grantRequests.delete(requestId);
+        return res.json({ granted: false, message: 'The plan is no longer waiting on the user. Do not commit anything; request a new grant.' });
+      }
+      const decision = await approvals.wait(instanceId, { toolUseId: requestId }, waitOptsFor(inst, campaignId));
+      return grantAnswer(res, pending, decision);
+    }
+
+    const purpose = typeof b.purpose === 'string' ? b.purpose.trim() : '';
+    if (!purpose || purpose.length > MAX_PURPOSE_CHARS) return refuse('purpose is one or two sentences, at most ' + MAX_PURPOSE_CHARS + ' characters.');
+    const steps = Array.isArray(b.steps) ? b.steps.map((x) => (typeof x === 'string' ? x.trim() : '')) : null;
+    if (!steps || !steps.length || steps.length > MAX_STEPS || steps.some((x) => !x || x.length > MAX_STEP_CHARS)) {
+      return refuse('steps lists 1 to ' + MAX_STEPS + ' commits, each at most ' + MAX_STEP_CHARS + ' characters.');
+    }
+    const check = browserGuard.checkGrantRequest(instanceId, b.site, b.minutes);
+    if (!check.ok) return res.json({ granted: false, message: check.message });
+    const shot = readScreenshot(b.screenshotPath, { maxBytes: screenshotMaxBytes });
+    if (!shot.ok) return refuse(shot.message);
+
+    const rec = { requestId, instanceId, host: check.host, minutes: check.minutes, expiresAt: null };
+    grantRequests.set(requestId, rec);
+    browserGuard.setPendingPlan(instanceId, { toolUseId: requestId, buffer: shot.buffer, mime: shot.mime });
+    instanceManager.setPendingApproval(instanceId, {
+      tool: 'polpo_request_browser_grant',
+      description: 'Browser plan on ' + check.host + ': ' + purpose,
+      command: steps.map((x, i) => (i + 1) + '. ' + x).join('\n') + '\nFor ' + check.minutes + ' minutes from your approval.',
+      approvalType: 'browser_plan',
+      toolUseId: requestId,
+      browserPlan: { site: check.host, minutes: check.minutes, purpose, steps, screenshot: true },
+    });
+    log.info(`browser: plan on ${check.host} for ${check.minutes} min put to the user for ${instanceId}`);
+    const decision = await approvals.wait(instanceId, { toolUseId: requestId, toolInput: { site: check.host }, approvalType: 'browser_plan' },
+      waitOptsFor(inst, campaignId));
+    return grantAnswer(res, rec, decision);
+  });
+
+  // The screenshot of the browser plan an instance is waiting on.
+  router.get('/instances/:id/approval/screenshot', (req, res) => {
+    const id = req.params.id;
+    const plan = browserGuard ? browserGuard.pendingPlan(id) : null;
+    const pending = approvals.current(id);
+    if (!plan || !pending || pending.toolUseId !== plan.toolUseId) return res.status(404).json({ error: 'no_pending_screenshot' });
+    res.set('Content-Type', plan.mime);
+    res.set('Cache-Control', 'no-store');
+    res.set('X-Content-Type-Options', 'nosniff');
+    res.set('Content-Disposition', 'inline');
+    res.send(plan.buffer);
   });
 
   // Approve pending action

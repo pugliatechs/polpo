@@ -348,7 +348,7 @@ describe('Gateway: driving live sessions', () => {
       assert.equal(r.status, 403);
       assert.equal(r.body.error, 'permission_mode_not_enabled');
       assert.equal(agents.length, 0, 'nothing was taken over');
-      assert.deepEqual((await get(h, '/v1/health')).body.sessionControl, { enabled: true, permissionModes: [], approvals: false });
+      assert.deepEqual((await get(h, '/v1/health')).body.sessionControl, { enabled: true, permissionModes: [], approvals: false, browser: { enabled: false, grantMaxMinutes: null } });
     });
 
     it('is refused outside the list, and the list is given back', async () => {

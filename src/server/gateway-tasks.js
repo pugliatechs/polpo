@@ -695,20 +695,12 @@ function resolveTaskTimeout(requested, limits) {
   return Math.min(wanted, maxTimeoutMs);
 }
 
-function validateInput(input, maxTimeoutMs, defaultTimeoutMs) {
-  if (!input || typeof input !== 'object') {
-    const err = new Error('invalid_body');
-    err.code = 'invalid_body';
-    throw err;
-  }
-  const { agentType, cwd, prompt, timeoutMs, client, attachments, captureArtifacts, model, title } = input;
-
-  if (typeof agentType !== 'string' || !VALID_AGENT_TYPES.has(agentType)) {
-    const err = new Error('invalid_agentType');
-    err.code = 'invalid_agentType';
-    err.validTypes = Array.from(VALID_AGENT_TYPES);
-    throw err;
-  }
+/**
+ * The working directory a caller asked for: an absolute path to an
+ * existing directory polpo can enter. Shared by /v1/tasks and
+ * POST /v1/instances. Throws an error whose code the gateway maps to 400.
+ */
+function checkCwd(cwd) {
   if (typeof cwd !== 'string' || !cwd.trim()) {
     const err = new Error('invalid_cwd');
     err.code = 'invalid_cwd';
@@ -746,6 +738,56 @@ function validateInput(input, maxTimeoutMs, defaultTimeoutMs) {
     // Unknown stat error — surface it
     throw statErr;
   }
+  return trimmedCwd;
+}
+
+/** An optional model name: opaque, at most 200 characters, no control characters. */
+function checkModel(model) {
+  if (model === undefined || model === null) return;
+  if (typeof model !== 'string' || model.length === 0 || model.length > 200) {
+    const err = new Error('invalid_model');
+    err.code = 'invalid_model';
+    throw err;
+  }
+  // Defence in depth: refuse newlines / control chars / null bytes so
+  // the value can't break out of the env-var or CLI-arg passing
+  // context downstream. The agent-specific charset for valid models
+  // is much narrower than this, but those agents will reject unknown
+  // models on their own.
+  if (/[\x00-\x1f\x7f]/.test(model)) {
+    const err = new Error('invalid_model');
+    err.code = 'invalid_model';
+    throw err;
+  }
+}
+
+/** An optional card title: at most MAX_TITLE_CHARS, no control characters. */
+function checkTitle(title) {
+  if (title === undefined || title === null) return;
+  if (typeof title !== 'string' || !title.trim() || title.trim().length > MAX_TITLE_CHARS
+      || /[\x00-\x1f\x7f]/.test(title)) {
+    const err = new Error('invalid_title');
+    err.code = 'invalid_title';
+    err.limit = MAX_TITLE_CHARS;
+    throw err;
+  }
+}
+
+function validateInput(input, maxTimeoutMs, defaultTimeoutMs) {
+  if (!input || typeof input !== 'object') {
+    const err = new Error('invalid_body');
+    err.code = 'invalid_body';
+    throw err;
+  }
+  const { agentType, cwd, prompt, timeoutMs, client, attachments, captureArtifacts, model, title } = input;
+
+  if (typeof agentType !== 'string' || !VALID_AGENT_TYPES.has(agentType)) {
+    const err = new Error('invalid_agentType');
+    err.code = 'invalid_agentType';
+    err.validTypes = Array.from(VALID_AGENT_TYPES);
+    throw err;
+  }
+  checkCwd(cwd);
   if (typeof prompt !== 'string' || !prompt.trim()) {
     const err = new Error('invalid_prompt');
     err.code = 'invalid_prompt';
@@ -774,35 +816,11 @@ function validateInput(input, maxTimeoutMs, defaultTimeoutMs) {
   // The gateway treats this as an opaque string; the agent code is
   // responsible for interpreting it. Cap length to keep the spawn-log
   // line bounded and to refuse pathological inputs.
-  if (model !== undefined && model !== null) {
-    if (typeof model !== 'string' || model.length === 0 || model.length > 200) {
-      const err = new Error('invalid_model');
-      err.code = 'invalid_model';
-      throw err;
-    }
-    // Defence in depth: refuse newlines / control chars / null bytes so
-    // the value can't break out of the env-var or CLI-arg passing
-    // context downstream. The agent-specific charset for valid models
-    // is much narrower than this, but those agents will reject unknown
-    // models on their own.
-    if (/[\x00-\x1f\x7f]/.test(model)) {
-      const err = new Error('invalid_model');
-      err.code = 'invalid_model';
-      throw err;
-    }
-  }
+  checkModel(model);
 
   // title: optional, shown on the task's dashboard card instead of the
   // prompt's opening, which a caller often shares across many tasks.
-  if (title !== undefined && title !== null) {
-    if (typeof title !== 'string' || !title.trim() || title.trim().length > MAX_TITLE_CHARS
-        || /[\x00-\x1f\x7f]/.test(title)) {
-      const err = new Error('invalid_title');
-      err.code = 'invalid_title';
-      err.limit = MAX_TITLE_CHARS;
-      throw err;
-    }
-  }
+  checkTitle(title);
 
   // attachments: optional array of { uploadId }
   let resolvedAttachments = [];
@@ -875,4 +893,7 @@ module.exports = {
   MAX_TIMEOUT_MS_DEFAULT,
   TASK_TTL_MS,
   resolveTaskTimeout,
+  checkCwd,
+  checkTitle,
+  checkModel,
 };

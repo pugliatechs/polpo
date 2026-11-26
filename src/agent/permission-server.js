@@ -17,11 +17,47 @@
  */
 
 const http = require('http');
+const crypto = require('crypto');
 const readline = require('readline');
 
 const INSTANCE_ID = process.env.POLPO_INSTANCE_ID;
 const HUB_URL = process.env.POLPO_HUB_URL || 'http://127.0.0.1:7890';
 const AUTH_TOKEN = process.env.POLPO_AUTH_TOKEN || null;
+// A browser session also gets polpo_request_browser_grant.
+const BROWSER = process.env.POLPO_BROWSER === '1';
+
+const APPROVE_TOOL = {
+  name: 'polpo_approve',
+  description: 'Handle permission requests for tool use',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      tool_use_id: { type: 'string' },
+      tool_name: { type: 'string' },
+      input: { type: 'object' },
+    },
+    required: ['tool_use_id', 'tool_name', 'input'],
+  },
+};
+
+const GRANT_TOOL = {
+  name: 'polpo_request_browser_grant',
+  description: 'Ask the user to approve a plan of browser actions on one site. Call it after filling the form and '
+    + 'before the first click or key press that commits it. Attach a screenshot of the filled page, saved with '
+    + 'computer {"action": "screenshot", "save_to_disk": true}. Approved, it lets the planned commits on that site '
+    + 'through for the minutes granted, counted from the approval. Rejected, it says why.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      site: { type: 'string', description: 'The host name the plan runs on, one of the session\'s sites.' },
+      purpose: { type: 'string', description: 'What the plan achieves for the user, in one or two sentences.' },
+      steps: { type: 'array', items: { type: 'string' }, description: 'The commits you will make, in order (at most 20).' },
+      minutes: { type: 'integer', description: 'How long the grant should last.' },
+      screenshotPath: { type: 'string', description: 'The path the screenshot tool reported ("Screenshot saved to: ...").' },
+    },
+    required: ['site', 'purpose', 'steps', 'minutes', 'screenshotPath'],
+  },
+};
 
 function log(msg) {
   process.stderr.write(`[polpo-mcp] ${msg}\n`);
@@ -73,26 +109,25 @@ function handleMessage(msg) {
       send({
         jsonrpc: '2.0',
         id: msg.id,
-        result: {
-          tools: [{
-            name: 'polpo_approve',
-            description: 'Handle permission requests for tool use',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                tool_use_id: { type: 'string' },
-                tool_name: { type: 'string' },
-                input: { type: 'object' },
-              },
-              required: ['tool_use_id', 'tool_name', 'input'],
-            },
-          }],
-        },
+        result: { tools: BROWSER ? [APPROVE_TOOL, GRANT_TOOL] : [APPROVE_TOOL] },
       });
-      log('Sent tools/list response (1 tool)');
+      log('Sent tools/list response');
       break;
 
     case 'tools/call': {
+      if (BROWSER && msg.params && msg.params.name === GRANT_TOOL.name) {
+        const a = (msg.params && msg.params.arguments) || {};
+        // One id per call: the hub asks again with it while the user decides.
+        const requestId = 'grant-' + crypto.randomBytes(12).toString('hex');
+        requestGrant(requestId, a).then((out) => {
+          send({
+            jsonrpc: '2.0',
+            id: msg.id,
+            result: { content: [{ type: 'text', text: out.message }], isError: !out.granted },
+          });
+        });
+        break;
+      }
       const args = (msg.params && msg.params.arguments) || {};
       const toolUseId = args.tool_use_id || '';
       const toolName = args.tool_name || 'unknown';
@@ -122,6 +157,52 @@ function handleMessage(msg) {
 }
 
 // ---- Hub communication ----
+
+/** POST to the hub and parse the JSON answer; null when unreachable. */
+function postHub(pathname, body) {
+  const payload = JSON.stringify(body);
+  return new Promise((resolve) => {
+    const url = new URL(pathname, HUB_URL);
+    const headers = { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) };
+    if (AUTH_TOKEN) headers['Authorization'] = `Bearer ${AUTH_TOKEN}`;
+    const req = http.request(url, { method: 'POST', headers, timeout: 10 * 60 * 1000 }, (res) => {
+      let data = '';
+      res.on('data', (chunk) => (data += chunk));
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)); } catch { resolve(null); }
+      });
+    });
+    req.on('error', (err) => { log(`Hub request error: ${err.message}`); resolve(null); });
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+    req.write(payload);
+    req.end();
+  });
+}
+
+/**
+ * Ask the hub for a browser grant; it holds the request until the user
+ * answers, telling us to ask again every few minutes.
+ * @returns {Promise<{granted: boolean, message: string}>}
+ */
+async function requestGrant(requestId, args) {
+  const body = {
+    instanceId: INSTANCE_ID,
+    requestId,
+    site: args.site,
+    purpose: args.purpose,
+    steps: args.steps,
+    minutes: args.minutes,
+    screenshotPath: args.screenshotPath,
+  };
+  for (;;) {
+    const out = await postHub('/api/browser-grant', body);
+    if (out && out.retry === true) continue;
+    if (!out || typeof out.message !== 'string') {
+      return { granted: false, message: 'polpo could not be reached; no grant. Do not commit anything.' };
+    }
+    return { granted: out.granted === true, message: out.message };
+  }
+}
 
 // When the hub cannot be reached or answers nonsense, the call is denied.
 // It used to be allowed, so a polpo restart while an approval waited (for

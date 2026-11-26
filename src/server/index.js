@@ -6,6 +6,8 @@ const { createApiRouter } = require('./api');
 const { setupWebSocket } = require('./websocket');
 const { SessionController, parseAllowedPermissionModes } = require('./session-control');
 const { PendingApprovals } = require('./approvals');
+const { BrowserGuard, loadSiteConfig, defaultSiteFile, parseGrantMaxMinutes } = require('./browser-guard');
+const { parseMaxBytes: parseScreenshotMaxBytes } = require('./browser-screenshot');
 const { CampaignManager } = require('../campaign');
 const { parseAgentMay } = require('../campaign/decisions');
 const {
@@ -304,8 +306,39 @@ function createServer(options = {}) {
   // One session controller for every entry point (dashboard API, the
   // dashboard WebSocket, the gateway), so a takeover made from the phone
   // is respected by a prompt sent through the gateway and vice versa.
+  // Browser sessions (docs/gateway.md): a gateway caller may open a
+  // session that drives Claude in Chrome, under polpo's browser guard. It
+  // needs session control and relayed approvals: every commit outside a
+  // grant is put to you. A bad setting stops polpo rather than loosening
+  // the guard.
+  let browserGuard = null;
+  let screenshotMaxBytes;
+  if (process.env.POLPO_GATEWAY_BROWSER === '1') {
+    if (process.env.POLPO_GATEWAY_SESSION_CONTROL === '1' && process.env.POLPO_GATEWAY_APPROVALS === '1') {
+      const siteFile = process.env.POLPO_BROWSER_SITES_FILE || defaultSiteFile();
+      // Checked now, so a broken file stops polpo at startup.
+      loadSiteConfig(siteFile);
+      screenshotMaxBytes = parseScreenshotMaxBytes(process.env.POLPO_BROWSER_SCREENSHOT_MAX_BYTES);
+      browserGuard = new BrowserGuard({
+        grantMaxMinutes: parseGrantMaxMinutes(process.env.POLPO_BROWSER_GRANT_MAX_MINUTES),
+        // Read again for each new session, so an edit applies without a
+        // restart. A file broken since then gives the strictest settings.
+        loadConfig: () => {
+          try {
+            return loadSiteConfig(siteFile);
+          } catch (err) {
+            log.error('Browser site file ignored, every site is "plan": ' + err.message);
+            return { levels: new Map(), allowTools: new Set() };
+          }
+        },
+      });
+    } else {
+      log.warn('POLPO_GATEWAY_BROWSER=1 needs POLPO_GATEWAY_SESSION_CONTROL=1 and POLPO_GATEWAY_APPROVALS=1; browser sessions are off.');
+    }
+  }
+
   const sessionController = new SessionController({
-    instanceManager, outboxManager, getAuthState, hubPort: port,
+    instanceManager, outboxManager, getAuthState, hubPort: port, browserGuard,
   });
 
   // Approvals the agents wait on, shared by the dashboard and campaigns.
@@ -328,7 +361,13 @@ function createServer(options = {}) {
   if (agentMay.size) log.warn(`A PA may decide these campaign decisions on its own: ${[...agentMay].join(', ')}`);
 
   app.use('/api', createApiRouter(instanceManager, getAuthState, pushManager, outboxManager, () => tunnelInfo, sessionController,
-    { approvals, campaigns, gatewayApprovals: gatewayApprovals && process.env.POLPO_GATEWAY_SESSION_CONTROL === '1' }));
+    {
+      approvals,
+      campaigns,
+      gatewayApprovals: gatewayApprovals && process.env.POLPO_GATEWAY_SESSION_CONTROL === '1',
+      browserGuard,
+      screenshotMaxBytes,
+    }));
 
   // Alien Mind handle — declared up here so the gateway router (mounted
   // below) can wire /v1/goals to its coordinator. The mind itself is
@@ -426,6 +465,7 @@ function createServer(options = {}) {
       allowedPermissionModes: gatewayPermissionModes,
       approvals,
       approvalControl: gatewayApprovals,
+      browserGuard,
     }));
     if (process.env.POLPO_GATEWAY_SESSION_CONTROL === '1') {
       if (gatewayPermissionModes.size) {
@@ -433,6 +473,9 @@ function createServer(options = {}) {
       }
       if (gatewayApprovals) {
         log.warn('Gateway callers may answer the approvals of the sessions they drive, relaying your words (POLPO_GATEWAY_APPROVALS=1).');
+      }
+      if (browserGuard) {
+        log.warn('Gateway callers may open browser sessions in your Chrome, on the sites they name; commits outside a grant are put to you (POLPO_GATEWAY_BROWSER=1).');
       }
     } else if (gatewayPermissionModes.size || gatewayApprovals) {
       log.warn('POLPO_GATEWAY_ALLOWED_PERMISSION_MODES and POLPO_GATEWAY_APPROVALS need POLPO_GATEWAY_SESSION_CONTROL=1; ignored.');
@@ -450,6 +493,7 @@ function createServer(options = {}) {
   const wss = setupWebSocket(server, instanceManager, getAuthState, pushManager, outboxManager, sessionController, {
     hostGuard,
     extraServers: loopbackServer ? [loopbackServer] : [],
+    browserGuard,
   });
 
   // Campaign changes reach the dashboard live; a new decision also goes

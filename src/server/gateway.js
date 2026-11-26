@@ -38,7 +38,8 @@ const { scanSessions, loadHistory } = require('./sessions');
 const { redact, redactDeep } = require('./redact');
 const { analyzeProfile } = require('./profile-analyzer');
 const { makeLogger } = require('../util/logger');
-const { resolveClientLabel } = require('./gateway-tasks');
+const { resolveClientLabel, VALID_AGENT_TYPES, checkCwd, checkTitle, checkModel } = require('./gateway-tasks');
+const { parseSites } = require('./browser-guard');
 const InstanceManager = require('./instances');
 const sessionControl = require('./session-control');
 const { capTail, goalFinalOutput } = require('../mind/goal-output');
@@ -88,6 +89,10 @@ function createGatewayRouter(opts) {
   // and answer with your words (POLPO_GATEWAY_APPROVALS=1).
   const approvals = opts.approvals || null;
   const approvalControl = opts.approvalControl === true && !!approvals;
+  // Browser sessions (POLPO_GATEWAY_BROWSER=1, which also needs session
+  // control and approvals): the guard that decides on every browser tool
+  // call. Null when the host does not run them.
+  const browserGuard = (opts.browserGuard && sessionControlCtl && approvalControl) ? opts.browserGuard : null;
 
   /**
    * Who is calling, by the same ladder as /v1/tasks: explicit client
@@ -159,6 +164,10 @@ function createGatewayRouter(opts) {
         enabled: !!opts.sessionControl,
         permissionModes: [...allowedPermissionModes],
         approvals: approvalControl,
+        browser: {
+          enabled: !!browserGuard,
+          grantMaxMinutes: browserGuard ? browserGuard.grantMaxMinutes : null,
+        },
       },
     });
   });
@@ -492,7 +501,10 @@ function createGatewayRouter(opts) {
       case 'session_resumed_elsewhere': return 409;
       case 'no_session':
       case 'invalid_permission_mode':
-      case 'permission_mode_unsupported': return 400;
+      case 'permission_mode_unsupported':
+      case 'browser_unsupported':
+      case 'browser_auto_mode': return 400;
+      case 'browser_not_enabled': return 403;
       case 'agent_not_connected': return 502;
       default: return 500;
     }
@@ -604,6 +616,110 @@ function createGatewayRouter(opts) {
     }
   });
 
+  // POST /v1/instances: start a new session the caller drives, held by it
+  // from the start, under the same rules as a takeover.
+  // { agentType?, cwd, prompt?, model?, permissionMode?, title?, browser? }
+  // browser: { sites: ["portal.example.it", "*.example.it"] } runs it with
+  // Claude in Chrome under polpo's browser guard (POLPO_GATEWAY_BROWSER=1).
+  router.post('/instances', controlLimiter, smallJson, async (req, res) => {
+    if (!sessionControlCtl) return res.status(503).json({ error: 'session_control_not_enabled' });
+    const body = req.body || {};
+    const agentType = body.agentType === undefined ? 'claude' : body.agentType;
+    if (typeof agentType !== 'string' || !VALID_AGENT_TYPES.has(agentType)) {
+      return res.status(400).json({ error: 'invalid_agentType', validTypes: [...VALID_AGENT_TYPES] });
+    }
+    let cwd;
+    try {
+      cwd = checkCwd(body.cwd);
+      checkTitle(body.title);
+      checkModel(body.model);
+    } catch (err) {
+      const out = { error: err.code || 'invalid_body' };
+      if (err.limit) out.limit = err.limit;
+      return res.status(mapErrorStatus(err.code)).json(out);
+    }
+    let prompt = null;
+    if (body.prompt !== undefined && body.prompt !== null) {
+      if (typeof body.prompt !== 'string' || !body.prompt.trim() || body.prompt.length > MAX_PROMPT_CHARS) {
+        return res.status(400).json({ error: 'invalid_prompt' });
+      }
+      prompt = body.prompt;
+    }
+    const permissionMode = requestedPermissionMode(res, body);
+    if (permissionMode === null) return;
+    let browser;
+    if (body.browser !== undefined) {
+      if (!browserGuard) {
+        return res.status(403).json({
+          error: 'browser_not_enabled',
+          message: 'This host does not run browser sessions (POLPO_GATEWAY_BROWSER=1, with session control and approvals).',
+        });
+      }
+      const b = body.browser;
+      if (!b || typeof b !== 'object' || Array.isArray(b) || Object.keys(b).some((k) => k !== 'sites')) {
+        return res.status(400).json({ error: 'invalid_browser', message: 'browser is { sites: [host names] }.' });
+      }
+      const parsed = parseSites(b.sites);
+      if (!parsed.ok) return res.status(400).json({ error: 'invalid_browser_sites', message: parsed.message });
+      browser = { sites: parsed.sites };
+    }
+    const label = clientLabelFor(req, body);
+    try {
+      const out = await sessionControlCtl.start({
+        agentType,
+        cwd,
+        model: body.model || undefined,
+        name: body.title ? body.title.trim() : undefined,
+        heldBy: 'gateway:' + label,
+        permissionMode,
+        browser,
+        serverUrl: 'ws://127.0.0.1:' + req.socket.localPort,
+      });
+      if (!out.ok) return sendControlFailure(res, out);
+      if (body.title && instanceManager && typeof instanceManager.setTitle === 'function') {
+        instanceManager.setTitle(out.instanceId, body.title.trim());
+      }
+      if (browser) log.info(`Browser session ${out.instanceId} started for gateway:${label} on ${browser.sites.join(', ')}`);
+      let queued = null;
+      if (prompt) {
+        const sent = sessionControlCtl.sendPrompt(out.instanceId, prompt, { source: 'gateway:' + label, requireDelivery: true });
+        if (!sent.ok) {
+          return res.status(502).json({ error: sent.error, message: sent.message, instanceId: out.instanceId });
+        }
+        queued = sent.queued;
+      }
+      const after = findInstance(out.instanceId);
+      res.status(201).json({
+        instanceId: out.instanceId,
+        queued,
+        instance: after ? sessionControl.describeInstance(after) : null,
+      });
+    } catch (err) {
+      log.error('POST /v1/instances failed:', err && err.message);
+      res.status(500).json({ error: 'start_failed' });
+    }
+  });
+
+  // GET /v1/instances/:id/approval/screenshot: the screenshot attached to
+  // the browser plan the session waits on (approvalType 'browser_plan').
+  // Only that one: nothing else on the machine is reachable here.
+  router.get('/instances/:id/approval/screenshot', controlLimiter, (req, res) => {
+    if (!approvalControl) return res.status(403).json({ error: 'approval_control_not_enabled' });
+    const inst = drivableInstance(req, res);
+    if (!inst) return;
+    if (!heldByGateway(inst)) return res.status(409).json({ error: 'not_held_by_gateway' });
+    const plan = browserGuard ? browserGuard.pendingPlan(inst.id) : null;
+    const pending = approvals.current(inst.id);
+    if (!plan || !pending || pending.toolUseId !== plan.toolUseId) {
+      return res.status(404).json({ error: 'no_pending_screenshot' });
+    }
+    res.set('Content-Type', plan.mime);
+    res.set('Cache-Control', 'no-store');
+    res.set('X-Content-Type-Options', 'nosniff');
+    res.set('Content-Disposition', 'inline');
+    res.send(plan.buffer);
+  });
+
   // POST /v1/instances/:id/prompt { text }: send a prompt into a session
   // polpo drives. Follow the reply with GET /conversation?since=.
   router.post('/instances/:id/prompt', controlLimiter, smallJson, (req, res) => {
@@ -638,6 +754,8 @@ function createGatewayRouter(opts) {
       return res.status(409).json({ error: 'takeover_required' });
     }
     const sent = instanceManager.sendToAgent(inst.id, { type: 'abort' });
+    // An abort ends any browser grant, whether or not the agent heard it.
+    if (browserGuard) browserGuard.revokeGrants(inst.id);
     if (!sent) return res.status(502).json({ error: 'agent_not_connected' });
     instanceManager.updateStatus(inst.id, 'idle');
     res.json({ ok: true });
@@ -1631,6 +1749,7 @@ function mapErrorStatus(code) {
     case 'invalid_prompt':
     case 'invalid_client':
     case 'invalid_title':
+    case 'invalid_model':
     case 'prompt_too_long':
     case 'cwd_must_be_absolute':
     case 'cwd_does_not_exist':

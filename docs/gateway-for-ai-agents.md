@@ -61,6 +61,8 @@ If the base URL you were given ends in `.trycloudflare.com`, the host is reachab
 | See which coding sessions are running right now | `GET /v1/instances` |
 | Follow a running session's new messages | `GET /v1/instances/:id/conversation?since=<seq>` |
 | Continue a running session (host must have `POLPO_GATEWAY_SESSION_CONTROL=1`) | `POST /v1/instances/:id/takeover`, then `POST /v1/instances/:id/prompt` |
+| Start a new session you drive, for interactive work that needs the operator's answers along the way (host must have `POLPO_GATEWAY_SESSION_CONTROL=1`) | `POST /v1/instances`, then `POST /v1/instances/:id/prompt` |
+| Do work in the operator's logged-in Chrome on named sites, with the operator approving commits from the phone (host must have `POLPO_GATEWAY_BROWSER=1`) | `POST /v1/instances` with `browser: { sites }` (6a, Browser sessions) |
 | Run a session you drive in another permission mode (host lists the modes in `POLPO_GATEWAY_ALLOWED_PERMISSION_MODES`) | `permissionMode` on `takeover`/`resume`, or `POST /v1/instances/:id/permission-mode` |
 | Put a session's pending approval to the operator and bring back their answer (host must have `POLPO_GATEWAY_APPROVALS=1`) | `GET /v1/instances/:id` (`pendingApproval`), then `POST /v1/instances/:id/approval` |
 | Abort a runaway task you started | `DELETE /v1/tasks/:id` |
@@ -93,11 +95,12 @@ Use this once at the start of a session to verify the host is reachable and to l
 ```json
 {
   "status": "ok", "version": "1.2.1", "activeTasks": 3,
-  "sessionControl": { "enabled": true, "permissionModes": ["default", "auto"], "approvals": true }
+  "sessionControl": { "enabled": true, "permissionModes": ["default", "auto"], "approvals": true,
+                      "browser": { "enabled": true, "grantMaxMinutes": 15 } }
 }
 ```
 
-`sessionControl` tells you, before you try, whether you may drive sessions on this host, which permission modes you may choose for them (empty: none), and whether you may answer their approvals (6a).
+`sessionControl` tells you, before you try, whether you may drive sessions on this host, which permission modes you may choose for them (empty: none), whether you may answer their approvals, and whether you may open browser sessions and for how long a grant can last at most (6a).
 
 `activeTasks` tells you how many gateway-spawned agents are currently running. If it's near the host's `maxConcurrent` (default 4), expect `POST /v1/tasks` to return `429 max_concurrent_reached`.
 
@@ -402,6 +405,42 @@ The rules you must follow:
 
 It continues the same session, it does not fork it: when the operator reloads the VSCode tab, they see what you did. `permissionMode` says whether the session runs in a mode (`auto`, say, which asks for few approvals) or `null` (every approval goes to polpo).
 
+### Starting a session
+
+`POST /v1/instances` starts a new session you drive, held by you from the start, under the same rules as a takeover. Use it instead of `POST /v1/tasks` when the work needs the operator along the way: a task ends as soon as its agent needs someone, a session waits.
+
+```
+POST /v1/instances
+{ "agentType": "claude",          // optional, default claude
+  "cwd": "/abs/path/on/the/host", // required, an existing directory
+  "prompt": "...",                // optional: the first prompt, sent right away
+  "model": "...",                 // optional
+  "permissionMode": "default",    // optional, one of sessionControl.permissionModes
+  "title": "Order on the portal", // optional, shown on the operator's dashboard
+  "browser": { "sites": [...] } } // optional, see Browser sessions
+→ 201 { instanceId, queued, instance }
+```
+
+Then follow it like any session you drive: `/conversation?since=`, `pendingApproval`, `/prompt`, `/abort`. Errors: `400` for `cwd_*`, `invalid_prompt`, `invalid_title`, `invalid_model`, `invalid_agentType`, `permission_mode_not_allowed`; `403 permission_mode_not_enabled`; `503 session_control_not_enabled`; `502 agent_not_connected` (with `instanceId`) when the session started but the first prompt could not be delivered: send it again with `/prompt`.
+
+### Browser sessions
+
+With `browser: { "sites": ["portal.example.it", "*.example.it"] }` the session's agent works in the operator's Chrome, which is logged in wherever the operator is. Only when `sessionControl.browser.enabled` is `true` (otherwise `403 browser_not_enabled`), only for `agentType: "claude"`, and never in `auto` mode (`400 browser_auto_mode`).
+
+**Sites.** Host names only, no scheme, port or path. `*.example.it` matches the subdomains of example.it, not example.it itself: list both if you need both. No IP addresses, no localhost, at most 20 (`400 invalid_browser_sites`). Ask the operator which sites the work needs; never add one on your own.
+
+**What polpo enforces**, whatever the agent is told:
+
+- On the session's sites, reading, scrolling, screenshots and filling form fields are free. Navigating anywhere else is refused, and so is reading a tab that ended up on another site.
+- A **commit** (a click, a key press, text typed with a newline) is put to the operator as an ordinary approval, with `description` giving what the click does (the agent's own summary) and the page it is on (polpo's), unless a **grant** covers that site. Relay both as they are.
+- Before committing a form, the agent fills it, takes a screenshot and asks for a grant: a `pendingApproval` with `approvalType: "browser_plan"` and `browserPlan: { site, minutes, purpose, steps, screenshot: true }`.
+- Running JavaScript, uploading files, reading network requests or the console, recording and switching browsers are refused unless the host allows them, and even then each use is put to the operator.
+- The host may mark a site `free` (commits need no approval) or `every-commit` (every commit is put to the operator, no grants).
+
+**A browser plan.** Show the operator `purpose`, the numbered `steps` and the minutes, **and the screenshot**: `GET /v1/instances/:id/approval/screenshot` returns the image (`image/jpeg` or `image/png`) of the plan pending right now, and `404 no_pending_screenshot` otherwise. Send it as a photo in your chat, never describe it in its place. Then answer with `POST /v1/instances/:id/approval` exactly as for any approval: `approve` or `reject` (with `text` as the reason), and `relay: { "decidedBy": "user", "userMessage": "<their reply, verbatim>" }`. Approved, the grant runs from that moment for the minutes shown; `POST /v1/instances/:id/abort` ends it early. A plan answered late is fine: the agent is told to take a fresh screenshot and ask again if the page changed or the site logged out.
+
+**Never ask the agent to log in.** It must not type passwords or codes. If a site shows a login page, it stops and reports; tell the operator to log in in their Chrome, then continue.
+
 ### Permission mode and approvals
 
 **Choosing the mode.** If `sessionControl.permissionModes` in `/v1/health` is not empty, you may pass one of those modes as `permissionMode` to `takeover` or `resume`, or change it between turns with `POST /v1/instances/:id/permission-mode` `{ "permissionMode": "auto" }` (idle only; it applies from your next prompt). `default` means none. Choose the mode the operator asked for; do not raise it on your own to get past an approval. A mode the host does not list returns `400 permission_mode_not_allowed` with `allowed`; an empty list returns `403 permission_mode_not_enabled`. Then tell the operator; never claim you cannot help when the host simply does not allow it, and never send them to a dashboard setting that does not exist: the mode is chosen here or in the host's configuration.
@@ -691,11 +730,13 @@ Discovery    GET  /v1/sessions/search?q=...
 
 Live         GET  /v1/instances
              GET  /v1/instances/:id/conversation?since=<seq>
-Drive        POST /v1/instances/:id/takeover    (idle only; use the returned id)
+Drive        POST /v1/instances                 body: {cwd, prompt?, model?, permissionMode?, title?, browser?: {sites}}
+             POST /v1/instances/:id/takeover    (idle only; use the returned id)
 (opt-in)     POST /v1/instances/:id/prompt      body: {text}
              POST /v1/instances/:id/abort
              POST /v1/instances/:id/permission-mode  body: {permissionMode}
              POST /v1/instances/:id/approval   body: {toolUseId, answer, text?, answers?, relay}
+             GET  /v1/instances/:id/approval/screenshot  (the pending browser plan's image)
              POST /v1/sessions/:id/resume       body: {agentType?, cwd?}
              503 session_control_not_enabled  → host has it off; read only
              409 session_busy                 → wait, do not retry in a loop

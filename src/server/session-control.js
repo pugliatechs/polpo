@@ -115,6 +115,24 @@ function describeApproval(approval) {
       : null,
     questions: describeQuestions(approval.questions),
     input: input,
+    browserPlan: describeBrowserPlan(approval.browserPlan),
+  };
+}
+
+/**
+ * A browser plan waiting on the user (approvalType 'browser_plan'). Its
+ * screenshot is fetched separately, from
+ * GET /v1/instances/:id/approval/screenshot.
+ */
+function describeBrowserPlan(plan) {
+  if (!plan || typeof plan !== 'object') return null;
+  const text = (v, max) => (typeof v === 'string' ? capText(redact(v), max).text : null);
+  return {
+    site: typeof plan.site === 'string' ? plan.site : null,
+    minutes: Number.isInteger(plan.minutes) ? plan.minutes : null,
+    purpose: text(plan.purpose, 500),
+    steps: Array.isArray(plan.steps) ? plan.steps.slice(0, 20).map((st) => text(st, 300)) : [],
+    screenshot: plan.screenshot === true,
   };
 }
 
@@ -341,6 +359,9 @@ function chosenMode(mode) {
   return { ok: true, mode: mode === 'default' ? null : mode };
 }
 
+// How long start() waits for a new agent's connection to polpo.
+const CONNECT_WAIT_MS = 5000;
+
 function staleMs() {
   const n = Number(process.env.POLPO_SESSION_STALE_MS);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_STALE_MS;
@@ -438,6 +459,8 @@ class SessionController {
    * @param {number} [opts.hubPort] - polpo's port, for agents to dial back
    * @param {function} [opts.createAgent] - injectable for tests
    * @param {object} [opts.sessions] - injectable sessions module, for tests
+   * @param {object} [opts.browserGuard] - BrowserGuard, when the gateway
+   *   may open browser sessions
    */
   constructor(opts) {
     this.instanceManager = opts.instanceManager;
@@ -446,6 +469,11 @@ class SessionController {
     this.hubPort = opts.hubPort || null;
     this._createAgent = opts.createAgent || null;
     this._sessions = opts.sessions || null;
+    this.browserGuard = opts.browserGuard || null;
+    // A session that ends takes its browser state and grants with it.
+    if (this.browserGuard && this.instanceManager && typeof this.instanceManager.on === 'function') {
+      this.instanceManager.on('instance:disconnected', (inst) => this.browserGuard.forget(inst.id));
+    }
     // sessionId (or instanceId, for brand-new sessions) -> agent object.
     // Formerly a map private to the dashboard API router.
     this.agents = new Map();
@@ -588,6 +616,8 @@ class SessionController {
     const inst = this.instanceManager.get(instanceId);
     if (!inst) return false;
     this.held.delete(instanceId);
+    // Nobody drives it now: no browser grant outlives that.
+    if (this.browserGuard) this.browserGuard.revokeGrants(instanceId);
     const agent = this.agentFor(inst);
     if (agent && typeof agent.releaseProcess === 'function') {
       try { agent.releaseProcess(); } catch {}
@@ -669,6 +699,10 @@ class SessionController {
     if (!this._guarded(inst)) return fail('permission_mode_unsupported', 'Only Claude sessions have a permission mode.');
     const chosen = chosenMode(mode);
     if (!chosen.ok) return chosen;
+    if (chosen.mode === 'auto' && this.browserGuard && this.browserGuard.has(instanceId)) {
+      return fail('browser_auto_mode', 'A browser session cannot run in auto mode: polpo guards the browser tools, '
+        + 'and auto would run every other tool without asking.');
+    }
     if (!this.held.has(instanceId) || inst.canReceivePrompts === false) {
       return fail('takeover_required', 'polpo is only watching this session. Take it over first, once it is idle.');
     }
@@ -846,21 +880,56 @@ class SessionController {
   /**
    * Start a new session polpo drives.
    *
-   * @param {object} opts - { agentType, cwd, name, model, serverUrl, heldBy }
+   * @param {object} opts - { agentType, cwd, name, model, serverUrl, heldBy,
+   *   permissionMode, browser }
    *   `heldBy` marks it as held from the start, as a takeover would.
+   *   `permissionMode` is a mode the caller chose; the caller checks it is
+   *   allowed. `browser` is { sites } (already parsed): the session runs
+   *   with Claude in Chrome under polpo's browser guard. Never 'auto': the
+   *   guard covers the browser tools only, and auto would run every other
+   *   tool without asking.
    */
   async start(opts) {
     const o = opts || {};
-    const agent = this._createAgentFn()(o.agentType || 'claude', {
+    const agentType = o.agentType || 'claude';
+    let mode = null;
+    if (o.permissionMode !== undefined) {
+      if (agentType !== 'claude') return fail('permission_mode_unsupported', 'Only Claude sessions have a permission mode.');
+      const chosen = chosenMode(o.permissionMode);
+      if (!chosen.ok) return chosen;
+      mode = chosen.mode;
+    }
+    let browser = null;
+    if (o.browser) {
+      if (!this.browserGuard) return fail('browser_not_enabled', 'This host does not run browser sessions.');
+      if (agentType !== 'claude') return fail('browser_unsupported', 'Only Claude sessions can use the browser.');
+      if (mode === 'auto') {
+        return fail('browser_auto_mode', 'A browser session cannot run in auto mode: polpo guards the browser tools, '
+          + 'and auto would run every other tool without asking. Use default or acceptEdits.');
+      }
+      browser = { sites: o.browser.sites.slice(), cli: null };
+    }
+    const agent = this._createAgentFn()(agentType, {
       name: o.name || ('Session (' + path.basename(o.cwd || '') + ')'),
       cwd: o.cwd,
       model: o.model || undefined,
       serverUrl: this._serverUrl(o.serverUrl),
       token: this._authToken(),
+      claudePermissionMode: mode || undefined,
+      browser: browser || undefined,
     });
     await agent.start();
     this.track(agent.instanceId, agent);
-    if (o.heldBy) this._hold(agent.instanceId, o.heldBy, null);
+    // start() returns before the agent's connection to polpo is open; a
+    // prompt sent right away (POST /v1/instances with a prompt) needs it.
+    await this._connected(agent.instanceId, CONNECT_WAIT_MS);
+    if (browser) {
+      // Before the first prompt, which is when the CLI starts: the guard
+      // knows the session, and the CLI gets the tools it refuses outright.
+      this.browserGuard.register(agent.instanceId, browser.sites);
+      browser.cli = require('./browser-guard').browserCliArgs(this.browserGuard.disallowedTools(agent.instanceId));
+    }
+    if (o.heldBy) this._hold(agent.instanceId, o.heldBy, mode);
     return { ok: true, instanceId: agent.instanceId };
   }
 
@@ -874,6 +943,24 @@ class SessionController {
     this.held.get(instanceId).heldBy = heldBy;
     this.instanceManager.setControl(instanceId, { canReceivePrompts: true, heldBy });
     return true;
+  }
+
+  /**
+   * Wait until polpo sees the agent's connection, up to `ms`. Resolves
+   * either way: a prompt sent too early fails with agent_not_connected.
+   */
+  _connected(instanceId, ms) {
+    const ready = () => {
+      const inst = this.instanceManager.get(instanceId);
+      return !!(inst && inst.agentSocket && inst.agentSocket.readyState === 1);
+    };
+    if (ready()) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const deadline = Date.now() + ms;
+      const timer = setInterval(() => {
+        if (ready()) { clearInterval(timer); resolve(true); } else if (Date.now() > deadline) { clearInterval(timer); resolve(false); }
+      }, 25);
+    });
   }
 
   /** Remember an agent and forget it when its connection closes. */

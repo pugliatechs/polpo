@@ -24,10 +24,27 @@ const os = require('os');
 const path = require('path');
 const readline = require('readline');
 const { logPrefix } = require('./log-prefix');
+const { parseTabContext } = require('./tab-context');
 
 const DEFAULT_SERVER = 'ws://127.0.0.1:7890';
+const CHROME_TOOL_PREFIX = 'mcp__claude-in-chrome__';
 const UPLOAD_DIR = path.join(os.tmpdir(), 'polpo-uploads');
 const APPROVAL_CALL_TIMEOUT_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * What a browser session's agent is told about polpo's guard. The sites
+ * are host names polpo has already checked.
+ */
+function browserInstructions(sites) {
+  return [
+    'Browser rules set by polpo, the tool that runs this session for the user:',
+    '- Use the browser only on these sites: ' + sites.join(', ') + '. polpo refuses to navigate anywhere else, and refuses to read a tab that is on another site.',
+    '- Reading, scrolling, screenshots and filling form fields are free on these sites. A click, a key press, or text typed with a newline commits something: polpo puts it to the user unless a grant covers the site.',
+    '- To commit a form: fill it, take a screenshot with computer {"action": "screenshot", "save_to_disk": true}, then call polpo_request_browser_grant with the site, the purpose, the steps you will take, the minutes you need and the screenshot path. Wait for the answer, and follow it.',
+    '- Send each action that follows a navigation or a click on a tab as a separate call, not in the same browser_batch: until the result says where the tab is, polpo does not know the page and refuses the batch.',
+    '- Never type passwords, one-time codes or other credentials. If a site shows a login page or logs you out, stop and report it.',
+  ].join('\n');
+}
 
 class WrappedAgent {
   constructor(options = {}) {
@@ -56,6 +73,13 @@ class WrappedAgent {
     // polpo's approval prompt as usual.
     this.claudePermissionMode = options.claudePermissionMode || null;
     this.claudeBinary = options.claudeBinary || 'claude';
+    // A browser session: { sites, cli: { allowedTools, askTools,
+    // disallowedTools } }, built by polpo's browser guard. Only a session
+    // the gateway opened with browser.sites has one; nothing else gets
+    // --chrome.
+    this.browser = options.browser || null;
+    // Ids of the browser tool calls whose results are still to come.
+    this._browserToolUses = new Set();
 
     // Hub connection state
     this.instanceId = null;
@@ -207,6 +231,28 @@ class WrappedAgent {
 
   // --- Claude CLI process management ---
 
+  /**
+   * CLI arguments of a browser session. The `ask` rules (the whole
+   * browser server and each tool) are what make every browser call reach
+   * polpo's guard: without them the CLI lets these tools through in auto
+   * mode without asking. They hold in every
+   * permission mode, and a project's settings cannot override them.
+   * --strict-mcp-config keeps the operator's own MCP servers out of a
+   * session driven from outside; the explicit --permission-mode keeps a
+   * project's defaultMode from changing it.
+   */
+  _browserArgs() {
+    const cli = this.browser.cli || {};
+    const args = ['--chrome', '--strict-mcp-config', '--permission-mode', this.claudePermissionMode || 'default'];
+    if (Array.isArray(cli.allowedTools) && cli.allowedTools.length) args.push('--allowedTools', ...cli.allowedTools);
+    if (Array.isArray(cli.disallowedTools) && cli.disallowedTools.length) args.push('--disallowedTools', ...cli.disallowedTools);
+    args.push('--settings', JSON.stringify({
+      permissions: { ask: Array.isArray(cli.askTools) ? cli.askTools : [], disableBypassPermissionsMode: 'disable' },
+    }));
+    args.push('--append-system-prompt', browserInstructions(this.browser.sites || []));
+    return args;
+  }
+
   spawnClaude() {
     const args = [
       '--output-format', 'stream-json',
@@ -222,7 +268,7 @@ class WrappedAgent {
       args.push('--model', this.model);
     }
 
-    if (this.permissionMode === 'bypass') {
+    if (this.permissionMode === 'bypass' && !this.browser) {
       args.push('--dangerously-skip-permissions');
     } else {
       // Use the MCP permission server for interactive approval from the phone.
@@ -244,6 +290,8 @@ class WrappedAgent {
                 .replace('ws://', 'http://')
                 .replace('wss://', 'https://'),
               ...(this.token ? { POLPO_AUTH_TOKEN: this.token } : {}),
+              // Offers polpo_request_browser_grant next to polpo_approve.
+              ...(this.browser ? { POLPO_BROWSER: '1' } : {}),
             },
           },
         },
@@ -251,7 +299,9 @@ class WrappedAgent {
       const mcpConfigPath = path.join(os.tmpdir(), `polpo-mcp-${this.instanceId}.json`);
       fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfigObj, null, 2), { mode: 0o600 });
       this._log(`MCP config written to ${mcpConfigPath}`);
-      if (this.claudePermissionMode) {
+      if (this.browser) {
+        args.push(...this._browserArgs());
+      } else if (this.claudePermissionMode) {
         args.push('--permission-mode', this.claudePermissionMode);
       }
       args.push('--permission-prompt-tool', 'mcp__polpo__polpo_approve');
@@ -409,6 +459,10 @@ class WrappedAgent {
               },
             });
           } else if (block.type === 'tool_use') {
+            // Only these calls' results carry a Tab Context polpo trusts.
+            if (this.browser && typeof block.name === 'string' && block.name.indexOf(CHROME_TOOL_PREFIX) === 0 && block.id) {
+              this._browserToolUses.add(block.id);
+            }
             this.busy = true;
             this._sendToHub({ type: 'status', status: 'busy' });
             this._sendToHub({
@@ -436,6 +490,17 @@ class WrappedAgent {
 
         for (const block of content) {
           if (block.type === 'tool_result') {
+            // Where each browser tab is now, from the full result: the
+            // copy below is cut, and the Tab Context block comes last.
+            // Only from a Claude in Chrome call's result: any other tool's
+            // result (a fetched page, a file) could carry a forged block.
+            // A successful result without a readable block leaves polpo not
+            // knowing any page: it says so rather than keep a stale one.
+            if (this.browser && this._browserToolUses.delete(block.tool_use_id)) {
+              const tabs = parseTabContext(block.content);
+              if (tabs) this._sendToHub({ type: 'browser_tabs', tabs });
+              else if (!block.is_error) this._sendToHub({ type: 'browser_tabs', tabs: null });
+            }
             const resultText = typeof block.content === 'string'
               ? block.content
               : JSON.stringify(block.content);
@@ -745,4 +810,4 @@ async function runWrapped(options = {}) {
   return agent;
 }
 
-module.exports = { WrappedAgent, runWrapped };
+module.exports = { WrappedAgent, runWrapped, browserInstructions };

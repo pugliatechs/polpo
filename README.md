@@ -574,7 +574,7 @@ GET    /v1/tasks/:id/artifacts/:name     host → caller (sealed, signed-attachm
 
 Gateway-spawned agents register in the dashboard with `source: 'gateway:<client>'`, so you can watch what the remote caller is doing from your phone and intervene if needed.
 
-The gateway can also follow the sessions running right now (`GET /v1/instances`, `GET /v1/instances/:id/conversation`), for example so a personal assistant on Telegram can tell you what your coding agent is doing. With `POLPO_GATEWAY_SESSION_CONTROL=1` it can also take over an idle session and continue it, under the same one-writer rule as the dashboard (see [Phone Takeover](#phone-takeover)). Secrets are removed from the session content the gateway returns (`POLPO_GATEWAY_REDACT=0` turns that off), and a session taken over through the gateway keeps its own permission mode only with `POLPO_GATEWAY_INHERIT_PERMISSION_MODE=1`. When the agent is the only way to reach you, the host can let it choose among some modes (`POLPO_GATEWAY_ALLOWED_PERMISSION_MODES=default,auto`, never bypass) and put the session's approvals to you, bringing back your answer in your words (`POLPO_GATEWAY_APPROVALS=1`).
+The gateway can also follow the sessions running right now (`GET /v1/instances`, `GET /v1/instances/:id/conversation`), for example so a personal assistant on Telegram can tell you what your coding agent is doing. With `POLPO_GATEWAY_SESSION_CONTROL=1` it can also take over an idle session and continue it, under the same one-writer rule as the dashboard (see [Phone Takeover](#phone-takeover)). Secrets are removed from the session content the gateway returns (`POLPO_GATEWAY_REDACT=0` turns that off), and a session taken over through the gateway keeps its own permission mode only with `POLPO_GATEWAY_INHERIT_PERMISSION_MODE=1`. When the agent is the only way to reach you, the host can let it choose among some modes (`POLPO_GATEWAY_ALLOWED_PERMISSION_MODES=default,auto`, never bypass) and put the session's approvals to you, bringing back your answer in your words (`POLPO_GATEWAY_APPROVALS=1`). It can also start a session of its own (`POST /v1/instances`), and with `POLPO_GATEWAY_BROWSER=1` one that works in your Chrome on the sites it names: polpo decides on every browser action, reading and filling on those sites are free, and each commit is put to you unless you approved the plan, with a screenshot, beforehand (see [docs/gateway.md](docs/gateway.md#browser-sessions)).
 
 Security: separate Bearer key, per-token rate limits, path-traversal defense at every fs touchpoint, sealed-artifact pattern that defeats TOCTOU, tasks in Claude's `auto` mode with anything it still asks about failing the task (`POLPO_GATEWAY_TASK_PERMISSION_MODE` selects `auto`, `default` or `bypass`), and no new dependencies. Full reference: [docs/gateway.md](docs/gateway.md). Building an AI agent that calls the gateway? See [docs/gateway-for-ai-agents.md](docs/gateway-for-ai-agents.md), a compact, agent-oriented guide.
 
@@ -793,6 +793,12 @@ Connect to `ws://<host>:<port>?role=agent&instanceId=<id>` as an agent, sending 
 | `POLPO_GATEWAY_DEFAULT_TIMEOUT_MS` | `1800000` | Timeout for a task that sends no `timeoutMs` (30 min) |
 | `POLPO_GATEWAY_MAX_TIMEOUT_MS` | `3600000` | Hard cap on per-task timeout (60 min) |
 | `POLPO_GATEWAY_MAX_UPLOAD_SIZE` | `26214400` | Per-upload byte cap (25 MB decoded) |
+| `POLPO_GATEWAY_SESSION_CONTROL` | off | `1` lets gateway callers start, take over and continue sessions |
+| `POLPO_GATEWAY_APPROVALS` | off | `1` lets a caller put the approvals of the sessions it drives to you and bring back your answer |
+| `POLPO_GATEWAY_BROWSER` | off | `1` lets a caller start browser sessions in your Chrome (needs the two above) |
+| `POLPO_BROWSER_SITES_FILE` | `~/.config/polpo/browser-sites.json` | Per-site commit levels (`free`, `plan`, `every-commit`) and the browser tools you unlock; mode 0600 |
+| `POLPO_BROWSER_GRANT_MAX_MINUTES` | `15` | Longest grant a browser plan can get (1 to 60) |
+| `POLPO_BROWSER_SCREENSHOT_MAX_BYTES` | `5242880` | Largest screenshot a browser plan may attach |
 
 ## Testing
 

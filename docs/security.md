@@ -32,6 +32,8 @@ A developer machine usually also holds SSH keys, cloud tokens and `.env` files. 
 | WebSocket `role=agent` | polpo's own sessions, hooks, bridges | the agent token, as an `Authorization: Bearer` header |
 | `/api/permission-request` | the permission server inside each Claude session | Bearer token |
 | `/v1/*` | external software (bots, CI, scripts) | the gateway Bearer key, always |
+| `/api/browser-grant` | the permission server inside a browser session | Bearer token |
+| Claude in Chrome, in a browser session | the session's agent, in your logged-in Chrome | every call reaches polpo's browser guard (`src/server/browser-guard.js`) |
 | Tunnels (cloudflared, ngrok, localtunnel, ssh) | the phone from anywhere | the same auth as the dashboard |
 | Skills install (`npx skills add`) | the dashboard | the dashboard's auth |
 
@@ -48,6 +50,7 @@ These are deliberate. Each says what an operator accepts by choosing it.
 - **IP addresses pass the `Host` check.** A page cannot make the browser send `Host: <ip>` except by calling that address directly, and the Origin check refuses that request.
 - **The tunnel's name passes while it is current.** A rotated quick-tunnel name stops passing as soon as a new one replaces it.
 - **Two tokens, one for links and one for agents.** The login token goes in the QR code and phone links, where it can leak (browser history, screenshots, the tunnel provider, which terminates TLS). It only opens the dashboard page, once, and with PIN or TOTP on it leads only to that step. The agent token opens the API and the WebSocket, is never put in a link, and is refused in a URL.
+- **A browser session acts in your Chrome profile.** It is logged in wherever you are. polpo, not the agent, decides on each browser call: an `ask` permission rule for the whole browser server sends every browser call to polpo in every permission mode (in `auto`, the CLI would otherwise let them through without asking), and polpo judges each action of a `browser_batch` itself, since the CLI's rules only see the outer call. Reading and filling are free on the session's sites only; commits need a grant you approved from a screenshot, or your answer each time. The guard does not cover the session's other tools, which is why a browser session cannot run in `auto` mode.
 - **The gateway key is a master key.** Any holder can search every session on the host (see `docs/gateway.md`).
 
 ## Known gaps
@@ -56,6 +59,7 @@ Open items, so a reviewer does not rediscover them as new:
 
 - **Skills install** runs `npx skills add <package> -g -y` with no preview, no confirmation and an unpinned `skills` CLI. A skill is text the agent follows as instructions.
 - **localtunnel** 2.0.2 is unmaintained and pulls `axios` 0.21.4, which has known advisories. Auto-detect falls back to it (and to the loca.lt service) when cloudflared is missing.
+- **Browser pages are followed from tool results.** A redirect that lands after a result is seen at the next one, and the guard cannot tell a password field from another field: the agent is told never to type credentials, and every commit put to you says what it does and on which page.
 - **`uuid` 9** has an advisory for `v3`, `v5` and `v6` with a caller-supplied buffer. Polpo only calls `v4()` without one, so it is not affected.
 
 ## Checks

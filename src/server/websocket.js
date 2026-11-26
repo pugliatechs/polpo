@@ -559,7 +559,7 @@ function setupWebSocket(server, instanceManager, getAuthState, pushManager, outb
       ws.on('message', (raw) => {
         try {
           const msg = JSON.parse(raw);
-          handleAgentMessage(instanceId, msg, instanceManager, activeWatchers);
+          handleAgentMessage(instanceId, msg, instanceManager, activeWatchers, opts.browserGuard || null);
         } catch (e) {
           // ignore malformed messages
         }
@@ -652,8 +652,14 @@ function handleDashboardMessage(msg, instanceManager, controller, broadcastToDas
   }
 }
 
-function handleAgentMessage(instanceId, msg, instanceManager, activeWatchers) {
+function handleAgentMessage(instanceId, msg, instanceManager, activeWatchers, browserGuard) {
   switch (msg.type) {
+    case 'browser_tabs':
+      // Where each tab of a browser session is now, from a tool result's
+      // Tab Context. Only for this connection's own instance, and only
+      // when it is a browser session; observeTabs checks every entry.
+      if (browserGuard && (Array.isArray(msg.tabs) || msg.tabs === null)) browserGuard.observeTabs(instanceId, msg.tabs);
+      break;
     case 'status':
       // If JSONL watcher is active, it provides status via stop_reason detection
       if (!activeWatchers.has(instanceId)) {
